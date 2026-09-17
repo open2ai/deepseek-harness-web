@@ -301,7 +301,7 @@ export interface ChatStore {
   /** 上下文占用投影（`contextPressure` + `contextBreakdown`）：发送按钮左侧那个环的数据源。
    *  null = 该 dsh 没有这两条投影（整个环不渲染）；两条可各自缺失。 */
   contextFacts: Signal<{ pressure?: ContextPressure; breakdown?: ContextBreakdown } | null>
-  /** 「/」菜单目录(host 命令+技能)；null=尚未拉到 */
+  /** 「/」菜单目录(host 命令+技能)；null=还没有可用快照（cold/failed，见 `needsSlashList`） */
   slashCatalog: Signal<{ commands: SlashCommandInfo[]; skills: SlashSkillInfo[] } | null>
   /** 「@」引用候选(文件/目录+会话)；null=尚未拉到/换会话清空；query=该候选对应的查询串 */
   atCatalog: Signal<{ query: string; files: AtFileRef[]; sessions: AtSessionRef[] } | null>
@@ -375,8 +375,12 @@ export interface ChatStore {
   steerQueueItem(id: string): void
   /** 把当前所有排队消息按顺序转成插话（输入为空时的加速键手势） */
   steerWholeQueue(): void
-  /** 行首 `/` 菜单需要目录时调用(宿主异步回 slashCatalog；并发去重) */
-  requestSlashList(): void
+  /** 行首 `/` 菜单需要目录时调用(宿主异步回 slashCatalog；在飞则并入、失败后按间隔自动重试)。
+   *  `force = true` 为**按需强拉**（跳过失败后的间隔限制），用于回车裁决 `/xxx` 前补一次。 */
+  requestSlashList(force?: boolean): void
+  /** 手头没有可用「/」目录且没有在飞的拉取（cold/failed）——菜单据此决定要不要补拉。
+   *  「ready + 空」为 false：那是服务端明确回答「这个会话没有命令/技能」。 */
+  needsSlashList(): boolean
   /** 按查询串请求「@」候选(文件/目录+会话)；宿主异步回 atCatalog，最新查询 wins */
   requestAtList(query: string): void
   /** 执行一条 dsh 斜杠命令(发宿主 slashRun；清空输入) */

@@ -15,8 +15,9 @@ export function slashTrigger(store: ChatStore): TriggerDef {
       // 已在「/指令 参数…」阶段：名称已带一个完整 token + 空格 → 不再弹菜单，把参数留在输入框
       // （避免插入了 "/name " 后菜单残留/随击键再冒出来）
       if (/^\S+[\s　]/.test(line.slice(1))) return null
-      // 目录缺失时触发拉取（store 内部去重，成功后信号更新自动重渲）
-      if (!store.slashCatalog.value) store.requestSlashList()
+      // 目录不可用时按需补拉（store 内部：在飞则并入、失败后按间隔自动重试、已有快照则不动）。
+      // 判据是**状态**而不是「目录空不空」：服务端明确回答「没有命令/技能」时不该无谓重拉。
+      if (store.needsSlashList()) store.requestSlashList()
       return { query: line.slice(1), start: lineStart }
     },
     rows(): TriggerRow[] {

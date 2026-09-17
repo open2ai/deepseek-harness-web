@@ -1459,7 +1459,17 @@ export class DshService {
         return this.newSession();
     }
 
-    /** 该工作区内可复用的现存空会话（blank 且未归档、属于该工作区），无则 undefined ——“复用现成新会话”，避免反复新建越积越多。 */
+    /**
+     * 该工作区内可复用的现存空会话（blank、未归档、**且确实登记在该工作区成员表里**），无则 undefined。
+     *
+     * 「复用现成的新会话」避免反复新建越积越多，但**判据只能是成员表**：
+     *   - 上游网页端也是这么判的（`summary.blank && summary.cwd === workspace.path && workspace.sessionIds.includes(id)`）；
+     *   - 曾经这里还允许「cwd 与工作区一致但未登记」的空白会话，那是个**坑**：复用它之后要补登记，
+     *     而补登记当时走的是 `workspace.insertSessionBefore`（**排序** API，对未登记的会话直接抛
+     *     `WorkspaceMoveInvalidError: the session is not accounted`），异常被吞 → 这条会话谁都不属于，
+     *     空白时列表里不显示、**一开口就冒进「未分组」**（真机现象：在工作区里点「新开会话」却落到未分组）。
+     *     现在改成只复用成员（非成员一律走下面的新建，`session.create { workspaceId }` 由宿主 attach 登记）。
+     */
     private async findReusableBlank(workspaceId: string): Promise<string | undefined> {
         try {
             const { items: wsItems, archivedSessionIds } = await this.listWorkspaces();
@@ -1467,22 +1477,15 @@ export class DshService {
             if (!ws) {
                 return undefined;
             }
-            const wsPath = ws.path ? normalizePath(ws.path) : undefined;
             const archived = new Set(archivedSessionIds ?? []);
             const memberIds = new Set(ws.sessionIds ?? []);
             const sessionList = await this.call<{
-                items?: Array<{ sessionId?: string; blank?: boolean; origin?: string; cwd?: string }>;
+                items?: Array<{ sessionId?: string; blank?: boolean; origin?: string }>;
             }>('session.list', {});
-            const rows = (sessionList.items ?? []).filter(
-                (s) => !!s.sessionId && s.blank && s.origin !== 'subagent' && !archived.has(s.sessionId!)
-            );
             // 仅复用**属于目标工作区**的空白会话：既优先当前正在用的(避免反复“新建”跳去更旧的空会话)，
             // 也绝不跨工作区复用——否则切到新工作区后“新建”会复用旧工作区的当前空白，导致新会话没归对该工作区。
-            // （rc1 新建会话必 attach 到目标工作区，故 belongs 对真正的新建空白恒真。）
-            const members = rows.filter(
-                (s) =>
-                    memberIds.has(s.sessionId!) ||
-                    (wsPath !== undefined && typeof s.cwd === 'string' && normalizePath(s.cwd) === wsPath)
+            const members = (sessionList.items ?? []).filter(
+                (s) => !!s.sessionId && s.blank === true && s.origin !== 'subagent' && !archived.has(s.sessionId!) && memberIds.has(s.sessionId!)
             );
             const currentFirst = members.find((s) => s.sessionId === this.currentSessionId);
             return currentFirst ? currentFirst.sessionId : members[0]?.sessionId;
@@ -1540,12 +1543,21 @@ export class DshService {
      * 把**尚未归属任何工作区**的会话登记进指定工作区（上游 `workspace.insertSessionBefore` 的登记用途）。
      *
      * 为什么需要：`session.create` 只在**新建时**归属工作区 —— 会话一旦以别的归属（或更早版本、
-     * 别的客户端）建出来，就只能靠这个接口补登记。插件侧栏按「成员表 **或** cwd 与工作区一致」
-     * 展示会话（见 listWorkspaceSessions），所以会出现在侧栏里属于某工作区、而网页端仍显示「未分组」
-     * 的会话 —— 补登记之后两边就一致了。
+     * 别的客户端）建出来，就只能靠这个接口补登记。侧栏与网页端的「未分组」判据都是「不在任何工作区的
+     * 成员表里」（`listWorkspaceSessions` / `listUngroupedSessions` 都只看成员表，**不按 cwd 推断**），
+     * 所以缺登记时它会两边都显示成未分组 —— 补登记之后两边就一致了。
      *
      * **只登记，不搬家**：已经在**任何**工作区成员表里的会话一律不动（那属于"移动"，
      * 不该由"用户点开看了一眼"触发）；工作区不存在也不写。
+     *
+     * **实现用「幂等收养」而不是 `workspace.insertSessionBefore`**：后者是**排序** API ——
+     * `if (!record.sessionIds.includes(id)) throw WorkspaceMoveInvalidError('the session is not accounted')`，
+     * 对"还没登记"的会话必然抛错（这个方法存在的意义正是这种会话，所以那条路等于永远无效）。
+     * 真正能把已有会话挂进工作区的是 `session.create { sessionId, workspaceId }`：宿主会
+     * `ensureSession(id, workspace.path, checkPersistedIdentity=true)` **收养**这条已有会话（历史与 id 都不变），
+     * 校验通过后 `workspace.attachSession(id)` 写进成员表；cwd 与工作区路径不一致时明确抛
+     * `ApiSessionCwdConflict`（不会把会话挪到错的地方）。
+     * 代价：收养会把该会话 resume 成活 agent（等于打开它一次）。
      * @param workspaceId - 目标工作区
      * @param sessionId - 要登记进去的会话
      * @returns 真的补登记了才返回 true
@@ -1560,7 +1572,8 @@ export class DshService {
         if (claimed) {
             return false;
         }
-        await this.call('workspace.insertSessionBefore', { workspaceId, sessionId });
+        // 幂等收养：同一个 id 再调一次不会新建会话（宿主按 id 收养），只在 cwd 不符时抛冲突。
+        await createSession({ sessionId, workspaceId });
         return true;
     }
 
@@ -1764,6 +1777,8 @@ export class DshService {
             }>;
         }>('session.list', {});
         const out: Array<{ sessionId: string; title: string; running: boolean; blank: boolean; current: boolean }> = [];
+        /** 诊断用：未分组会话按 cwd 归类（见方法末尾的日志）。 */
+        const cwdCount = new Map<string, number>();
         for (const s of sessionList.items ?? []) {
             if (!s.sessionId || s.origin === 'subagent' || archived.has(s.sessionId)) {
                 continue;
@@ -1775,6 +1790,8 @@ export class DshService {
             if (s.blank && !s.running && !isCurrent) {
                 continue;
             }
+            const cwdKey = typeof s.cwd === 'string' && s.cwd !== '' ? s.cwd : '(无 cwd)';
+            cwdCount.set(cwdKey, (cwdCount.get(cwdKey) ?? 0) + 1);
             out.push({
                 sessionId: s.sessionId,
                 title: s.blank
@@ -1788,6 +1805,21 @@ export class DshService {
                 blank: !!s.blank,
                 current: isCurrent,
             });
+        }
+        // 诊断（真机排查「会话为什么在未分组」）：**未分组会话按 cwd 归类**，并把各工作区的路径与成员数一并打出。
+        // 判读：某个 cwd 与某工作区路径相同却仍在这里 → 宿主那一侧的 cwd 过滤/索引没认它（不是"没有归属"）；
+        // cwd 五花八门或为空 → 这些会话本来就没归属（旧版本建的 / 网页端 / 终端建的）。
+        // 宿主的工作区投影原样是 `record.sessionIds.filter(id => sessionPath(id) === record.path)`（见 dsh-workspace entity）。
+        if (out.length > 0) {
+            const top = [...cwdCount].sort((a, b) => b[1] - a[1]).slice(0, 6);
+            console.warn(
+                `[dsh-ws] ungrouped=${out.length}；工作区=${(wsItems ?? [])
+                    .map((w) => `${w.path}(${(w.sessionIds ?? []).length})`)
+                    .join(' , ') || '(无)'}`
+            );
+            console.warn(
+                `[dsh-ws] ungrouped cwd 分布（前 ${top.length}）：${top.map(([cwd, n]) => `${n}× ${cwd}`).join(' | ')}`
+            );
         }
         out.sort((a, b) => Number(b.current) - Number(a.current) || Number(b.running) - Number(a.running));
         return out;
@@ -1806,6 +1838,12 @@ export class DshService {
             throw new Error('DSH 服务不可用，无法分叉会话');
         }
         const childId = await forkSessionRpc(sessionId, atSeq);
+        // 归属：子会话**继承源会话的工作区**。
+        // 为什么必须自己登记：`session.fork` 只在**源会话**上做文章（复制历史、按 cwd 继承工作目录），
+        // 不会把子会话写进任何工作区的成员表；而侧栏/网页端的「未分组」判据**只看成员表**（不按 cwd 推断），
+        // 于是分叉出来的会话一落地就掉进「未分组」（真机现象）——与当初「新建会话」那次是同一个坑。
+        // 源会话自己就没归属（未分组）时**不动**：那不是搬家，是"跟着源走"。
+        await this.bindForkChild(sessionId, childId);
         let title: string | undefined;
         try {
             const source = await this.durableTitleFor(sessionId);
@@ -1823,6 +1861,29 @@ export class DshService {
                 `title=${title ?? '(源会话无标题，未改名)'}`
         );
         return { sessionId: childId, ...(title === undefined ? {} : { title }) };
+    }
+
+    /**
+     * 把分叉出来的子会话登记进**源会话所在的工作区**（源会话没归属时不动）。
+     *
+     * 为什么要有这一步：`session.fork` 只复制历史与 cwd，**不会**写工作区成员表；而「未分组」的判据
+     * 就是「不在任何工作区的成员表里」——不登记就会分叉完立刻掉进未分组。
+     * 失败只记日志：分叉本身已经成功，归属没写上不该把它算成失败（用户可再点开该会话补登记）。
+     * @param sourceId - 源会话。
+     * @param childId - 刚建好的子会话。
+     */
+    private async bindForkChild(sourceId: string, childId: string): Promise<void> {
+        try {
+            const { items } = await this.listWorkspaces();
+            const owner = (items ?? []).find((w) => (w.sessionIds ?? []).includes(sourceId));
+            if (owner === undefined) {
+                return;
+            }
+            const bound = await this.bindSessionToWorkspace(owner.workspaceId, childId);
+            console.warn(`[dsh-fork] 子会话归属：workspace=${owner.workspaceId} bound=${String(bound)}`);
+        } catch (e) {
+            console.warn(`[dsh-fork] 子会话归属登记失败（分叉本身已完成）：${e instanceof Error ? e.message : String(e)}`);
+        }
     }
 
     /** 指定会话的 durable 标题（空串 = 它还没有标题）；读列表失败也返回空串，由调用方决定跳过。 */

@@ -56,10 +56,10 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
         return
       }
       if (!cat) {
-        // 目录尚未拉到(换会话后首条即发 /xxx)：先挂起、取目录，待目录到达再裁决，
-        // 避免把 /compact 之类当普通文本发给 agent
+        // 目录还没拿到(换会话后首条即发 /xxx，或上一次拉取失败)：先挂起、**按需强拉**一次，待目录到达再裁决，
+        // 避免把 /compact 之类当普通文本发给 agent。强拉跳过失败后的间隔限制 —— 回车就是「现在就要」。
         catalogs.holdPendingSlash(msg)
-        requestSlashList()
+        requestSlashList(true)
         return
       }
       // cat 已到但首词未命中(技能/未知斜杠 token)：落回普通发送(技能走 chatSend、未知 token 走消息，与上游一致)

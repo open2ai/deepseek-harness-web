@@ -592,10 +592,19 @@ export async function getSessionProjections(sessionId: string): Promise<Record<s
 }
 // ---------- 会话操作（适配 dsh v0.1.5-rc.2；对应 session-controller 远程方法，载荷统一
 //   args{ request: Session*Request }，契约见 docs/design/04） ----------
-/** 新建会话（上游 `session/create`；request 的 workspaceId / cwd 二选一）→ sessionId。 */
-export async function createSession(opts: { workspaceId?: string; cwd?: string } = {}): Promise<string> {
+/**
+ * 新建 / **收养**会话（上游 `session/create`；`workspaceId` 与 `cwd` 二选一）→ sessionId。
+ *
+ * `sessionId` 非空 = **幂等收养**：宿主按该 id 找回**已有**会话（历史与 id 都不变），
+ * 用 `checkPersistedIdentity=true` 校验它的持久身份（cwd 必须与给定位置一致，否则抛
+ * `session/cwd-conflict`），然后把它登记进目标工作区 —— 这是**唯一**能把已有会话挂进工作区的路
+ * （工作区控制器只有 `workspace/insertSessionBefore`，那是排序 API，对未登记的会话会抛
+ * `workspace/move-invalid`）。代价：收养会 resume 该会话（等于打开它一次）。
+ */
+export async function createSession(opts: { workspaceId?: string; cwd?: string; sessionId?: string } = {}): Promise<string> {
     const value = await rpcCall<{ sessionId: string }>('session.create', {
         ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : opts.cwd ? { cwd: opts.cwd } : {}),
+        ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
     });
     return value.sessionId;
 }

@@ -54,8 +54,8 @@ export interface SelfDrawnTitlebarCtx {
     displayName(w: { path: string; title: string }): string;
     /** 拉某工作区会话(共享 helper listWorkspaceSessionsOf) */
     listWorkspaceSessions(wsId: string): Promise<SelfSessionRow[]>;
-    /** 切工作区并开新会话(共享 helper wsSwitchNew) */
-    wsSwitchNew(wsId: string): Promise<void>;
+    /** 切工作区并开新会话(共享 helper wsSwitchNew)；**自己兜错并回报成败**，不往外抛 */
+    wsSwitchNew(wsId: string): Promise<boolean>;
     /** 恢复会话(共享 helper wsRestore) */
     wsRestore(wsId: string, sessionId: string, blank: boolean): Promise<void>;
     /** 新建工作区(共享 helper wsCreateNew) */
@@ -122,8 +122,9 @@ export function installSelfDrawnTitlebarMessages(
                         const sessions = await ctx.listWorkspaceSessions(String(msg.workspaceId));
                         ctx.post({ type: 'wsDropdownSessions', workspaceId: msg.workspaceId, sessions });
                     } else if (op === 'wsnew' && msg.workspaceId) {
-                        await ctx.wsSwitchNew(String(msg.workspaceId));
-                        ctx.post({ type: 'wsActionDone', ok: true });
+                        // wsSwitchNew 自己已报错：这里只回报成败，别让它再抛一次被下面兜住（会重复弹一条）
+                        const ok = await ctx.wsSwitchNew(String(msg.workspaceId));
+                        ctx.post({ type: 'wsActionDone', ok });
                     } else if (op === 'session' && msg.workspaceId && msg.sessionId) {
                         await ctx.wsRestore(String(msg.workspaceId), String(msg.sessionId), msg.blank === true);
                         ctx.post({ type: 'wsActionDone', ok: true });

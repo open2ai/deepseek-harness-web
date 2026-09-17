@@ -989,9 +989,18 @@ function setupChatWebview(
             })();
         } else if (msg.type === 'slashListReq') {
             void (async () => {
-                const commands = await chatInput.listCommands();
-                const skills = await chatInput.listSkills();
-                post({ type: 'slashCatalog', commands, skills });
+                // 两侧**各自**可能拉不到（`undefined`）：只把拉到的那侧下发，缺的那侧让页面保留原值。
+                // 都拉不到时下发一个两侧皆缺的帧 = 「整次失败」，页面保留现有菜单并稍后重试；
+                // 若在这里把失败拼成空数组，一次失败就会把「/」菜单清成只剩客户端贡献的 /model。
+                const [commands, skills] = await Promise.all([chatInput.listCommands(), chatInput.listSkills()]);
+                if (commands === undefined && skills === undefined) {
+                    console.warn('[dsh-slash] 命令与技能目录都没拉到：本次不下发目录（页面保留现有菜单，稍后重试）');
+                }
+                post({
+                    type: 'slashCatalog',
+                    ...(commands === undefined ? {} : { commands }),
+                    ...(skills === undefined ? {} : { skills }),
+                });
             })();
         } else if (msg.type === 'atListReq') {
             void (async () => {
@@ -1288,18 +1297,33 @@ async function listWorkspaceSessionsOf(wsId: string): Promise<WsSessionRow[]> {
     return dsh.listWorkspaceSessions(wsId) as Promise<WsSessionRow[]>;
 }
 
-/** 切到工作区并开新会话（供 QuickPick / webview dropdown 共用；调用方负责关 UI） */
-async function wsSwitchNew(wsId: string): Promise<void> {
-    if (!(await ensureChatWebview())) {
-        throw new Error('聊天视图未就绪，请先打开侧边栏 DSH 面板');
+/**
+ * 切到工作区并开新会话（供 QuickPick / webview dropdown 共用；调用方负责关 UI）。
+ *
+ * **自己兜错、返回成败**（不往外抛）：新建会话这一步失败时宿主可能已经**建好了会话但没挂上工作区**
+ * （`session/workspace-attach-failed`）—— 那种会话会以「未分组」留在列表里，必须让用户看见这条错误，
+ * 而不是"点了没反应"。报错只在这里做一次，调用方按返回值决定要不要关 UI / 报失败，避免重复弹。
+ * @returns 真的建好并切过去了才 true
+ */
+async function wsSwitchNew(wsId: string): Promise<boolean> {
+    try {
+        if (!(await ensureChatWebview())) {
+            throw new Error('聊天视图未就绪，请先打开侧边栏 DSH 面板');
+        }
+        dsh.setCurrentWorkspace(wsId);
+        await dsh.newSession(wsId);
+        postToChats({ type: 'clear' });
+        for (const w of new Set([chatTarget, chatPanel?.webview].filter((x): x is vscode.Webview => !!x))) {
+            void postChatInfo(w);
+        }
+        vscode.window.showInformationMessage('已切换工作区');
+        return true;
+    } catch (e) {
+        // 失败可能已经留下一条"建好但没归属"的会话，把原始错误一起写进控制台便于对账
+        console.warn(`[dsh-ws] 新建会话失败 ws=${wsId}：${e instanceof Error ? e.message : String(e)}`);
+        vscode.window.showErrorMessage(`新建会话失败：${e instanceof Error ? e.message : String(e)}`);
+        return false;
     }
-    dsh.setCurrentWorkspace(wsId);
-    await dsh.newSession(wsId);
-    postToChats({ type: 'clear' });
-    for (const w of new Set([chatTarget, chatPanel?.webview].filter((x): x is vscode.Webview => !!x))) {
-        void postChatInfo(w);
-    }
-    vscode.window.showInformationMessage('已切换工作区');
 }
 
 /** 把会话恢复到当前聊天（供 QuickPick / webview dropdown 共用；调用方负责关 UI）。
@@ -1608,8 +1632,10 @@ async function showWorkspacePicker(): Promise<void> {
                 }
                 refresh();
             } else if (row.action === 'wsnew' && row.workspaceId) {
-                await wsSwitchNew(row.workspaceId);
-                close();
+                // 成败由 wsSwitchNew 自己报（含"会话已建但没挂上工作区"那种失败）→ 成功才关面板
+                if (await wsSwitchNew(row.workspaceId)) {
+                    close();
+                }
             } else if (row.action === 'session' && row.workspaceId && row.sessionId) {
                 await wsRestore(row.workspaceId, row.sessionId, row.blank === true);
                 close();
@@ -1748,22 +1774,34 @@ export function activate(context: vscode.ExtensionContext) {
     // 命令：开启新会话（需先选工作区）
     context.subscriptions.push(
         vscode.commands.registerCommand('dsh.newSession', async () => {
-            if (!(await dsh.ensureRunning())) {
-                return;
+            try {
+                if (!(await dsh.ensureRunning())) {
+                    return;
+                }
+                // 先尝试取默认工作区（dsh 最新 / 当前文件夹）；取不到才提示选工作区（绝不建“未分组”会话）
+                await dsh.ensureCurrentWorkspace();
+                if (!dsh.getCurrentWorkspaceId()) {
+                    await promptWorkspaceFirst('请先选择工作区，再开启新会话');
+                    return;
+                }
+                await dsh.newSession();
+                // 广播到全部存活聊天实例（侧栏 + 编辑器面板），确保点按钮的那个一定被清成新会话
+                postToChats({ type: 'clear' });
+                for (const w of allChatWebviews()) {
+                    void postChatInfo(w);
+                }
+                vscode.window.showInformationMessage('已开启新会话');
+            } catch (e) {
+                // 兜住失败：新建这一步出错时**不会**有 `clear`/`chatInfo`/成功提示，
+                // 而且宿主可能已经建好了会话却没挂上工作区（`session/workspace-attach-failed`）——
+                // 那条会话会以「未分组」留在列表里，所以必须让用户看见原因（原先这里没有 catch，静默失败）。
+                if (isNoWorkspace(e)) {
+                    await promptWorkspaceFirst('请先选择工作区，再开启新会话');
+                    return;
+                }
+                console.warn(`[dsh-ws] 开启新会话失败：${e instanceof Error ? e.message : String(e)}`);
+                vscode.window.showErrorMessage(`开启新会话失败：${e instanceof Error ? e.message : String(e)}`);
             }
-            // 先尝试取默认工作区（dsh 最新 / 当前文件夹）；取不到才提示选工作区（绝不建“未分组”会话）
-            await dsh.ensureCurrentWorkspace();
-            if (!dsh.getCurrentWorkspaceId()) {
-                await promptWorkspaceFirst('请先选择工作区，再开启新会话');
-                return;
-            }
-            await dsh.newSession();
-            // 广播到全部存活聊天实例（侧栏 + 编辑器面板），确保点按钮的那个一定被清成新会话
-            postToChats({ type: 'clear' });
-            for (const w of allChatWebviews()) {
-                void postChatInfo(w);
-            }
-            vscode.window.showInformationMessage('已开启新会话');
         })
     );
 

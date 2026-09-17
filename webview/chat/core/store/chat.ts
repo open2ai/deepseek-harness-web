@@ -122,6 +122,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     slashCatalog: catalogs.store.slashCatalog,
     atCatalog: catalogs.store.atCatalog,
     requestSlashList: catalogs.store.requestSlashList,
+    needsSlashList: catalogs.store.needsSlashList,
     requestAtList: catalogs.store.requestAtList,
     // 选择器切片
     sel: selectors.store.sel,

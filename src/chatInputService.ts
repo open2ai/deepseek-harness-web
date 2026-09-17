@@ -44,31 +44,39 @@ export class ChatInputService {
         };
     }
 
-    /** 当前会话可用的斜杠命令目录(commands/list)；拉取失败返回空数组。 */
-    async listCommands(): Promise<DshCommandDescriptor[]> {
+    /**
+     * 当前会话可用的斜杠命令目录(commands/list)。
+     *
+     * 失败返回 `undefined`（**不是空数组**）：两者对界面是两回事 —— 空数组 = 这个会话确实没有命令，
+     * 会把「/」菜单清空；`undefined` = 本次没拉到（服务没就绪 / 会话被别的进程占着导致 RPC 失败），
+     * 页面应当**保留现有菜单**并稍后重试。原先一律返回 `[]`，一次失败就把菜单清成只剩客户端贡献项。
+     */
+    async listCommands(): Promise<DshCommandDescriptor[] | undefined> {
         try {
             if (!(await this.session.ensureRunning())) {
-                return [];
+                console.warn('[dsh-slash] commands/list: 服务未就绪，跳过');
+                return undefined;
             }
             return await listCommandsRpc(await this.session.getSession());
-        } catch {
-            return [];
+        } catch (e) {
+            console.warn(`[dsh-slash] commands/list 失败：${e instanceof Error ? e.message : String(e)}`);
+            return undefined;
         }
     }
 
-    /** 当前会话可用的技能(skills/list)；拉取失败返回空数组。失败原因打日志便于区分「端点/载荷错」与「服务确实无技能」。 */
-    async listSkills(): Promise<DshSkillEntry[]> {
+    /** 当前会话可用的技能(skills/list)。失败返回 `undefined`（含义同 listCommands，原因打日志便于区分端点错与服务无技能）。 */
+    async listSkills(): Promise<DshSkillEntry[] | undefined> {
         try {
             if (!(await this.session.ensureRunning())) {
                 console.warn('[dsh-slash] skills/list: 服务未就绪，跳过');
-                return [];
+                return undefined;
             }
             const skills = await listSkillsRpc(await this.session.getSession());
             console.warn(`[dsh-slash] skills/list ok: ${skills.length} 条${skills[0] ? `，首条 ${skills[0].name}` : ''}`);
             return skills;
         } catch (e) {
             console.warn(`[dsh-slash] skills/list 失败：${e instanceof Error ? e.message : String(e)}`);
-            return [];
+            return undefined;
         }
     }
 

@@ -200,8 +200,10 @@ export type HostToViewMessage =
       sessions?: Array<{ sessionId: string; title: string; running: boolean; blank: boolean; current?: boolean }>
     }
   | { type: 'wsActionDone'; ok?: boolean; message?: string }
-  // 「/」菜单：目录(命令+技能)与命令执行结果
-  | { type: 'slashCatalog'; commands: SlashCommandInfo[]; skills: SlashSkillInfo[] }
+  // 「/」菜单：目录(命令+技能)与命令执行结果。
+  // `slashCatalog` 两侧**都可缺**：缺 = 那一侧本次没拉到（拉取失败 / 服务没就绪），
+  // 页面据此**保留原有目录**，不要把它当成「这个会话没有命令/技能」。两侧都缺 = 整次失败。
+  | { type: 'slashCatalog'; commands?: SlashCommandInfo[]; skills?: SlashSkillInfo[] }
   | { type: 'slashResult'; ok?: boolean; command?: string; message?: string }
   // 「@」引用：候选(文件/目录 + 会话)，query=候选对应查询串
   | { type: 'atCatalog'; query: string; files: AtFileRef[]; sessions: AtSessionRef[] }
