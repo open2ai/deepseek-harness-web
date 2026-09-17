@@ -1,7 +1,7 @@
 // 宿主消息归约器：postMessage 单通道的唯一分发点。
 // 只做「消息类型 → 切片方法」的路由与少量极短的载荷兜底；形状解析一律下沉到对应切片
 // （投影解析在 status，输入区拼装在 composer）。
-import type { HostToViewMessage, PermissionOption } from '../protocol'
+import type { HostToViewMessage, PermissionOption, QueueItemView } from '../protocol'
 import type { ChatStore } from './types'
 import type { MessagesSlice } from './messages'
 import type { ComposerSlice } from './composer'
@@ -13,6 +13,7 @@ import type { PrefsSlice } from './prefs'
 import type { AttachmentsSlice } from './attachments'
 import type { OutboxSlice } from './outbox'
 import type { FeedbackSlice } from './feedback'
+import type { QueueSlice } from './queue'
 
 export interface ReducerDeps {
   messages: MessagesSlice
@@ -25,6 +26,7 @@ export interface ReducerDeps {
   attachments: AttachmentsSlice
   outbox: OutboxSlice
   feedback: FeedbackSlice
+  queue: QueueSlice
   /** 清空全部切片（clear 帧）。 */
   reset(): void
 }
@@ -33,8 +35,29 @@ export interface ReducerSlice {
   store: Pick<ChatStore, 'onHostMessage'>
 }
 
+/**
+ * 从宿主行数组里取出用户行的提交标识。
+ * 形状按宿主行模型只认 `kind`/`rpcId` 两个字段，认不出的行直接跳过（页面不解析宿主行的其余结构）。
+ */
+function userRpcIdsOf(rows: unknown): string[] {
+  if (!Array.isArray(rows)) {
+    return []
+  }
+  const out: string[] = []
+  for (const r of rows) {
+    if (r === null || typeof r !== 'object') {
+      continue
+    }
+    const row = r as { kind?: unknown; rpcId?: unknown }
+    if (row.kind === 'user' && typeof row.rpcId === 'string') {
+      out.push(row.rpcId)
+    }
+  }
+  return out
+}
+
 export function createReducer(deps: ReducerDeps): ReducerSlice {
-  const { messages, composer, catalogs, selectors, question, status, prefs, attachments, outbox, feedback, reset } = deps
+  const { messages, composer, catalogs, selectors, question, status, prefs, attachments, outbox, feedback, queue, reset } = deps
 
   function onHostMessage(m: HostToViewMessage): void {
     switch (m.type) {
@@ -49,8 +72,25 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         question.closeQuestion(m.rpcId)
         break
       case 'chatError':
-        // 本地提交失败（没有回合、没有行）：标掉那条乐观行并给错误，避免输入区一直卡在「处理中」
+        // 本地提交失败（没有回合、没有行）：标掉那条乐观行并给错误，避免输入区一直卡在「处理中」。
+        // scope='queue' 是**忙时提交失败**：那条消息还没有回合，正在跑的是别人的回合 ——
+        // 只标队列卡里那条「发送中」，绝不把对话区里未定稿的回答行定稿成错误。
+        if (m.scope === 'queue') {
+          queue.failSending(m.rpcId, m.message ?? '发送失败')
+          break
+        }
         messages.failSubmission(m.rpcId, m.message ?? '发送失败')
+        break
+      // 排队消息（整表替换）：队列不是行，它自持在队列切片里（见 store/queue）
+      case 'queue':
+        queue.applyQueue(m.sessionId, (m.items ?? []) as QueueItemView[])
+        break
+      case 'queueActionFailed':
+        queue.showActionFailure(m.op, m.code)
+        break
+      // 上下文占用（发送按钮左侧的环）：单独一条轻帧（投影值小，不必随 chatInfo 重推整串）
+      case 'context':
+        status.applyContext(m.pressure, m.breakdown)
         break
       case 'attachmentBytes':
         attachments.receiveAttachment(
@@ -90,6 +130,10 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       case 'rows':
         // 宿主下发的行（阶段 4，见 docs/design/08 §11）：渲染源切到宿主侧
         messages.applyHostRows(m.rows, m.sessionId, m.turnActive)
+        // 队列卡的本地「发送中」也按提交标识认领：这次提交可能落在对话流（空闲）或队列（忙时），
+        // 两条路都以同一个 `rpcId` 回显 —— 只认队列帧的话，竞态下会有一条「发送中」永远挂着。
+        // 同时记下「日志里已落账」的标识：pending 插话气泡据此去重（队列帧可能比行帧慢一帧）。
+        queue.noteDurable(userRpcIdsOf(m.rows))
         // 反馈是**按会话**的：会话一变就丢弃上一会话的评价，否则标记会串到新会话的行上
         feedback.onSession(m.sessionId)
         // 本轮已结束（宿主说不在跑）→ 仍挂着的提问不可能还有效，收起弹窗。

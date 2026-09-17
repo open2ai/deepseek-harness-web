@@ -176,10 +176,25 @@
     border-radius: 9px; padding: 1px 8px; font-size: 11px; line-height: 1.5;
   }
   .msg-ref-chip .ficon { font-size: 12px; }
+  /* 贴片里的短名可能很长（深层路径末段也够长）：省略，标题上给全量 token */
+  .msg-ref-chip .msg-ref-label { max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 正文内联的贴片：跟文本基线对齐，别把行高顶开 */
+  .msg.user .body .user-text .msg-ref-chip { vertical-align: -3px; margin: 0 1px; }
   .msg.user .body .user-img img {
     max-width: 100%; max-height: 240px; border-radius: 8px; display: block;
     border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
   }
+  /* pending 插话气泡（对话列末尾）：与最终用户行同款气泡，只多一层弱化 —— 它还没进日志，
+     被取用后由日志里那条真实用户行接位（见 components/message/PendingSteeringRow）。 */
+  .msg.user.pending-steering .body { opacity: 0.72; }
+  .msg.user.pending-steering .user-atts { opacity: 0.85; }
+  .pending-steer-att {
+    display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+    padding: 2px 8px; border-radius: 8px; font-size: 12px;
+    background: rgba(128, 128, 128, 0.18); color: var(--vscode-descriptionForeground, #bbb);
+  }
+  .pending-steer-att .codicon { font-size: 12px; }
+  .pending-steer-att .ufname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* markdown 正文排版（assistant 回复；行高/标题/表格/内联 code/代码块/列表等精修） */
   .msg.assistant .body {
@@ -253,7 +268,8 @@
     border-radius: 10px; background: var(--vscode-input-background, #252526);
   }
   #inputbox:focus-within { border-color: var(--vscode-focusBorder, #4daafc); }
-  /* @ 引用贴片：叠在 textarea 首行行首(absolute，不占高)；textarea 用 text-indent 只缩进首行 → 回车/换行回到最左 */
+  /* @ 引用贴片：叠在 textarea 首行行首(absolute，不占高)；textarea 用 text-indent 只缩进首行 → 回车/换行回到最左
+     （试过改成 padding-left 整块让位：光标确实不会跑到贴片左边，但正文整块右缩不好看，已回退。） */
   #refRow {
     position: absolute; top: 6px; left: 8px; z-index: 1;
     display: flex; align-items: center; gap: 4px;
@@ -328,6 +344,14 @@
     background: rgba(128,128,128,0.28);
   }
   #permBtn.active, #modelBtn.active, #modeBtn.active { background: rgba(128,128,128,0.35); }
+  /* 焦点环**自己画**，且用**中性灰**：不取 `--vscode-focusBorder`（真机反馈：该变量在某些主题下就是黄的），
+     也不给 UA 默认环留机会（那是系统强调色）。只对键盘可达（`:focus-visible`）显示，鼠标点击不画。 */
+  #attach:focus, #permBtn:focus, #modelBtn:focus, #modeBtn:focus, #send:focus, .ctx-trigger:focus { outline: none; }
+  #attach:focus-visible, #permBtn:focus-visible, #modelBtn:focus-visible, #modeBtn:focus-visible,
+  #send:focus-visible, .ctx-trigger:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(128, 128, 128, 0.7);
+  }
   #modeBtn.readonly { opacity: 0.55; cursor: default; }
   #modeBtn.readonly:hover { background: none; }
   /* 图标 + 选择文字作为一个紧凑单元；窄面板可收缩，避免把右侧按钮挤出可视区 */
@@ -403,6 +427,57 @@
     color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground, #ddd));
   }
   .popup .opt.reason { padding-left: 18px; font-size: 11px; }
+  /* 模型弹窗：二级选择（第一级两行入口 → 第二级列表；结构照上游 ModelSelect，视觉沿用本插件的列表语言） */
+  .mp { display: flex; flex-direction: column; min-width: 0; }
+  .mp-pane { display: flex; flex-direction: column; min-width: 0; }
+  .mp-head { display: flex; align-items: center; gap: 4px; padding: 2px 4px 4px; }
+  .mp-back {
+    display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+    padding: 0; border: none; border-radius: 4px; background: none; color: var(--vscode-descriptionForeground, #999);
+    cursor: pointer; flex: none;
+  }
+  .mp-back:hover { background: rgba(128,128,128,0.28); color: var(--vscode-foreground, #ddd); }
+  .mp-back .codicon { font-size: 13px; line-height: 1; }
+  .mp-head-title { font-size: 12px; font-weight: 600; color: var(--vscode-foreground, #ddd); }
+  /* 第一级的两行：左标签 + 右当前值（省略号）+ 右箭头 */
+  .mp-cell {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+    padding: 6px 8px; border: none; border-radius: 6px; background: none; color: inherit;
+    font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+  }
+  .mp-cell-label { flex: none; }
+  .mp-cell-value {
+    flex: 1 1 auto; min-width: 0; text-align: right; color: var(--vscode-descriptionForeground, #999);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mp-cell-chev { flex: none; font-size: 12px; color: var(--vscode-descriptionForeground, #999); }
+  /* 第二级列表：自身滚动（分组多时弹窗不无限长） */
+  .mp-list { display: flex; flex-direction: column; min-width: 0; max-height: 46vh; overflow-y: auto; }
+  .mp-opt {
+    display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
+    padding: 5px 8px; border: none; border-radius: 5px; background: none; color: inherit;
+    font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+  }
+  /* 一级两行入口（「模型」「推理等级」）：**中性灰底 + 无焦点环**。
+     用户明确：一级不要主题色的整行底，用灰的就行（列表光标那套底色只给二级用）。 */
+  .mp-cell:hover, .mp-cell:focus, .mp-cell:focus-visible {
+    background: rgba(128, 128, 128, 0.25);
+    color: var(--vscode-foreground, #ddd);
+    outline: none;
+    box-shadow: none;
+  }
+  /* 二级列表（模型 / 推理等级）：与权限那类列表（`.popup .opt`）**同一套底色**，整行铺底、不画焦点环。
+     真机反馈：自绘的焦点环在某些主题下就是一圈黄；列表光标本来就该是底色。 */
+  .mp-opt:not(.mp-cell):hover {
+    background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.25));
+  }
+  .mp-opt:not(.mp-cell):focus, .mp-opt:not(.mp-cell):focus-visible {
+    background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.35));
+    color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground, #ddd));
+    outline: none;
+    box-shadow: none;
+  }
+  .mp-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* 输入触发器菜单("/" 命令、"@ " 引用等)：名称+描述两段式，略宽、描述超长省略 */
   #triggerPopup {
     width: min(340px, 92vw);
@@ -426,6 +501,10 @@
     color: var(--vscode-textLink-foreground, var(--vscode-charts-blue, #4daafc));
     font-weight: 700;
   }
+  /* 选中行整行铺主题选中底、文字转主题选中前景色。浅色主题下这套底与链接色常常**同为蓝**
+     （`list.activeSelectionBackground` 蓝底 + `textLink` 蓝字）→ 命中片段糊进底色里看不见。
+     选中行里让高亮跟着行文字色走，区分只剩加粗（有底色在，加粗已足够醒目）。 */
+  #triggerPopup .opt.selected .trigger-hl { color: inherit; }
   /* 选项小图标（codicon 细线风格）：文件夹/文件/对话 */
   #triggerPopup .trigger-ico {
     font-size: 13px;
@@ -482,8 +561,10 @@
     flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-size: 11px; opacity: 0.72;
   }
+  /* 发送区（上下文环 + 发送钮）：同组右对齐 —— auto 外边距挂在组上，
+     不能挂在 #send 上（那样环会被留在左边、离发送钮很远） */
+  .send-group { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; flex: none; }
   #send {
-    margin-left: auto;
     width: 24px; height: 24px; border-radius: 50%; border: none;
     background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff);
     cursor: pointer; flex: none; padding: 0;
@@ -496,6 +577,91 @@
   #send:hover { background: var(--vscode-button-hoverBackground, #1177bb); }
   #send:disabled { opacity: 0.4; cursor: default; }
   #send.stop { background: var(--vscode-errorForeground, #f14c4c); }
+
+  /* 上下文占用环（发送按钮左侧）：环 + 自己的明细弹窗。数据缺失时整个环不渲染（见 components/ContextMeter）。 */
+  .ctx-meter { position: relative; display: inline-flex; flex: none; }
+  .ctx-trigger {
+    width: 24px; height: 24px; padding: 0; border: none; border-radius: 50%;
+    background: none; color: var(--vscode-descriptionForeground, #999);
+    cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ctx-trigger:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); color: var(--vscode-foreground, #ddd); }
+  .ctx-trigger svg { display: block; }
+  .ctx-track { fill: none; stroke: var(--vscode-panel-border, rgba(255,255,255,0.25)); stroke-width: 2px; }
+  .ctx-fill { fill: none; stroke: currentColor; stroke-width: 2px; stroke-linecap: round; }
+  /* 明细弹窗：向上展开、右边缘对齐自己那个环（输入区在窗口底部，向下会被状态栏截断） */
+  .ctx-pop {
+    position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 100;
+    box-sizing: border-box;
+    /* 宽度**自适应内容**：默认比固定 264 窄，数据长（更大的 token 数、更长的文案）时跟着长；
+       上限钉在视口内 —— 既不写死宽度，也不允许顶出面板。行内数值不省略（见 .ctx-row）。 */
+    width: max-content;
+    min-width: min(180px, calc(100vw - 24px));
+    max-width: min(340px, calc(100vw - 24px));
+    padding: 12px;
+    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border-radius: 12px;
+    background: var(--vscode-editorWidget-background, rgba(30,30,30,0.98));
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+    font-size: 12px; line-height: 20px; color: var(--vscode-descriptionForeground, #ccc);
+  }
+  .ctx-pop-head { display: flex; align-items: center; gap: 6px; }
+  .ctx-headline { color: var(--vscode-descriptionForeground, #888); }
+  .ctx-percent { color: var(--vscode-foreground, #ddd); font-weight: 500; }
+  .ctx-figures { margin-left: auto; color: var(--vscode-foreground, #ddd); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .ctx-bar {
+    display: flex; gap: 1px; height: 4px; margin: 10px 0 12px;
+    border-radius: 999px; background: rgba(128, 128, 128, 0.28); overflow: hidden;
+  }
+  .ctx-seg { flex: none; min-width: 2px; height: 100%; border-radius: 1px; background: var(--ctx-tint, var(--vscode-descriptionForeground, #999)); }
+  .ctx-swatch {
+    display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px;
+    vertical-align: baseline; background: var(--ctx-tint, var(--vscode-descriptionForeground, #999));
+  }
+  /* 三段配色：系统提示词（灰蓝）/ 工具（紫）/ 其余对话（蓝）—— 与明细行的色块同源 */
+  .ctx-seg.is-system, .ctx-swatch.is-system { --ctx-tint: #8b95a5; }
+  .ctx-seg.is-tools, .ctx-swatch.is-tools { --ctx-tint: #a78bfa; }
+  .ctx-seg.is-messages, .ctx-swatch.is-messages { --ctx-tint: #4daafc; }
+  .ctx-rows { margin: 6px 0 0; }
+  .ctx-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .ctx-row dt { color: var(--vscode-descriptionForeground, #ccc); }
+  .ctx-row dd { margin: 0; color: var(--vscode-foreground, #ddd); font-variant-numeric: tabular-nums; }
+
+  /* ---- 窄面板让位（媒体查询按 webview 视口 = 侧栏/面板宽度） ----
+     输入条这一排的最小宽度 ≈ 图标 22×4 + 环 24 + 发送 24 + 间距 16 + 输入条内距 12 + #composer 内距 24 ≈ 200px；
+     再窄就会把**发送钮挤出输入框边框**（它 flex:none、又在最右，溢出全落在它身上）。故逐档让位：
+       ≤380px 先收间距 → ≤320px 再收图标与两侧内距、并收起三处文字 label → ≤280px 把环再缩一档。
+     注意：**任何一档都不隐藏功能**（button 与环始终在），只调间距与尺寸。 */
+  @media (max-width: 380px) {
+    /* 图标之间 4→2、选择器内部 3→2、发送区 2→1，右侧内距 10→6 */
+    #inputbar { gap: 2px; padding-right: 6px; }
+    .sel-group { gap: 2px; }
+    .send-group { gap: 1px; }
+  }
+  @media (max-width: 320px) {
+    /* 文字 label 收起：这个宽度下它们本来已被压成一条省略号，收掉换回等距图标（完整值仍在按钮 title 里） */
+    .sel-label { display: none; }
+    /* 一排六个控件各缩 2px，内距再各收 4px */
+    #attach, #permBtn, #modelBtn, #modeBtn { width: 20px; height: 20px; }
+    .ctx-trigger { width: 22px; height: 22px; }
+    #send { width: 22px; height: 22px; }
+    #composer { padding-left: 8px; padding-right: 8px; }
+  }
+  @media (max-width: 280px) {
+    /* 最后一步**不藏功能**：环只是再缩一档（藏起来会让人以为功能没了）。
+       此时整排 ≈ 图标 20×4 + 环 18 + 发送 22 + 间距 + 内距 ≈ 161px，仍在侧栏可达宽度之内。 */
+    .ctx-trigger { width: 18px; height: 18px; }
+    .ctx-trigger svg { width: 12px; height: 12px; }
+  }
+  /* 会话统计 / Token 用量两卡（居中一行）：收窄时**渐进让位** —— 先丢次读数、再丢主读数，
+     两段之间由 flex 收缩 + 省略号自然过渡；**图标始终保留**（数值在按钮 title 与自己的明细卡里）。 */
+  @media (max-width: 480px) {
+    .sp-sep, .sp-sep + .sp-text { display: none; }
+  }
+  @media (max-width: 340px) {
+    .sp-pill { padding: 0 4px; }
+    .sp-ico + .sp-text { display: none; }
+  }
 
   /* 统计脚注 */
   .stats {
@@ -591,6 +757,64 @@
   .todo-item[data-status='pending'] .todo-glyph { color: var(--vscode-descriptionForeground, #888); }
   /* 单行省略：长任务名不换行（清单是速览，不是正文） */
   .todo-content { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 排队卡片（输入框上方）：忙时发出去的消息在这里等回合边界，可编辑 / 删除 / 转插话。
+     容器与任务清单同款；条目是过渡态，同样给列表封顶高度，别把输入框挤出视野 */
+  .queue-card {
+    flex: none; margin: 0 0 6px; overflow: hidden;
+    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border-radius: 12px;
+    background: var(--vscode-editorWidget-background, rgba(0,0,0,0.25));
+  }
+  .queue-body { display: flex; flex-direction: column; gap: 8px; padding: 6px 12px; }
+  .queue-head {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 0; border: none; background: transparent; text-align: left; cursor: pointer;
+    color: inherit; font: inherit;
+  }
+  .queue-lead { flex: none; font-size: 14px; line-height: 1; color: var(--vscode-descriptionForeground, #999); }
+  .queue-title {
+    flex: 1 1 auto; min-width: 0; overflow: hidden;
+    font-size: 13px; line-height: 24px; font-weight: 500;
+    color: var(--vscode-foreground, #ddd); text-overflow: ellipsis; white-space: nowrap;
+  }
+  .queue-chev { flex: none; font-size: 14px; line-height: 1; color: var(--vscode-descriptionForeground, #999); }
+  .queue-list {
+    display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0;
+    list-style: none; max-height: 180px; overflow-y: auto;
+  }
+  .queue-item { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; line-height: 20px; }
+  .queue-glyph { flex: none; width: 16px; font-size: 13px; line-height: 1; text-align: center; color: var(--vscode-descriptionForeground, #999); }
+  /* 插话项（已在下一步待取用）用链接色区分于排队项 */
+  .queue-item[data-placement='steering'] .queue-glyph { color: var(--vscode-textLink-foreground, #4daafc); }
+  .queue-main { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .queue-atts { display: flex; align-items: center; gap: 4px; flex: none; max-width: 45%; overflow: hidden; }
+  .queue-att {
+    flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 1px 6px; border-radius: 6px; font-size: 11.5px;
+    background: var(--vscode-badge-background, rgba(128,128,128,0.18));
+    color: var(--vscode-descriptionForeground, #bbb);
+  }
+  .queue-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground, #ccc); }
+  .queue-item.is-sending .queue-text { opacity: 0.7; }
+  .queue-editor {
+    flex: 1 1 auto; min-width: 0; height: 22px; padding: 0 6px;
+    border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.18));
+    border-radius: 6px; background: var(--vscode-input-background, rgba(0,0,0,0.2));
+    color: var(--vscode-input-foreground, #ddd); font: inherit; font-size: 12.5px;
+  }
+  .queue-editor:focus { outline: 1px solid var(--vscode-focusBorder, #007fd4); }
+  .queue-actions { flex: none; display: flex; align-items: center; gap: 2px; }
+  .queue-act {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; padding: 0; border: none; border-radius: 6px; cursor: pointer;
+    background: none; color: var(--vscode-descriptionForeground, #999);
+  }
+  .queue-act .codicon { font-size: 13px; line-height: 1; }
+  .queue-act:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); color: var(--vscode-foreground, #ddd); }
+  .queue-act:disabled { opacity: 0.4; cursor: default; }
+  .queue-spin { font-size: 13px; color: var(--vscode-descriptionForeground, #999); }
+  .queue-status { flex: none; font-size: 11.5px; color: var(--vscode-descriptionForeground, #999); white-space: nowrap; }
+  .queue-status.is-error { color: var(--vscode-errorForeground, #f48771); }
   /* 用量 / 用时 图标+弹窗 */
   .turn-meta { position: relative; display: flex; gap: 6px; margin-top: 3px; }
   .tm-btn {
@@ -716,7 +940,8 @@
   /* 动作区(复制/分叉/反馈/用量/用时)整段不压缩：窄栏时挤占左侧时间标签(出省略号)，不换行 */
   .msg-meta .msg-actions { flex: none; min-width: 0; }
 
-  /* 消息操作按钮 */
+  /* 消息操作按钮。**顺序与上游一致**（`MessageIconActions`：clock → copy → extraActions → branch → usageAction）：
+     复制 → 反馈(👍/👎) → 分叉 → 用量/用时 */
   .msg-actions { position: relative; display: flex; align-items: center; gap: 2px; flex-wrap: nowrap; }
   .msg-actions button {
     border: none; background: none; color: var(--vscode-descriptionForeground, #888);
@@ -728,7 +953,7 @@
     color: var(--vscode-foreground, #ddd);
     background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground, rgba(128,128,128,0.22)));
   }
-  /* 用量/用时图标并入动作区(在复制/分叉/反馈之后)，覆盖 msg-actions button 默认外观 */
+  /* 用量/用时图标并入动作区(排在最末：复制/反馈/分叉之后)，覆盖 msg-actions button 默认外观 */
   .msg-actions .turn-meta { margin: 0; }
   .msg-actions .tm-btn {
     border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.18));
@@ -741,14 +966,14 @@
   /* 输入框下方的会话级信息：两张**互相独立**的卡（会话统计 / Token 用量）。
      一条 pill 一个维度，各自点开自己的明细卡 —— 并成一行长文本既读不出重点、窄面板下还会被整体省略。 */
   .stats-cards {
-    position: relative; display: flex; align-items: center; gap: 6px;
+    position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px;
     padding: 1px 12px 3px; font-size: 12px; line-height: 18px;
     color: var(--vscode-descriptionForeground, #888);
   }
   .stats-cards:empty { padding: 0; }
   .sp-wrap { position: relative; display: inline-flex; min-width: 0; }
   .sp-pill {
-    display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+    display: inline-flex; align-items: center; gap: 2px; max-width: 100%;
     padding: 0 6px; border: none; border-radius: 24px; cursor: pointer; font: inherit;
     background: transparent; color: var(--vscode-descriptionForeground, #888);
     white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -759,12 +984,12 @@
   }
   .sp-ico { flex: none; font-size: 13px; line-height: 1; }
   .sp-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  /* 分隔点与前后间距收窄：两段读数之间只留一点呼吸，别再撑开一整条 */
-  .sp-sep { flex: none; margin: 0 2px; color: var(--vscode-panel-border, rgba(255,255,255,0.3)); }
+  /* 图标、分隔点与两段读数之间只留 2~3px：一行里三样东西，间距一大就散成三块 */
+  .sp-sep { flex: none; margin: 0 1px; color: var(--vscode-panel-border, rgba(255,255,255,0.3)); }
   /* 明细卡：向上展开（常驻条在窗口底部，向下会被输入区/状态栏截断），左边缘对齐自己那张 pill */
   .sp-pop {
     position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 100;
-    box-sizing: border-box; min-width: 220px; padding: 10px 12px;
+    box-sizing: border-box; min-width: min(220px, calc(100vw - 24px)); max-width: calc(100vw - 16px); padding: 10px 12px;
     border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
     border-radius: 12px; /* 菜单面：与上游的浮层圆角一致 */
     background: var(--vscode-editorWidget-background, rgba(30,30,30,0.98));

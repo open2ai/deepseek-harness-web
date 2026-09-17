@@ -15,6 +15,9 @@ import type {
   AtFileRef,
   AtSessionRef,
   TodoItem,
+  QueueItemView,
+  ContextBreakdown,
+  ContextPressure,
 } from '../protocol'
 
 // ---------- 消息行模型(不可变替换,组件用 stable key) ----------
@@ -72,12 +75,24 @@ export interface TurnCounts {
   subagentCount: number
 }
 
+/** 用户消息里引用贴片的**本地快照**：贴片本身从正文 token 解析（见 core/ref-mentions），
+ *  快照只用来让短名/图标与用户挑选时一致（历史行没有它，全凭正文解析）。 */
+export interface RefSnap {
+  kind: RefChip['kind']
+  label: string
+  /** 注入正文的引用文本；命中同一 token 时用这条快照覆盖解析出的短名/图标 */
+  token?: string
+}
+
 export type ChatRow =
-  | { kind: 'user'; key: number; text: string; images: ImageAttachment[]; time: string; refs?: Array<{ kind: RefChip['kind']; label: string }>;
+  | { kind: 'user'; key: number; text: string; images: ImageAttachment[]; time: string;
       /** 提交标识：本面板发出的消息带它，服务端回显的 `user/message` 会带回同一个值。
        *  **认领在宿主侧**（见 docs/design/08 §8）：页面这个字段是留作对照与后续节点下发的，
        *  页面自身不据此判重。历史恢复的行没有它。 */
       rpcId?: string;
+      /** **插话**：这条消息是被当前回合的下一步取用的（宿主按收件箱 splice 史判定，见 src/dsh/rows/inbox-claims.ts）。
+       *  分类**不改变外观**（与普通提问同一个气泡），只作语义标记与样式/排查锚点。 */
+      steering?: boolean;
       /** 该次提交**没有成功送到服务端**（宿主回 `chatError`）。这类行永远不会被服务端回显认领，
        *  故必须与「还在等回显」的乐观行区分开：前者只是列表里的历史，后者才代表「本轮在跑」——
        *  不区分的话 `processing` 会因为它恒为真（发消息失败后输入区一直卡在处理中）。 */
@@ -85,7 +100,14 @@ export type ChatRow =
       /** 历史恢复来的图片附件引用（字节不在事件里，由附件层按需取）；实时路径的图在 `images`（内联 base64） */
       imageRefs?: AttachmentRef[];
       /** 随该消息发出的文件（文件上送）：只留显示信息与本地路径，点它用编辑器打开 */
-      files?: Array<{ name: string; path?: string; bytes?: number }> }
+      files?: Array<{ name: string; path?: string; bytes?: number }>;
+      /**
+       * 「@」引用贴片的**本地快照**（只在本面板刚发出的那条上有）。
+       *
+       * 贴片本身按正文里的 `token` 解析出来（见 core/ref-mentions）；这里只做覆盖 ——
+       * 命中同一 token 时用它的 label/kind（与用户挑选时看到的短名一致）。历史行没有它。
+       */
+      refs?: RefSnap[] }
   /** 系统提示词行（上游 `system-prompt` 节点）：该回合实际发给模型的 system，可折叠；位置在该回合用户提问之前 */
   | { kind: 'sysprompt'; key: number; text: string }
   | {
@@ -125,10 +147,57 @@ export type ChatRow =
       messageId?: string
       /** 本回合模型声明的交付文件（宿主事件带来；缺失 = 本回合没有声明，此时不渲染那一区） */
       presentedFiles?: DshPresentedFile[]
+      /**
+       * 所属回合号（宿主给）。**同一回合可能有多条回答行**（插话切成「前段 / 后段」）。
+       *
+       * 过程折叠是**回合级**的：上游只有 `turn-process` 那一个控制节点渲染折叠头，被它收起来的是整个回合
+       * 过程区间里的节点。页面据此把同回合的行归成一组 —— 只让首行出折叠头，其余行跟随同一个展开态。
+       */
+      turn?: number
     }
   | { kind: 'approval'; key: number; approvalId: string; description: string; toolName?: string }
   | { kind: 'question'; key: number; rpcId: string; sessionId?: string; questions: QuestionSpec[]; disabled: boolean }
   | { kind: 'notice'; key: number; text: string; command?: string; tone?: 'error' | 'ok' }
+
+/** 本地「发送中」条目里的附件：比权威条目多一份**本地图片预览**（内联 base64，只有本地回显拿得到）。 */
+export interface QueueSendingAttachment {
+  kind: 'image' | 'file'
+  name?: string
+  bytes?: number
+  /** 图片的内联预览（仅本地回显；权威条目只有引用与名字，取不到字节） */
+  preview?: { mediaType: string; data: string }
+}
+
+/** 对话区末尾的 pending 插话气泡：还没进日志的那条插话（本地回显或服务端收件箱里的 steering 项）。 */
+export interface PendingSteering {
+  /** 稳定 key：权威条目用条目 id，本地回显用 rpcId（两类不会同时存在同一条） */
+  key: string
+  text: string
+  attachments: QueueSendingAttachment[]
+  /** 引用贴片快照（见 `RefSnap`）：本地回显先把贴片补齐，权威帧到达后由正文解析接手 */
+  refs?: RefSnap[]
+}
+
+/** 本地「发送中」的排队条目：忙时提交后立刻显示，宿主队列帧按 `rpcId` 认领后消失。 */
+export interface QueueSending {
+  /** 提交标识（本面板 mint）：与队列帧里的 `rpcId` 配对 */
+  rpcId: string
+  /** 投递方式：queue = 排队发送；steer = 插话发送 */
+  mode: 'queue' | 'steer'
+  text: string
+  attachments: QueueSendingAttachment[]
+  /** 引用贴片快照（见 `RefSnap`） */
+  refs?: RefSnap[]
+  /** 提交失败（宿主回的 `chatError{scope:'queue'}`）：留在卡里作历史，但不再算「在等」 */
+  failed?: boolean
+  error?: string
+}
+
+/** 队列卡里的行内编辑态（纯页面态，不发给宿主）。 */
+export interface QueueEditing {
+  id: string
+  text: string
+}
 
 /** 输入区暂存的待发送文件（文件上送）：选中即上传，**就绪后才能发送**。 */
 export interface StagedFile {
@@ -229,6 +298,9 @@ export interface ChatStore {
   sessionStats: Signal<SessionStatsView | null>
   /** Token 用量投影（`tokenUsage` 原文）：输入框下方「Token 用量」卡的数据源；null=没有用量 */
   tokenUsage: Signal<TokenUsageView | null>
+  /** 上下文占用投影（`contextPressure` + `contextBreakdown`）：发送按钮左侧那个环的数据源。
+   *  null = 该 dsh 没有这两条投影（整个环不渲染）；两条可各自缺失。 */
+  contextFacts: Signal<{ pressure?: ContextPressure; breakdown?: ContextBreakdown } | null>
   /** 「/」菜单目录(host 命令+技能)；null=尚未拉到 */
   slashCatalog: Signal<{ commands: SlashCommandInfo[]; skills: SlashSkillInfo[] } | null>
   /** 「@」引用候选(文件/目录+会话)；null=尚未拉到/换会话清空；query=该候选对应的查询串 */
@@ -240,6 +312,16 @@ export interface ChatStore {
   /** 任务清单（宿主从 `todo/write` 事件折叠后整表下发）：输入框上方常驻卡片的数据源；
    *  空数组 = 没有清单（卡片整块不渲染）。它不是行 —— 清单不属于任何一个回合 */
   todos: Signal<TodoItem[]>
+  /** 排队消息（宿主下发的整表；队列卡数据源）。**不是行** —— 队列不属于任何回合，空数组 = 卡片不渲染 */
+  queueItems: Signal<QueueItemView[]>
+  /** 本地「发送中」的排队条目（忙时提交后立刻显示；宿主队列帧按 `rpcId` 认领即消失） */
+  queueSending: Signal<QueueSending[]>
+  /** 正在行内编辑的排队项；null = 没有在编辑 */
+  queueEditing: Signal<QueueEditing | null>
+  /** 正在提交变更的条目标识：该行三个按钮禁用；null = 空闲 */
+  queueBusy: Signal<string | null>
+  /** 对话区末尾的 pending 插话气泡（还没进日志的插话：服务端收件箱里的 steering 项 + 本地回显） */
+  pendingSteering: Signal<PendingSteering[]>
   /** 上游「设置→对话显示」的只读镜像：compact=定稿收起成折叠头(上游默认)，normal=过程行平铺。
    *  全局偏好，**不随会话切换清空**（见 store/prefs）。 */
   transcriptView: Signal<'normal' | 'compact'>
@@ -249,6 +331,16 @@ export interface ChatStore {
   pendingQuestion: Signal<{ rpcId?: string; sessionId?: string; questions: QuestionSpec[] } | null>
   /** 主动触底请求计数：用户发送/恢复会话时 +1（MessageList 消费后清零并强制滚到底） */
   scrollPend: Signal<number>
+  /**
+   * 回合级过程折叠的展开态（key = 会话内回合号）。
+   *
+   * 为什么按回合而不是按行：过程折叠是**回合级**的 —— 上游只有 `turn-process` 那一个控制节点渲染
+   * 折叠头，被它收起来的是整个回合过程区间里的节点；一个回合被插话切成多段行时，这些行共用同一个
+   * 展开态。未记录的回合按默认值（进行中展开、定稿收起）。
+   */
+  turnFoldOpen: Signal<ReadonlyMap<number, boolean>>
+  /** 记下某个回合的折叠展开态。 */
+  setTurnFoldOpen(turn: number, open: boolean): void
   /** 附件字节缓存（附件大类，按 attachmentId；子类卡渲染时读） */
   attachmentCache: Signal<Record<string, AttachmentEntry>>
   // ---- 消息反馈（👍/👎） ----
@@ -269,8 +361,20 @@ export interface ChatStore {
   closeFeedbackDialog(): void
   permNameOf: Map<string, string>
   // 动作
-  send(): void
+  /** 发送。忙时 mode 决定去向：queue = 排队（默认）、steer = 插话；空闲恒排队 */
+  send(mode?: 'queue' | 'steer'): void
   cancel(): void
+  /** 打开某条排队消息的行内编辑（含非文本附件的条目不该调它） */
+  editQueueItem(id: string, text: string): void
+  /** 保存行内编辑（空文本不发；是否生效以队列帧为准） */
+  saveQueueEdit(): void
+  cancelQueueEdit(): void
+  /** 删除一条排队消息 */
+  removeQueueItem(id: string): void
+  /** 把一条排队消息转成插话（投到当前回合的下一步） */
+  steerQueueItem(id: string): void
+  /** 把当前所有排队消息按顺序转成插话（输入为空时的加速键手势） */
+  steerWholeQueue(): void
   /** 行首 `/` 菜单需要目录时调用(宿主异步回 slashCatalog；并发去重) */
   requestSlashList(): void
   /** 按查询串请求「@」候选(文件/目录+会话)；宿主异步回 atCatalog，最新查询 wins */

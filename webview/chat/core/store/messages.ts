@@ -1,20 +1,20 @@
 // 消息行模型切片：宿主下发的行（整表替换 + 乐观行认领）、通知行与审批行。
 // 行 key 计数器在本切片内（per-store），不跨 store 实例共享——key 只用于同一列表内的替换匹配
 // 与列表渲染 diff，各自从 1 计数即可。
-import { computed, signal } from '@preact/signals'
+import { computed, signal, type Signal } from '@preact/signals'
 import type { ChatHost } from '../host'
 import type { ImageAttachment, AttachmentRef } from '../protocol'
 import { formatMsgClock } from '../format'
 import type { DshStreamRow } from '../../../../src/dsh/rows/types'
 import { toChatRows } from './host-rows'
-import type { ChatRow, ChatStore, RefChip } from './types'
+import type { ChatRow, ChatStore, RefSnap } from './types'
 
 export interface MessagesSlice {
   store: Pick<ChatStore, 'messages' | 'view' | 'processing' | 'scrollPend' | 'showNotice' | 'answerApproval' | 'openFile'>
   /** 追加一条审批行。 */
   pushApproval(approvalId: string, description: string, toolName?: string): void
   /** 追加一条用户行（本地乐观行：发出即显示，等宿主行回显后由提交标识认领）。 */
-  addUser(text: string, imgs?: ImageAttachment[], time?: number, refs?: Array<{ kind: RefChip['kind']; label: string }>, imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void
+  addUser(text: string, imgs?: ImageAttachment[], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void
   /** 开启（或复用）当前进行中的 assistant 行。 */
   beginAssistant(prompt?: string): void
   /** 取一个列表内唯一行 key。 */
@@ -33,6 +33,10 @@ export interface MessagesSlice {
   /** 本次提交**失败**（宿主 `chatError`）：把该标识对应的本地乐观行标为「未提交成功」，
    *  并把仍挂着的回答行定稿成错误。不这么做的话，它会一直被当成「在等回显」→ `processing` 恒真。 */
   failSubmission(rpcId: string | undefined, message: string): void
+  /** 回合级过程折叠的展开态（见 `core/process-fold`）。未记录 = 默认（进行中展开、定稿收起）。 */
+  turnFoldOpen: Signal<ReadonlyMap<number, boolean>>
+  /** 记下某个回合的折叠展开态（回合号是**会话内**编号，换会话时整表清掉）。 */
+  setTurnFoldOpen(turn: number, open: boolean): void
 }
 
 /** 本地时刻串（实时上送用；历史恢复走事件自带时刻）。 */
@@ -43,6 +47,13 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const view = computed<'welcome' | 'chat'>(() => (messages.value.length === 0 ? 'welcome' : 'chat'))
   const processing = signal(false)
   const scrollPend = signal(0)
+  /** 回合级折叠展开态（见 core/process-fold）：key 是**会话内**回合号，换会话必须清 */
+  const turnFoldOpen = signal<ReadonlyMap<number, boolean>>(new Map<number, boolean>())
+  const setTurnFoldOpen = (turn: number, open: boolean): void => {
+    const next = new Map(turnFoldOpen.value)
+    next.set(turn, open)
+    turnFoldOpen.value = next
+  }
   let rowKey = 1
   /** 当前列表属于哪个会话：会话一变就丢弃本地乐观行（见 applyHostRows） */
   let rowsSessionId: string | undefined
@@ -98,7 +109,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   }
 
   // ---------- 消息流动作(本地渲染) ----------
-  function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: Array<{ kind: RefChip['kind']; label: string }>, imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void {
+  function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void {
     // 实时本地上送用本地时刻;恢复历史时传入事件自带时间戳,不覆盖为"现在"
     push({ kind: 'user', key: rowKey++, text: textMsg, images: imgs, time: time !== undefined ? formatMsgClock(time) : nowTime(), refs, ...(imageRefs && imageRefs.length > 0 ? { imageRefs } : {}), ...(files && files.length > 0 ? { files } : {}), ...(rpcId !== undefined ? { rpcId } : {}) })
   }
@@ -117,6 +128,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
       if (rowsSessionId !== undefined && rowsSessionId !== sessionId) {
         messages.value = []
         processing.value = false
+        // 回合号是**会话内**编号：换会话后同一个号会指到别的回合，折叠展开态必须一起清
+        turnFoldOpen.value = new Map<number, boolean>()
       }
       rowsSessionId = sessionId
     }
@@ -258,6 +271,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const resetRows = (): void => {
     messages.value = []
     processing.value = false
+    turnFoldOpen.value = new Map<number, boolean>()
   }
 
   return {
@@ -272,5 +286,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
     push,
     bumpScroll,
     resetRows,
+    turnFoldOpen,
+    setTurnFoldOpen,
   }
 }

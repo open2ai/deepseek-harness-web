@@ -1,18 +1,20 @@
 // 会话状态切片：过渡态与宿主投影（会话统计 / token 用量 / plan / goal / 任务清单）。
 // 除 applyProjections / applyTodos 外无动作、不需要 host；busy 由归约器直接写 .value。
 import { signal } from '@preact/signals'
-import type { TodoItem } from '../protocol'
+import type { ContextBreakdown, ContextPressure, TodoItem } from '../protocol'
 import type { ChatStore, SessionStatsView, TokenUsageView } from './types'
 
 export interface StatusSlice {
   store: Pick<
     ChatStore,
-    'busy' | 'sessionCwd' | 'sessionStats' | 'tokenUsage' | 'planState' | 'goalState' | 'todos'
+    'busy' | 'sessionCwd' | 'sessionStats' | 'tokenUsage' | 'planState' | 'goalState' | 'todos' | 'contextFacts'
   >
   /** 由投影快照刷新会话统计、token 用量、plan 与 goal（形状见各派生函数）。 */
   applyProjections(proj: Record<string, unknown>): void
   /** 任务清单整表替换（宿主折叠好下发）；`null` = 没有清单。 */
   applyTodos(todos: readonly TodoItem[] | null | undefined): void
+  /** 上下文占用两条投影（发送按钮左侧的环）：两条都没有 → null（整个环不渲染）。 */
+  applyContext(pressure: ContextPressure | undefined, breakdown: ContextBreakdown | undefined): void
   reset(): void
 }
 
@@ -25,6 +27,8 @@ export function createStatus(): StatusSlice {
   const goalState = signal<{ objective: string; phase: string } | null>(null)
   /** 任务清单（输入框上方的常驻条）：空数组 = 没有清单，卡片整块不渲染 */
   const todos = signal<TodoItem[]>([])
+  /** 上下文占用（发送按钮左侧的环）：两条投影都可能缺，都缺就整块不渲染 */
+  const contextFacts = signal<{ pressure?: ContextPressure; breakdown?: ContextBreakdown } | null>(null)
 
   /** plan 投影：能力未组合则键缺失 → 保持 null。 */
   function derivePlanState(proj: Record<string, unknown>): { active: boolean; pending: boolean } | null {
@@ -93,6 +97,13 @@ export function createStatus(): StatusSlice {
     todos.value = next === null || next === undefined ? [] : [...next]
   }
 
+  function applyContext(pressure: ContextPressure | undefined, breakdown: ContextBreakdown | undefined): void {
+    contextFacts.value =
+      pressure === undefined && breakdown === undefined
+        ? null
+        : { ...(pressure === undefined ? {} : { pressure }), ...(breakdown === undefined ? {} : { breakdown }) }
+  }
+
   function reset(): void {
     busy.value = null
     sessionStats.value = null
@@ -100,14 +111,16 @@ export function createStatus(): StatusSlice {
     planState.value = null
     goalState.value = null
     todos.value = []
+    contextFacts.value = null
     // sessionCwd 不随会话清空：它标识的是工作区，换会话后同一工作区仍有效；
     // 工作区切换由宿主推新的 chatInfo 覆盖。
   }
 
   return {
-    store: { busy, sessionCwd, sessionStats, tokenUsage, planState, goalState, todos },
+    store: { busy, sessionCwd, sessionStats, tokenUsage, planState, goalState, todos, contextFacts },
     applyProjections,
     applyTodos,
+    applyContext,
     reset,
   }
 }

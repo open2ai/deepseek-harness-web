@@ -25,6 +25,8 @@ function toChatRow(r: DshStreamRow): ChatRow {
       images: [],
       time: r.timeMs !== undefined ? formatMsgClock(r.timeMs) : '',
       ...(r.rpcId !== undefined ? { rpcId: r.rpcId } : {}),
+      // 插话分类（宿主按收件箱 splice 史判）：只作语义标记，外观与普通提问一致
+      ...(r.steering === true ? { steering: true } : {}),
       ...(r.imageRefs !== undefined ? { imageRefs: r.imageRefs } : {}),
       ...(r.files !== undefined ? { files: r.files } : {}),
     }
@@ -44,6 +46,7 @@ function toChatRow(r: DshStreamRow): ChatRow {
     chain: r.chain.map(toChainItem),
     counts: r.counts,
     bodyStarted: true,
+    ...(r.turn !== undefined ? { turn: r.turn } : {}),
     ...(r.status !== undefined ? { status: r.status } : {}),
     ...(r.process !== undefined ? { process: r.process } : {}),
     ...(r.endMsg !== undefined ? { endMsg: r.endMsg } : {}),

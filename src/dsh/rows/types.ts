@@ -59,6 +59,14 @@ export interface DshTurnProcess {
     inlineReasoning: boolean;
     /** 过程区间内除回答步外是否还有别的过程成员 */
     hasExternalProcess: boolean;
+    /**
+     * 最终回答是否按**紧凑形态**收（上游 `compactAnswer`）。
+     *
+     * 判据：过程区间内、开场人类锚点之后、回答锚点之前**是否有新的人类消息**（插话或追加提问）。
+     * 有 → false：回答与过程之间要留出常规间距，不被当成"紧贴折叠头的那一段"。
+     * 与上游同：这里 user 与 steering 一视同仁（分类只影响行的种类，不影响这条判据）。
+     */
+    compactAnswer: boolean;
 }
 
 /**
@@ -92,6 +100,13 @@ export type DshStreamRow =
         text: string;
         /** 提交标识（页面据此认领本地已出的乐观行，见 design/08 §11） */
         rpcId?: string;
+        /**
+         * **插话**：这条消息是被当前回合的下一步取用的（走 next-step 收件箱），不是自己单独一轮的提问。
+         *
+         * 只由收件箱的 splice 史判定（见 `rows/inbox-claims.ts`）—— 事件形状上两者无法区分。
+         * 用途：与普通提问在语义上分开（上游的 `steering` 节点），并参与过程区间内的人类锚点判定。
+         */
+        steering?: true;
         /** 事件自带时刻（epoch 毫秒；时钟格式化在页面） */
         timeMs?: number;
         /** 图片附件**引用**（字节由附件层按需取）。实时发送的内联图在页面本地行上，认领时合并进来 */
@@ -106,6 +121,13 @@ export type DshStreamRow =
         key: number;
         text: string;
         done: boolean;
+        /**
+         * 所属回合号。**同一个回合可能有多条回答行**（插话把它切成「前段 / 后段」两段）。
+         *
+         * 用途：过程折叠是**回合级**的（上游只有 `turn-process` 那一个控制节点出折叠头，被它收起来的是
+         * 整个回合过程区间里的节点）—— 页面按它把同回合的行归成一组，只让首行出折叠头。
+         */
+        turn?: number;
         /** 终止原因（上游取值原样；正常完成不带） */
         status?: string;
         chain: DshRowItem[];

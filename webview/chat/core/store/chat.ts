@@ -15,6 +15,7 @@ import { createStatus } from './status'
 import { createPrefs } from './prefs'
 import { createOutbox } from './outbox'
 import { createFeedback } from './feedback'
+import { createQueue } from './queue'
 import { createReducer } from './reducer'
 import type { ChatStore } from './types'
 
@@ -43,11 +44,13 @@ export function createChatStore(host: ChatHost): ChatStore {
   const selectors = createSelectors(host, messages.store.showNotice)
   const question = createQuestion(host)
   const attachments = createAttachments(host)
+  // 队列卡：它不是行（见 store/queue 文件头）。失败提示借用消息切片的通知行（与 selectors 同一注入方式）
+  const queue = createQueue(host, (text) => messages.store.showNotice(text))
   // 显示偏好：全局量，故不参与下面的 reset（见 store/prefs 文件头）
   const prefs = createPrefs()
 
-  // 3. 发送动作（跨输入区 + 目录 + 消息域，依赖注入）
-  const outbox = createOutbox({ host, composer, catalogs, messages })
+  // 3. 发送动作（跨输入区 + 目录 + 消息域 + 队列卡，依赖注入）
+  const outbox = createOutbox({ host, composer, catalogs, messages, queue })
   // 消息反馈：与其它切片无 import 边，装配层直接持有
   const feedback = createFeedback(host)
 
@@ -62,10 +65,11 @@ export function createChatStore(host: ChatHost): ChatStore {
     question.reset()
     attachments.reset()
     feedback.reset()
+    queue.reset()
   }
 
   // 5. 归约器（宿主消息 → 各切片；需要 reset 做全量清空）
-  const reducer = createReducer({ messages, composer, catalogs, selectors, question, status, attachments, prefs, outbox, feedback, reset })
+  const reducer = createReducer({ messages, composer, catalogs, selectors, question, status, attachments, prefs, outbox, feedback, queue, reset })
 
   // 显式列举装配（不用展开）：字段漏装配被返回类型拦截，字段重复在编译期直接报错。
   return {
@@ -77,6 +81,9 @@ export function createChatStore(host: ChatHost): ChatStore {
     showNotice: messages.store.showNotice,
     openFile: messages.store.openFile,
     answerApproval: messages.store.answerApproval,
+    // 回合级过程折叠的展开态（同回合多段行共享）
+    turnFoldOpen: messages.turnFoldOpen,
+    setTurnFoldOpen: messages.setTurnFoldOpen,
     // 发送动作
     send: outbox.store.send,
     suggestion: outbox.store.suggestion,
@@ -136,6 +143,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     sessionCwd: status.store.sessionCwd,
     sessionStats: status.store.sessionStats,
     tokenUsage: status.store.tokenUsage,
+    // 上下文占用（发送按钮左侧的环）：与统计两张卡同源（投影），但走单独一条轻帧
+    contextFacts: status.store.contextFacts,
     planState: status.store.planState,
     // 附件大类
     attachmentCache: attachments.store.attachmentCache,
@@ -143,6 +152,19 @@ export function createChatStore(host: ChatHost): ChatStore {
     goalState: status.store.goalState,
     // 任务清单（输入框上方的常驻条）
     todos: status.store.todos,
+    // 排队消息（输入框上方的队列卡）：与清单同级，但**不是行**
+    queueItems: queue.store.queueItems,
+    queueSending: queue.store.queueSending,
+    queueEditing: queue.store.queueEditing,
+    queueBusy: queue.store.queueBusy,
+    // 对话区末尾的 pending 插话气泡（队列卡只列排队项；插话在对话区等被取用）
+    pendingSteering: queue.store.pendingSteering,
+    editQueueItem: queue.store.editQueueItem,
+    saveQueueEdit: queue.store.saveQueueEdit,
+    cancelQueueEdit: queue.store.cancelQueueEdit,
+    removeQueueItem: queue.store.removeQueueItem,
+    steerQueueItem: queue.store.steerQueueItem,
+    steerWholeQueue: queue.store.steerWholeQueue,
     // 全局显示偏好（上游「设置→对话显示」）
     transcriptView: prefs.store.transcriptView,
     // 渲染源开关（阶段 4：宿主下发，见 docs/design/08 §11）

@@ -190,8 +190,22 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
   }
 
   const onKeyDown = (e: KeyboardEvent): void => {
+    // Ctrl+Enter = 发送（忙时即**排队发送**）；Ctrl+Shift+Enter = **插话发送**（投到当前回合的下一步）
     if (e.key === 'Enter' && e.ctrlKey) {
       e.preventDefault()
+      if (e.shiftKey) {
+        store.send('steer')
+        return
+      }
+      // 忙 + 输入为空 + 队列里有排队项 → 整队转插话（空输入下的加速键手势）
+      if (
+        store.processing.value &&
+        store.text.value.trim() === '' &&
+        store.queueItems.value.some((i) => i.placement === 'queued')
+      ) {
+        store.steerWholeQueue()
+        return
+      }
       store.send()
       return
     }

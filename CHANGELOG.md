@@ -2,6 +2,12 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.12] - 2026-09-17
+
+### 变更
+
+- 完善排队、插话功能; 增加上下文使用情况统计; UI优化
+
 ## [0.1.11] - 2026-09-14
 
 ### 修复

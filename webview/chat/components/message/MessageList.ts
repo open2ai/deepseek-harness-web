@@ -1,7 +1,7 @@
 // 消息列表（按行类型分发）：用户/assistant/审批/提问/notice。智能跟随滚动。
 import { html } from 'htm/preact'
 import { useEffect, useRef } from 'preact/hooks'
-import type { ChatStore } from '../../core/store/chat'
+import type { ChatRow, ChatStore } from '../../core/store/chat'
 import { UserRow } from './UserRow'
 import { AssistantRow } from './AssistantRow'
 import { ApprovalRow } from './ApprovalRow'
@@ -10,6 +10,7 @@ import { NoticeRow } from './NoticeRow'
 import { ContextInjectionRow } from './ContextInjectionRow'
 import { SysPromptRow } from './SysPromptRow'
 import { TurnStatus } from './TurnStatus'
+import { PendingSteeringList } from './PendingSteeringRow'
 
 /**
  * 「读者是否移动了滚动」—— 浏览器把 `scrollTop` 收缩钳制、以及程序性写入，都**不转移滚动归属**：
@@ -53,6 +54,15 @@ export function MessageList({ store }: { store: ChatStore }) {
 
   if (store.view.value !== 'chat') return null
   const rows = store.messages.value
+  // 过程折叠是**回合级**的（见 core/process-fold）：同一回合可能有多条回答行（插话切成「前段 / 后段」），
+  // 只有**首行**出折叠头，其余行跟随同一个展开态。这里先按回合归组算好，再逐行下发。
+  // 没有回合号的（本地乐观行）自成一组：它没有过程事实，本来也不会折叠。
+  const turnHeadRow = new Map<number, Extract<ChatRow, { kind: 'assistant' }>>()
+  for (const row of rows) {
+    if (row.kind === 'assistant' && row.turn !== undefined && !turnHeadRow.has(row.turn)) {
+      turnHeadRow.set(row.turn, row)
+    }
+  }
   return html`<div id="messages" ref=${ref}
     onScroll=${() => {
       const el = ref.current
@@ -72,8 +82,15 @@ export function MessageList({ store }: { store: ChatStore }) {
           return html`<${ContextInjectionRow} key=${row.key} row=${row} />`
         case 'sysprompt':
           return html`<${SysPromptRow} key=${row.key} text=${row.text} />`
-        case 'assistant':
-          return html`<${AssistantRow} key=${row.key} row=${row} store=${store} latest=${latest} />`
+        case 'assistant': {
+          const head = row.turn === undefined ? undefined : turnHeadRow.get(row.turn)
+          // 「只含提问行时不折叠」是插件偏离，判据必须是**回合级**的（按首行的链判），否则同回合的行会不一致
+          const noFold =
+            head !== undefined &&
+            head.chain.every((c) => c.kind === 'tool' && c.name === 'ask_user_question')
+          return html`<${AssistantRow} key=${row.key} row=${row} store=${store} latest=${latest}
+            ownsHead=${head === undefined || head.key === row.key} noFold=${noFold} />`
+        }
         case 'approval':
           return html`<${ApprovalRow} key=${row.key} row=${row} store=${store} />`
         case 'question':
@@ -83,5 +100,7 @@ export function MessageList({ store }: { store: ChatStore }) {
       }
     })}
     ${store.processing.value ? html`<${TurnStatus} />` : null}
+    ${/* pending 插话气泡：排在列表与「生成中」之后（上游同序）——它们还没进日志，没有锚点序号 */ ''}
+    <${PendingSteeringList} items=${store.pendingSteering.value} />
   </div>`
 }

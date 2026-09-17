@@ -6,9 +6,10 @@
 // 链里有任何过程内容(工具/思考/上下文注入/召回/计数) 才出折叠头；计数全为 0 时文案兜底「已思考」。
 // **纯思考同样出折叠头**——上游 foldable 对「有过程成员」成立，与「N 次工具调用」是同一套折叠，
 // 不是平铺；定稿后思考行同样收进折叠里。
-// 例外：只含提问行(ask)时不出折叠头，平铺显示问行（提问不参与过程折叠，见 docs/design/06 §4）。
+// **折叠头是回合级的**：一个回合只有一个（由本回合首行渲染，`ownsHead`），被它收起来的是整个回合
+// 过程区间里的成员 —— 插话把回合切成多段行时，**各段共用同一个展开态**（上游只有 `turn-process`
+// 那一个控制节点）。例外：只含提问行(ask)时整回合不折叠，平铺显示问行（见 docs/design/06 §4）。
 import { html } from 'htm/preact'
-import { useEffect, useState } from 'preact/hooks'
 import type { ChatRow, DshTurnProcessItem, ChatStore } from '../../core/store/chat'
 import { processDisclosure } from '../../core/process-fold'
 import { ReasoningRow } from './ReasoningRow'
@@ -17,16 +18,18 @@ import { ContextInjectionRow } from '../message/ContextInjectionRow'
 
 type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
 
-export function Chain({ row, store }: { row: AssistantRow; store: ChatStore }) {
+export function Chain({ row, store, ownsHead, noFold }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; noFold: boolean }) {
   const chain = row.chain
   // 上游显示偏好（控制已完成轮次的过程内容）；未知/未到 = compact，即接入前的固有形态
   const compact = store.transcriptView.value === 'compact'
-  // 折叠头的展开态（只在「紧凑 + 已完成」下可见）；定稿收起
-  const [open, setOpen] = useState(!row.done)
-  // 依赖刻意不含 compact：切到「标准」再切回来时，保持用户手动展开过的回合（上游对展开态同样是持久记忆）
-  useEffect(() => {
-    setOpen(!row.done)
-  }, [row.done])
+  // 展开态是**回合级**的（同回合多段行共用；上游按 (turn, answerStep) 持久化）。
+  // 未记录 = 默认：进行中展开（能实时看过程在动）、定稿收起。
+  const turn = row.turn
+  const stored = turn === undefined ? undefined : store.turnFoldOpen.value.get(turn)
+  const open = stored ?? !row.done
+  const setOpen = (next: boolean): void => {
+    if (turn !== undefined) store.setTurnFoldOpen(turn, next)
+  }
   if (chain.length === 0) return null
 
   // 链内的实际工具数（ask 提问除外 —— 其交互在 waterfall 弹窗）：折叠**文案**的兜底要用它
@@ -71,19 +74,20 @@ export function Chain({ row, store }: { row: AssistantRow; store: ChatStore }) {
     process: row.process,
     compact,
     open,
-    // 插件偏离：链里只含提问行时不出折叠头（提问不参与过程折叠，见 design/06 §4）
-    onlyAsk: chain.every((c) => c.kind === 'tool' && c.name === 'ask_user_question'),
+    ownsHead,
+    noFold,
   })
   const folded = disclosure.head
   const head = folded
-    ? html`<button class="chain-summary" onClick=${() => setOpen((o) => !o)} aria-expanded=${open}>
+    ? html`<button class="chain-summary" onClick=${() => setOpen(!open)} aria-expanded=${open}>
         <span class="chain-summary-ico codicon codicon-sparkle"></span>
         <span class="chain-summary-text">${foldLabel}</span>
         <span class=${'codicon chain-summary-chev ' + (open ? 'codicon-chevron-down' : 'codicon-chevron-right')}></span>
       </button>`
     : null // 只含提问行 / 进行中 / 「标准」下的已完成回合：无折叠头，明细平铺
 
-  // 折叠时点开才看明细；其余（只含提问行 / 进行中 / 「标准」下的已完成回合）明细恒展
+  // 折叠时点开才看明细；其余（只含提问行 / 进行中 / 「标准」下的已完成回合）明细恒展。
+  // 同回合的每一行都跟随同一个展开态 —— 折叠头只在本回合首行上。
   const detailVisible = disclosure.detail
 
   return html`<div class="chain">

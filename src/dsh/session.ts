@@ -628,19 +628,46 @@ export async function readSessionAttachment(sessionId: string, attachmentId: str
     return { mediaType, data };
 }
 
+/** 一次提交的投递方式：queue = 排到下一轮；steer = 插话，投到当前回合的下一步。 */
+export type DshPromptMode = 'queue' | 'steer';
+
 /**
  * 向会话发送消息（上游 `session/prompt`，SessionPromptRequest）。
  * v0.1.5-rc.2 起 request 必须带客户端 mint 的 requestId（uuid，user/message 事件会回显）；
- * mode='queue' 表示进 agent 队列。content 支持文本 + 图片（data URL base64）块。
+ * mode 决定服务端把它排到**下一轮**（queue）还是**当前回合的下一步**（steer）。
+ * content 支持文本 + 图片（data URL base64）块。
  */
-export async function sendPrompt(sessionId: string, content: DshContentPart[], requestId?: string): Promise<void> {
+export async function sendPrompt(
+    sessionId: string,
+    content: DshContentPart[],
+    requestId?: string,
+    mode: DshPromptMode = 'queue'
+): Promise<void> {
     await rpcCall<{ accepted: boolean }>('session.prompt', {
         // 调用方给了标识就用它（页面 mint → 回显按同一标识认领）；没给则本地生成
         requestId: requestId ?? crypto.randomUUID(),
         sessionId,
-        mode: 'queue',
+        mode,
         content,
     });
+}
+
+/** 对一条还挂着的排队项做变更（上游 `session/updateQueue`，SessionUpdateQueueRequest）。 */
+export type DshQueueAction =
+    | { kind: 'edit'; content: Array<{ type: 'text'; text: string }> }
+    | { kind: 'remove' }
+    | { kind: 'steer' };
+
+/**
+ * 变更一条**还没被取用**的排队项：编辑 / 删除 / 转插话。
+ *
+ * 服务端的拒绝是有意义的业务事实，原样上抛由调用方判：
+ * 条目已被取走或会话不在 → `session/queue-item-not-found`；
+ * 转插话时目标不是下一轮、或回合已经不在跑 → `session/steer-unavailable`。
+ * 编辑只接受纯文本块（含图/文件的条目会被服务端拒）。
+ */
+export async function updateQueue(sessionId: string, itemId: string, action: DshQueueAction): Promise<void> {
+    await rpcCall<{ accepted: boolean }>('session.updateQueue', { sessionId, itemId, action });
 }
 /** 会话改名（上游 `session/rename`，SessionRenameRequest { sessionId, title }）。 */
 export async function renameSession(sessionId: string, title: string): Promise<void> {

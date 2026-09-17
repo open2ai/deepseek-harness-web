@@ -10,6 +10,18 @@
 import type { DshTodoItem as TodoItem } from '../../../src/dsh/rows/types'
 export type { TodoItem }
 
+// 排队项的展示形状由宿主侧定义（与行、清单同一做法）：形状改动只落在宿主，页面只消费。
+// 它**不是行**：队列不属于任何回合，也不进对话流。
+import type { DshQueueItemView as QueueItemView } from '../../../src/dsh/queue-types'
+export type { QueueItemView }
+
+// 上下文占用的形状同样由宿主侧定义（只类型、零运行时）：页面只消费，不解析原始投影。
+import type {
+  DshContextBreakdown as ContextBreakdown,
+  DshContextPressure as ContextPressure,
+} from '../../../src/dsh/context-types'
+export type { ContextBreakdown, ContextPressure }
+
 export interface ImageAttachment {
   mediaType: string
   data: string
@@ -118,7 +130,17 @@ export type HostToViewMessage =
   // 它属于与审批、提问同一类的「交互事实」。为什么必须单开一条：这类失败发生在服务端**没有回合**的情况下，
   // 事件流里既不会有 turn/end、也没有对应的行，错误无处承载（行模型的 endMsg 只来自 turn/end）。
   // rpcId = 该次提交的标识，页面据此把对应那条本地乐观行标为「未提交成功」。
-  | { type: 'chatError'; message?: string; rpcId?: string }
+  // scope='queue' = **忙时提交失败**：只标掉队列卡里那条「发送中」，**不得**去定稿对话区里
+  // 正在跑的回答行（那一轮不是这次提交的）。缺省 'turn' = 现有语义。
+  | { type: 'chatError'; message?: string; rpcId?: string; scope?: 'turn' | 'queue' }
+  // 排队消息（输入框上方的队列卡）：**整表替换**，`items` 为空即没有排队消息（卡片整块不渲染）。
+  // 与「行」不同源：队列只在服务端的收件箱里、不进日志，它来自队列流的投影。
+  | { type: 'queue'; sessionId?: string; items?: QueueItemView[] }
+  // 队列动作失败（编辑 / 删除 / 转插话）：宿主只给动作与错误码，文案由页面按动作选。
+  // 两种竞态（条目已被取走 / 回合已不在跑）宿主**不发**这一帧 —— 那表示「刷新即可」，不是错误。
+  | { type: 'queueActionFailed'; op: 'edit' | 'remove' | 'steer'; code?: string }
+  // 上下文占用（发送按钮左侧的环）：两条投影各自可能缺失；都缺 = 该 dsh 没这个能力 → 页面不渲染那个环
+  | { type: 'context'; sessionId?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown }
   // 任务清单（输入框上方的常驻条）：整表替换，`null`/缺省 = 没有清单（该区整块不渲染）。
   // 与「行」同源、但不是行：清单不属于任何一个回合，位置也不在对话流里。
   | { type: 'todos'; todos?: TodoItem[] | null }
@@ -189,7 +211,11 @@ export type ViewToHostMessage =
   | { type: 'ready' }
   // rpcId：本面板 mint 的提交标识，宿主拿它当 session/prompt 的 requestId；
   // 服务端回显 user/message 时带回同一值，页面据此认领本地已出的一行（避免重复出行）
-  | { type: 'chatSend'; text: string; images?: ImageAttachment[]; files?: Array<{ receiptId: string; name: string; path?: string }>; rpcId?: string }
+  // mode：投递方式 —— 空闲发送恒 queue；忙时由键位决定（queue = 排队，steer = 插话，投到当前回合的下一步）
+  | { type: 'chatSend'; text: string; images?: ImageAttachment[]; files?: Array<{ receiptId: string; name: string; path?: string }>; rpcId?: string; mode?: 'queue' | 'steer' }
+  // 排队项变更（编辑 / 删除 / 转插话）：宿主转成服务端的队列变更调用，结果以队列帧为准（非乐观）。
+  // edit 只带**文本**：含图/文件的条目在卡片上已被禁用编辑。
+  | { type: 'queueUpdate'; itemId: string; action: { kind: 'edit'; text: string } | { kind: 'remove' } | { kind: 'steer' } }
   | { type: 'cancel' }
   // 从某条回答分叉出新会话（上游 `session/fork`）：atSeq 是该回答的事件序号，
   // 省略 = 从最后一条已完成回合分叉。宿主负责建子会话、升号并切过去。

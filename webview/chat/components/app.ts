@@ -20,6 +20,8 @@ import { QuestionDialog } from './message/QuestionDialog'
 import { FeedbackDialog } from './message/FeedbackDialog'
 import { FeedbackToast } from './FeedbackToast'
 import { TodoCard } from './TodoCard'
+import { QueueCard } from './QueueCard'
+import { ContextMeter } from './ContextMeter'
 import { StatsCards } from './StatsCards'
 
 // goal chip 的阶段中文标签（与上游 GoalPhase 对应；complete 时不显示 chip）
@@ -288,9 +290,14 @@ function Composer({ store }: { store: ChatStore }) {
   useEffect(() => {
     const onClick = (e: MouseEvent): void => {
       const t = e.target as Node
+      // 事件路径在**派发时**取（composedPath）：只认 `el.contains(target)` 会漏判 ——
+      // 点击弹窗内的入口若触发了重渲染（如模型弹窗从一级换到二级），那个按钮此刻已被卸载，
+      // target 脱离文档 → contains 为假 → 被误判成「点在弹窗外」而立刻关掉弹窗
+      // （真机现象：点一级入口后二级没出现，弹窗直接消失）。
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : []
       const inSel = (id: string): boolean => {
         const el = document.getElementById(id)
-        return !!el && el.contains(t)
+        return !!el && (el.contains(t) || path.includes(el))
       }
       if (inSel('permPopup') || inSel('modelPopup') || inSel('modePopup') || inSel('permBtn') || inSel('modelBtn') || inSel('modeBtn') || inSel('triggerPopup')) return
       if (store.openPopup.value) store.closePopups()
@@ -442,6 +449,7 @@ function Composer({ store }: { store: ChatStore }) {
       : null}
     <${AttachmentBar} store=${store} />
     <${TodoCard} todos=${store.todos.value} />
+    <${QueueCard} store=${store} />
     <div id="inputbox">
       ${store.refs.value.length > 0
         ? html`<div id="refRow" ref=${refRowRef}>${store.refs.value.map(
@@ -495,11 +503,14 @@ function Composer({ store }: { store: ChatStore }) {
           </button>
           <span id="modeLabel" class="sel-label">${modeName()}</span>
         </div>
-        <button id="send" title=${processing ? '终止' : busy ? '加载中…' : '发送'} class=${processing ? 'stop' : ''} disabled=${!processing && (!canSend || !!busy)}
-          onClick=${() => (processing ? store.cancel() : store.send())}>
-          <svg class="send-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14V3"/><path d="M3.5 6.5 8 2l4.5 4.5"/></svg>
-          <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
-        </button>
+        <span class="send-group">
+          <${ContextMeter} store=${store} />
+          <button id="send" title=${processing ? '终止' : busy ? '加载中…' : '发送'} class=${processing ? 'stop' : ''} disabled=${!processing && (!canSend || !!busy)}
+            onClick=${() => (processing ? store.cancel() : store.send())}>
+            <svg class="send-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14V3"/><path d="M3.5 6.5 8 2l4.5 4.5"/></svg>
+            <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
+          </button>
+        </span>
       </div>
       ${(plan && (plan.active || plan.pending)) || goal ? html`<div id="chipRow">
         ${plan && (plan.active || plan.pending)

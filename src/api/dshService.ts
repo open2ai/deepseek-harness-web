@@ -46,6 +46,15 @@ import {
     type DshStreamEvent,
     type DshStreamRow,
     type DshTodoItem,
+    followControl,
+    type DshQueueItem,
+    type DshControlHandle,
+    updateQueue as updateQueueRpc,
+    type DshPromptMode,
+    type DshQueueAction,
+    readContextPressure,
+    readContextBreakdown,
+    type DshContextFacts,
     listAgentPresets as listAgentPresetsRpc,
     selectAgentPreset as selectAgentPresetRpc,
     readTranscriptView as readTranscriptViewRpc,
@@ -159,6 +168,12 @@ export class DshService {
     private currentSessionId: string | undefined;
     /** 会话的常驻订阅句柄：会话切换时换掉（见 setCurrentSession）。 */
     private followHandle: DshFollowHandle | undefined;
+    /** 队列的常驻订阅句柄：host-wide 一条流服务所有会话，**不随会话切换重开**（见 ensureControl）。 */
+    private controlHandle: DshControlHandle | undefined;
+    /** 各会话的队列整表缓存：队列只在收件箱里、不进日志，刷新后由队列流的首帧重建。 */
+    private queueBySession = new Map<string, DshQueueItem[]>();
+    /** 各会话的上下文占用缓存：由队列流（`session/control`）的投影帧与 chatInfo 快照共同填充。 */
+    private contextBySession = new Map<string, DshContextFacts>();
     /** 本会话收到的事件（保结构）：**行构建的唯一输入**；换会话时清空。 */
     private streamEvents: DshStreamEvent[] = [];
     /** 已收到的**持久**事件的最大序号（**不含**合成序号）：实时帧的合成序号以它为基准。 */
@@ -172,6 +187,14 @@ export class DshService {
      * 页面据此算「处理中」会算成假 → 「终止」按钮中途变回「发送」并禁用（真机现象）。
      */
     private turnRunning = false;
+    /**
+     * 本插件自己提交、还没结算的回合数。记账**只认自己提交的回合** ——
+     * 别处（浏览器 / 另一个面板）驱动的回合同样会产生 `turn/end`，
+     * 把它们一起记进来，消费记录就会把别人的用量算到本面板头上。
+     */
+    private ownPendingTurns = 0;
+    /** 本批入列的事件里有本插件回合的 `turn/end`：结算等这一批的整表构建（见 flushRows）。 */
+    private settlePending = false;
     /**
      * 已收到事件的 `seq`（**去重**）。重连时服务端会**重放**已收到的事件（同 `seq`），
      * 重复入列会让行构建把同一段正文累加两次 —— 真机现象：对话区出现**重复内容**，且只在
@@ -592,6 +615,8 @@ export class DshService {
         }
         // 等待者必须先放掉：订阅停了以后它们的收尾事件永远不会来
         this.settleTurnWaiters(new Error('会话服务已停用'));
+        this.controlHandle?.cancel();
+        this.controlHandle = undefined;
         dshEvents.stop();
         this.killDshIfOwned();
     }
@@ -611,6 +636,30 @@ export class DshService {
     onTodos: ((todos: DshTodoItem[] | null) => void) | undefined;
 
     /**
+     * 队列整表回调（输入框上方的队列卡；空表 = 没有排队消息）。
+     *
+     * 与行**不同源**：队列不在会话日志里，它只来自队列流的投影（见 ensureControl）。
+     * 它与行一样是**整表**语义：收到即代表该会话当前的全部队列项，页面直接替换。
+     */
+    onQueue: ((sessionId: string, items: DshQueueItem[]) => void) | undefined;
+
+    /**
+     * 上下文占用回帧（发送按钮左侧那个环）。
+     *
+     * 单独一条轻帧：投影值本身很小，而 `chatInfo` 那串要跑几次 RPC —— 环每次更新都重推整串不值当。
+     * 键缺失（该 dsh 没组合 token-meter）时下发空对象，页面据此整个不渲染那个环。
+     */
+    onContext: ((sessionId: string, value: DshContextFacts) => void) | undefined;
+
+    /**
+     * 本插件提交的回合结算回调（用量记账与统计刷新的**唯一时机**）。
+     *
+     * 空闲提交与忙时提交都经由它记账：先前只有空闲那条路（`askStreaming` 返回后）会记，
+     * 忙时提交没有返回值可挂，只能收在事件层这一处（见 noteTurnSettled）。
+     */
+    onTurnSettled: ((info: { sessionId: string; stats: DshReplyStats; timeMs?: number }) => void) | undefined;
+
+    /**
      * 当前会话的唯一收口：标识一变就把常驻订阅换掉。
      * 为什么收在一处：订阅是事件层的地基（会话打开即订阅、与页面同生命周期），
      * 会话标识散在各处赋值会让"何时该换订阅"无从追踪。
@@ -622,6 +671,7 @@ export class DshService {
         this.currentSessionId = sessionId;
         this.resetEvents();
         this.turnRunning = false; // 换会话：上一个会话的「进行中」不该带过来
+        this.ownPendingTurns = 0; // 上一个会话没结算完的提交不再由本会话的 turn/end 结算
         // 新会话的窗口还没收到快照 → 水位不可信；同时把上一会话的等待者与就绪者放掉（否则它们永远挂着）
         this.windowSeeded = false;
         for (const resume of this.seedWaiters.splice(0)) {
@@ -631,6 +681,10 @@ export class DshService {
         this.followHandle?.cancel();
         this.followHandle = undefined;
         if (sessionId !== undefined) {
+            // 队列流是 host-wide 的：建一次就够（不随会话切换重开），这里只确保它已经在
+            this.ensureControl();
+            this.pushQueue();
+            this.pushContext();
             // 订阅的**首帧就是快照页**，它替换整个事件窗口（上游同口径）——所以不必再单独读一次快照：
             // 重连也由它把断线期间错过的记录补齐（断线窗口内的帧不会补发）。
             this.followHandle = followSession(sessionId, {
@@ -685,6 +739,148 @@ export class DshService {
         if (this.currentSessionId !== undefined) {
             this.flushRows();
         }
+        this.pushQueue();
+        this.pushContext();
+    }
+
+    /**
+     * 队列订阅（host-wide）：一条流服务所有会话，建一次就够。
+     *
+     * 队列只活在 agent 的收件箱里、**不进日志**，所以 `session/follow` 的历史窗口里没有它 ——
+     * 页面刷新/重连之后，队列只能由这条流的首帧整表重建。
+     */
+    private ensureControl(): void {
+        if (this.controlHandle !== undefined) {
+            return;
+        }
+        this.controlHandle = followControl({
+            onQueue: (sessionId, items) => {
+                this.queueBySession.set(sessionId, items);
+                if (sessionId !== this.currentSessionId) {
+                    return; // 别的会话的队列：缓存着，页面只认当前会话
+                }
+                this.pushQueue();
+            },
+            onProjection: (sessionId, key, value) => {
+                this.noteContextProjection(sessionId, key, value);
+            },
+        });
+    }
+
+    /** 当前会话的队列整表（页面就绪、动作回帧后补发）。 */
+    currentQueue(): DshQueueItem[] {
+        const sid = this.currentSessionId;
+        return sid === undefined ? [] : this.queueBySession.get(sid) ?? [];
+    }
+
+    /** 把当前会话的队列整表下发给页面（与行各走一条下行通道，见 onQueue）。 */
+    pushQueue(): void {
+        this.onQueue?.(this.currentSessionId ?? '', this.currentQueue());
+    }
+
+    /**
+     * `session/control` 的投影帧：只认上下文占用那两个键。
+     *
+     * 其余键（todos / goal / plan / 统计…）本插件另有来路（`session/follow` 快照 + `chatInfo`），
+     * 在这里一并处理就等于同一份数据有两个来源，迟早只更新到一半。
+     */
+    private noteContextProjection(sessionId: string, key: string, value: unknown): void {
+        if (key !== 'contextPressure' && key !== 'contextBreakdown') {
+            return;
+        }
+        const cur = this.contextBySession.get(sessionId) ?? {};
+        if (key === 'contextPressure') {
+            const pressure = readContextPressure(value);
+            if (pressure === undefined) {
+                if (process.env['DSH_RAWLOG'] !== undefined) {
+                    console.warn(`[dsh-context] 投影帧 contextPressure 形状不符：${JSON.stringify(value).slice(0, 200)}`);
+                }
+                return;
+            }
+            cur.pressure = pressure;
+        } else {
+            const breakdown = readContextBreakdown(value);
+            if (breakdown === undefined) {
+                return;
+            }
+            cur.breakdown = breakdown;
+        }
+        this.contextBySession.set(sessionId, cur);
+        if (process.env['DSH_RAWLOG'] !== undefined) {
+            console.warn(
+                `[dsh-context] 投影帧 sid=${sessionId.slice(0, 8)}… key=${key} pressure=${JSON.stringify(cur.pressure ?? null)}`
+            );
+        }
+        if (sessionId === this.currentSessionId) {
+            this.pushContext();
+        }
+    }
+
+    /** 用一次投影快照（`chatInfo` 那条路）补上下文占用；两个键都没有时**不覆盖**已有缓存。 */
+    seedContext(projections: Record<string, unknown>): void {
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            return;
+        }
+        const pressure = readContextPressure(projections['contextPressure']);
+        const breakdown = readContextBreakdown(projections['contextBreakdown']);
+        // 诊断（DSH_RAWLOG 时才打）：环不显示时先看这里 —— 是投影没给键，还是给了但形状不认
+        if (process.env['DSH_RAWLOG'] !== undefined) {
+            console.warn(
+                `[dsh-context] 快照 sid=${sid.slice(0, 8)}… pressure=${pressure === undefined ? '(缺/形状不符)' : JSON.stringify(pressure)} ` +
+                    `breakdown=${breakdown === undefined ? '(缺/形状不符)' : 'ok'}`
+            );
+        }
+        if (pressure === undefined && breakdown === undefined) {
+            return;
+        }
+        this.contextBySession.set(sid, {
+            ...(pressure === undefined ? {} : { pressure }),
+            ...(breakdown === undefined ? {} : { breakdown }),
+        });
+        this.pushContext();
+    }
+
+    /** 把当前会话的上下文占用下发给页面（页面就绪、换会话、投影更新时）。 */
+    pushContext(): void {
+        const sid = this.currentSessionId;
+        this.onContext?.(sid ?? '', sid === undefined ? {} : this.contextBySession.get(sid) ?? {});
+    }
+
+    /** 本会话是否有一轮在跑：页面据此决定「插话」是否可用（在跑的回合才收插话）。 */
+    isTurnActive(): boolean {
+        return this.turnActive();
+    }
+
+    /**
+     * 忙时提交：把消息交给服务端排队（queue）或插话（steer），**只提交、不等整轮**。
+     *
+     * 与 askStreaming 的分工：那条是「提交 + 等这一轮结束」（空闲发送用，返回值就是本轮的用量）。
+     * 忙时不能走它 —— 正在跑的回合已经有常驻订阅在渲染，等下去只会把这次提交绑到**别人的回合**上。
+     * 用量改由事件层结算（见 noteTurnSettled），与空闲那条路同一份实现。
+     */
+    async submitQueued(content: DshContentPart[], opts: { requestId?: string; mode: DshPromptMode }): Promise<void> {
+        if (!(await this.ensureRunning())) {
+            throw new Error('DSH 服务不可用，无法对话');
+        }
+        const sid = await this.getSession();
+        this.ownPendingTurns += 1;
+        try {
+            await sendPrompt(sid, content, opts.requestId, opts.mode);
+        } catch (e) {
+            // 没排上队：撤销登记，否则下一次（别人的）turn/end 会被当成这一轮的结算
+            this.ownPendingTurns = Math.max(0, this.ownPendingTurns - 1);
+            throw e;
+        }
+    }
+
+    /** 变更一条还挂着的排队项（错误原样上抛：调用方按错误码决定是提示还是静默刷新）。 */
+    async updateQueue(itemId: string, action: DshQueueAction): Promise<void> {
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            throw new Error('当前没有会话，无法修改排队消息');
+        }
+        await updateQueueRpc(sid, itemId, action);
     }
 
     /** 实时增量帧的连续性校验通过则返回真（该帧应入列）；不通过则就地请求重开订阅并返回假。 */
@@ -920,6 +1116,38 @@ export class DshService {
     }
 
     /**
+     * 本插件提交的回合结束了：把这一轮的用量交给装配层记账。
+     *
+     * 空闲提交与忙时提交**共用这一处**：先前只有空闲那条路会记（`askStreaming` 返回后），
+     * 忙时提交没有返回值可挂。用量的事实来自行（`stats`），而「谁提交的、什么时候结束」
+     * 只有事件层知道 —— 放在这里，两条路径就不会各写一份口径。
+     *
+     * 「只记自己提交的」由 ownPendingTurns 把关：别处驱动的回合不产生消费记录。
+     */
+    private noteTurnSettled(rows: readonly DshStreamRow[]): void {
+        if (this.ownPendingTurns <= 0) {
+            return;
+        }
+        this.ownPendingTurns -= 1;
+        const sid = this.currentSessionId;
+        if (this.onTurnSettled === undefined || sid === undefined) {
+            return;
+        }
+        const assistants = rows.filter(
+            (r): r is Extract<DshStreamRow, { kind: 'assistant' }> => r.kind === 'assistant'
+        );
+        const row = assistants[assistants.length - 1];
+        if (row === undefined) {
+            return;
+        }
+        this.onTurnSettled({
+            sessionId: sid,
+            stats: (row.stats ?? {}) as DshReplyStats,
+            ...(row.timeMs === undefined ? {} : { timeMs: row.timeMs }),
+        });
+    }
+
+    /**
      * 进行中尝试的**基线回放**：订阅打开时若已有活跃尝试，它此前流出的增量不在窗口记录里。
      * 不回放的话，「打开一个正在生成的会话」在接入时刻之前的正文整段不显示。
      *
@@ -1019,6 +1247,11 @@ export class DshService {
         for (const e of fresh) {
             this.noteTurnEnd(e);
         }
+        // 本插件提交的回合结束了：结算留到**这一批的整表构建**里做（见 flushRows）——
+        // 在这里再建一次行，等于每个回合结束都白算一整份窗口（长会话上是百毫秒级）。
+        if (fresh.some((e) => e.type === 'turn/end')) {
+            this.settlePending = true;
+        }
     }
 
     /**
@@ -1058,6 +1291,11 @@ export class DshService {
         const started = Date.now();
         const rows = buildRows(this.streamEvents);
         this.onRows(rows, this.turnActive());
+        // 已到期的回合结算（用**这一份**刚建好的行，不重算；见 noteTurnSettled）
+        if (this.settlePending) {
+            this.settlePending = false;
+            this.noteTurnSettled(rows);
+        }
         this.lastBuildMs = Date.now() - started;
         this.noteBlankAnswer(rows);
         this.emitTodos();
@@ -1185,6 +1423,8 @@ export class DshService {
         // 自愈配额与诊断去重按会话重置：新会话该有新的机会
         this.reseedCount = 0;
         this.blankAnswerKey = '';
+        // 到期的结算属于上一个会话的窗口：换会话时丢掉，别让它记到新会话上
+        this.settlePending = false;
         // 已排队的合并窗口一起丢：它要发的是**上一个会话**的窗口，留着会覆盖新会话的行
         if (this.rowsTimer !== undefined) {
             clearTimeout(this.rowsTimer);
@@ -1199,6 +1439,8 @@ export class DshService {
      */
     beginTurn(): void {
         this.turnRunning = true;
+        // 记账登记（见 noteTurnSettled）：一次提交对应一次结算
+        this.ownPendingTurns += 1;
     }
 
     /**
@@ -1207,6 +1449,7 @@ export class DshService {
      */
     endTurn(): void {
         this.turnRunning = false;
+        this.ownPendingTurns = Math.max(0, this.ownPendingTurns - 1);
     }
 
     async getSession(): Promise<string> {

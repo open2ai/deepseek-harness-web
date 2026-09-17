@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { DshService, DshNoWorkspaceError } from './api/dshService';
 import { ChatInputService } from './chatInputService';
-import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory } from './dsh';
+import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
 import { traceTool } from './dsh/trace';
 import {
@@ -32,6 +32,15 @@ dsh.onRows = (rows, turnActive) => {
 // 任务清单（输入框上方的常驻条）：与行同源、同一处派生，页面按整表替换；`null` = 没有清单。
 dsh.onTodos = (todos) => {
     postToChats({ type: 'todos', todos });
+};
+// 排队消息（输入框上方的队列卡）：与行**不同源** —— 队列只活在服务端 agent 的收件箱里、不进日志，
+// 来自队列流的投影（见 dshService.ensureControl）。与行一样是整表语义：页面收到即替换。
+dsh.onQueue = (sessionId, items) => {
+    postToChats({ type: 'queue', sessionId, items: toQueueViews(items) });
+};
+// 上下文占用（发送按钮左侧的环）：单独一条轻帧 —— 投影值很小，不重推整串 chatInfo
+dsh.onContext = (sessionId, value) => {
+    postToChats({ type: 'context', sessionId, pressure: value.pressure, breakdown: value.breakdown });
 };
 // 输入框功能宿主侧服务：承载 "/" 斜杠命令/技能，后续输入触发类功能都挂这里（复用 dsh 的会话/就绪）
 const chatInput = new ChatInputService(dsh);
@@ -395,6 +404,8 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
             // 模型列表失败不阻塞投影
         }
         const projections = await dsh.getProjections();
+        // 上下文占用也在这份投影里：顺手喂给服务层（环形图那条轻帧的数据源之一），免得再跑一次 RPC
+        dsh.seedContext(projections);
         let agentPresets:
             | { presets: Array<{ id: string; name?: string; description?: string; isDefault: boolean; broken?: string }> }
             | undefined;
@@ -485,6 +496,32 @@ async function refreshChatInfoAfterSlash(webview: vscode.Webview, commandName: s
 }
 
 /**
+ * 页面来的队列动作 → 服务端形状。
+ *
+ * 形状不合、或编辑内容为空（服务端同样会拒）→ `undefined`：这一层直接拒掉，不发无效请求。
+ * 编辑只发**纯文本块**：含图/文件的条目在页面上就被禁用，这里是第二道。
+ */
+function toQueueAction(action: { kind?: 'edit' | 'remove' | 'steer'; text?: string } | undefined): DshQueueAction | undefined {
+    if (action === undefined) {
+        return undefined;
+    }
+    if (action.kind === 'remove') {
+        return { kind: 'remove' };
+    }
+    if (action.kind === 'steer') {
+        return { kind: 'steer' };
+    }
+    if (action.kind === 'edit') {
+        const text = action.text ?? '';
+        if (text.trim() === '') {
+            return undefined;
+        }
+        return { kind: 'edit', content: [{ type: 'text', text }] };
+    }
+    return undefined;
+}
+
+/**
  * 聊天 webview 统一接线：加载 UI + 处理消息（聊天/停止/文件/复制/工作区）。侧边栏和编辑器面板共用。
  * titlebarMode：模式字符串（侧边栏恒 = TITLEBAR_MODE；编辑器面板恒 'nativeTitle' 作"纯聊天无标题栏"标记）。
  */
@@ -530,6 +567,19 @@ function setupChatWebview(
     const gen = { n: 0 };
     const post = (msg: unknown) => {
         void webview.postMessage(msg);
+    };
+
+    /**
+     * 本插件提交的回合结算：用量记账与统计刷新的**唯一时机**。
+     *
+     * 空闲发送与忙时排队/插话都走这里 —— 忙时提交没有返回值可挂（它不等本轮结束），
+     * 两条路径各记一次迟早会变成两套口径（先前的记账挂在 askStreaming 返回之后）。
+     */
+    dsh.onTurnSettled = (info) => {
+        void recordUsage(globalState, info.stats, info.timeMs);
+        for (const w of allChatWebviews()) {
+            void postChatInfo(w);
+        }
     };
 
     /** 整轮停止：使进行中的 askStreaming 失效，并请 dsh 取消当前会话回合，随后复位聊天 UI。 */
@@ -635,16 +685,35 @@ function setupChatWebview(
                     if (parts.length === 0) {
                         return;
                     }
-                    // 提交这一刻就把「进行中」立起来：不等 turn/start 到达，
-                    // 否则「用户消息回显」到「turn/start」之间按钮会中途变回「发送」（见 dshService.turnRunning）
-                    dsh.beginTurn();
-                    // 第二个参数是正文增量回调：渲染已改由「行」驱动，这里只需要它内部照常累积（回调空转）
                     // 提交标识（页面 mint）：一路带到 session/prompt 的 requestId，
                     // 服务端回显 user/message 会带回同一值，页面据此认领本地已出的行（见 docs/design/08 §11）
                     const submitId = typeof msg.rpcId === 'string' ? msg.rpcId : undefined;
+                    // 投递方式：页面按「忙时键位」选好（空闲恒 queue）
+                    const mode: DshPromptMode = msg.mode === 'steer' ? 'steer' : 'queue';
                     // 诊断：与 buildRows 的 `user/message … rpcId=…` 对照，能直接断定标识配不配得上
-                    console.warn(`[dsh-send] rpcId=${submitId ?? '(页面未给)'}`);
-                    const result = await dsh.askStreaming(parts, {
+                    console.warn(`[dsh-send] rpcId=${submitId ?? '(页面未给)'} mode=${mode}`);
+                    // 忙时提交：**只提交、不等这一轮** —— 正在跑的那一轮由常驻订阅渲染，
+                    // 这条消息的去向由队列流的投影呈现（页面本地只留一条「发送中」，等权威帧按 rpcId 认领）。
+                    // 不走下面的 askStreaming：它是「提交 + 等本轮结束」，忙时用会把这次提交绑到**别人的回合**上。
+                    if (dsh.isTurnActive()) {
+                        try {
+                            await dsh.submitQueued(parts, { requestId: submitId, mode });
+                        } catch (e) {
+                            // 失败只标掉队列卡里那条本地条目：**不走**下面那条对话区失败路径 ——
+                            // 它会把正在跑的回答行定稿成错误（那一轮不是这次提交的）
+                            post({
+                                type: 'chatError',
+                                scope: 'queue',
+                                rpcId: submitId,
+                                message: e instanceof Error ? e.message : String(e),
+                            });
+                        }
+                        return;
+                    }
+                    // 提交这一刻就把「进行中」立起来：不等 turn/start 到达，
+                    // 否则「用户消息回显」到「turn/start」之间按钮会中途变回「发送」（见 dshService.turnRunning）
+                    dsh.beginTurn();
+                    await dsh.askStreaming(parts, {
                         requestId: submitId,
                         // **渲染不再走这里**：全部由宿主下发的「行」驱动（见 docs/design/08 §13）。
                         // 只留**交互类**回调 —— 审批 / 提问 / 提问关闭，它们不是渲染指令。
@@ -675,11 +744,9 @@ function setupChatWebview(
                             }
                         },
                     });
-                    // 回合的渲染结果（正文/统计/计数）由宿主下发的「行」承载，这里只补记用量与刷新投影
-                    await recordUsage(globalState, result.stats, result.time);
-                    if (g === gen.n) {
-                        void postChatInfo(webview); // 刷新上游统计/权限
-                    }
+                    // 回合的渲染结果（正文/统计/计数）由宿主下发的「行」承载。
+                    // 用量记账与统计刷新**不在这里**：它们收在回合结算回调里（见上面的 dsh.onTurnSettled）——
+                    // 忙时提交没有返回值可挂，两条提交路径只能共用一个时机。
                 } catch (e) {
                     // 提交失败也要解除「进行中」：它只在收到 turn/end 时才会被清，
                     // 而失败的提交根本不会有 turn/end（否则会一直显示「终止」）。
@@ -699,6 +766,29 @@ function setupChatWebview(
                     // （旧通路退役后继续发 chatDone 会被页面静默丢弃 —— 既没有错误提示，输入区还卡在处理中）。
                     const message = e instanceof Error ? e.message : String(e);
                     post({ type: 'chatError', message, rpcId: typeof msg.rpcId === 'string' ? msg.rpcId : undefined });
+                }
+            })();
+        } else if (msg.type === 'queueUpdate') {
+            // 排队项的变更（编辑 / 删除 / 转插话）：动作**非乐观** —— 结果以服务端的队列帧为准。
+            // 这里只处理「这次调用本身」的失败，以及两种竞态：条目已被取走、回合已不在跑。
+            const kind = msg.action?.kind;
+            const op: 'edit' | 'remove' | 'steer' = kind === 'remove' || kind === 'steer' ? kind : 'edit';
+            void (async () => {
+                try {
+                    const action = toQueueAction(msg.action);
+                    if (action === undefined) {
+                        return; // 形状不合（或编辑内容为空）：本地拒，不发服务端
+                    }
+                    await dsh.updateQueue(msg.itemId, action);
+                } catch (e) {
+                    const code = e instanceof DshRpcError ? e.code : undefined;
+                    // 两种竞态都表示「这条已经不在队列里了」：刷新即可，不是错误
+                    if (code !== 'session/steer-unavailable' && code !== 'session/queue-item-not-found') {
+                        post({ type: 'queueActionFailed', op, code });
+                    }
+                } finally {
+                    // 成败都补一帧权威整表：成功时界面立刻反映（不等队列增量），竞态下这正是「刷新」那一步
+                    dsh.pushQueue();
                 }
             })();
         } else if (msg.type === 'cancel') {
@@ -728,9 +818,10 @@ function setupChatWebview(
                     postToChats({ type: 'busy', kind: null });
                     // **必须给可见反馈**：子会话继承到切点为止的完整历史，所以对话区看起来**一模一样** ——
                     // 不给提示的话，用户只会以为"点了没反应"。（上游不需要它是因为它的会话列表里会多出一行。）
+                    // 提示就一句「已在新对话中分支：<标题>」：标题本身已经说明成功了；
+                    // 「为什么看起来一样」是解释性内容，写在提示里太长（真机反馈），不再带。
                     vscode.window.showInformationMessage(
-                        `已在新对话中分支${child.title === undefined ? '' : `：${child.title}`}` +
-                            '（子会话继承到该回合为止的历史，所以内容看起来相同）'
+                        `已在新对话中分支${child.title === undefined ? '' : `：${child.title}`}`
                     );
                 } catch (e) {
                     // 上游两条入口都**静默吞掉**分叉失败；这里至少给一次提示（否则用户点了没反应）

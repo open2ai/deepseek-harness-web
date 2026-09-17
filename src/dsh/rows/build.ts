@@ -12,6 +12,7 @@ import { fileRefsOf, hasImageBlock, imageRefsOf, readToolResult, resultText, tex
 import { readSystemPrompt } from '../official/system-prompt';
 import { toolStatusOf } from '../official/tool-status';
 import { createTurnProcessInput, deriveTurnProcess } from './turn-process';
+import { createInboxClaimFold } from './inbox-claims';
 import type { DshPresentedFile, DshRowItem, DshStreamEvent, DshStreamRow } from './types';
 
 type AssistantRow = Extract<DshStreamRow, { kind: 'assistant' }>;
@@ -88,6 +89,11 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
      * 加一类证据只动那一处。
      */
     let processInput = createTurnProcessInput();
+    /**
+     * 收件箱折叠（**整个窗口共用**，不随回合重置）：插话的分类依据是收件箱的 splice 史，
+     * 它跨回合存在（一条插话属于当前回合，但它进的是 next-step 收件箱）。
+     */
+    const inboxFold = createInboxClaimFold();
     /** 本回合起始序号（turn/start 的 seq） */
     let turnStartSeq: number | undefined;
     /** 本回合各步的文本：回合结束时定哪条是回答（正文）、其余进过程链 */
@@ -102,6 +108,16 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
     };
     /** 本回合是否已收到结算（assistant/message）：回滚只在「该尝试期间无结算」时进行 */
     let sawMessage = false;
+    /**
+     * 本回合被**插话**切开的前段（其正文已显示在自己那条行里）。收尾时这些文本不得再当「过程文本」
+     * 重复进最后一段的链，否则同一条正文会出现两遍。
+     */
+    let closedSegmentTexts: string[] = [];
+    /**
+     * 插话把当前回答行**收束**了：后续增量要另开一行 —— 由此得到与上游一致的节点顺序
+     * 「前段回答 → 插话 → 后段回答」。没有它，插话只能被塞进整条回答行的前面或后面。
+     */
+    let segmentClosed = false;
     /** 活跃尝试的回滚基线：正文 + **链长**（放弃时该尝试的推理/增量一并撤回 —— 上游按 attempt 删全部瞬态）；
      *  `sealed` = 该尝试开始时是否已结算过；`liveTextStep` = 当时正文装的是哪一步（回滚要一起复原） */
     let attemptBase: { text: string; chainLen: number; sealed: boolean; liveTextStep: number | undefined } | undefined;
@@ -140,13 +156,15 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
             key: key++,
             text: '',
             done: false,
+            ...(currentTurn === undefined ? {} : { turn: currentTurn }),
             chain: [],
             counts: { toolCallCount: 0, messageCount: 0, subagentCount: 0 },
         });
         active = rows.length - 1;
+        segmentClosed = false;
     };
     const ensureActive = (): AssistantRow | undefined => {
-        if (activeRow() === undefined) {
+        if (activeRow() === undefined || segmentClosed) {
             openAssistant();
         }
         return activeRow();
@@ -195,16 +213,24 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
         step: number | undefined,
         seq: number | undefined,
     ): void => {
+        // **没有块就没有增量**：实时流里的 `start` / `end` 帧不带 `chunk`，若照样登记一条
+        // `{kind:'chunk', step:undefined}` 的过程事实，就会在步表里凭空多出一个「未知步」并成为**最后一步**
+        // —— 回答锚点按最后一步算，于是整个回合被判成「没有回答」而永不折叠。
+        // 历史通路没有这两帧（增量内嵌在结算事件里），所以历史正常、实时不折叠
+        //（真机现象：打开历史有折叠头，实时跑完那一轮没有）。
+        if (chunk === undefined) {
+            return;
+        }
         // 增量也是过程事实的输入（「每步首条可见证据」取自它，可见性判据在 official/chunk-facts）
         processInput.entries.push({ kind: 'chunk', seq, step, chunk });
         // 段标识取**块**序号（chunk 自带，同一次推理的各增量共享它）；
         // 帧顶层的 index 是**帧序号**、逐帧递增，拿它判段会让每个增量各成一段。
-        const index = typeof chunk?.index === 'number' ? chunk.index : undefined;
-        if (chunk?.type === 'reasoning-delta') {
+        const index = typeof chunk.index === 'number' ? chunk.index : undefined;
+        if (chunk.type === 'reasoning-delta') {
             appendReasoning(step, index, typeof chunk.text === 'string' ? chunk.text : '');
             return;
         }
-        if (chunk?.type === 'text-delta') {
+        if (chunk.type === 'text-delta') {
             const delta = typeof chunk.text === 'string' ? chunk.text : '';
             const row = ensureActive();
             if (row === undefined || delta === '') {
@@ -219,12 +245,13 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
         }
     };
 
-    /** 工具结果：解包后按配对标识更新链上那一条。 */
+    /**
+     * 工具结果：解包后按配对标识更新链上那一条。
+     *
+     * 从**最新一行往前找**持有该调用的回答行，而不是只看当前行：回合被插话切成多段时，
+     * 正在等的调用可能登记在**前段**那条行上 —— 只认当前行会让它永远停在「进行中」。
+     */
     const applyToolResult = (data: Record<string, unknown>): void => {
-        const row = activeRow();
-        if (row === undefined) {
-            return;
-        }
         const payload = readToolResult(data);
         const error = data['error'] as { name?: unknown; code?: unknown } | undefined;
         const errCode = typeof error?.code === 'string' ? error.code : undefined;
@@ -236,34 +263,41 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
         // **不截断**：上游展平层没有字符上限（超长由工具自身的正式文案与 UI 的按行折叠处理），
         // 自造截断会静默丢掉输出尾部。
         const output = exit.output;
-        let matched = false;
-        const chain = row.chain.map((c): DshRowItem => {
-            if (matched || c.kind !== 'tool') {
-                return c;
+        for (let i = rows.length - 1; i >= 0; i -= 1) {
+            const row = rows[i];
+            if (row.kind !== 'assistant') {
+                continue;
             }
-            const hit = payload.callId !== undefined ? c.callId === payload.callId : c.status === 'running';
-            if (!hit) {
-                return c;
+            let matched = false;
+            const chain = row.chain.map((c): DshRowItem => {
+                if (matched || c.kind !== 'tool') {
+                    return c;
+                }
+                const hit = payload.callId !== undefined ? c.callId === payload.callId : c.status === 'running';
+                if (!hit) {
+                    return c;
+                }
+                matched = true;
+                return {
+                    ...c,
+                    status: toolStatusOf(errCode, payload.isError),
+                    error: errCode,
+                    errorName: errName,
+                    output: output !== '' ? output : c.output,
+                    exitCode: exit.exitCode,
+                    signal: exit.signal,
+                    // 卡数据源（web 卡的 statusCode/sources、读族的 offset…）**原文透传**：
+                    // 不传则那些卡取不到数据，一律退回通用卡（「输入 / 输出」）。
+                    meta: data['meta'],
+                    // 内容块**始终**透传（上游的结果节点一直带 content）：卡怎么判定、怎么显示都留在渲染侧，
+                    // 只按「含图片才带」会让搜索卡等的恢复定位符拿不到内容。
+                    blocks: payload.blocks,
+                };
+            });
+            if (matched) {
+                rows[i] = { ...row, chain };
+                return;
             }
-            matched = true;
-            return {
-                ...c,
-                status: toolStatusOf(errCode, payload.isError),
-                error: errCode,
-                errorName: errName,
-                output: output !== '' ? output : c.output,
-                exitCode: exit.exitCode,
-                signal: exit.signal,
-                // 卡数据源（web 卡的 statusCode/sources、读族的 offset…）**原文透传**：
-                // 不传则那些卡取不到数据，一律退回通用卡（「输入 / 输出」）。
-                meta: data['meta'],
-                // 内容块**始终**透传（上游的结果节点一直带 content）：卡怎么判定、怎么显示都留在渲染侧，
-                // 只按「含图片才带」会让搜索卡等的恢复定位符拿不到内容。
-                blocks: payload.blocks,
-            };
-        });
-        if (matched) {
-            replaceActive({ ...row, chain });
         }
     };
 
@@ -362,11 +396,23 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
             replySeq = undefined;
             replyMessageId = undefined;
             presentedByPath.clear();
+            closedSegmentTexts = [];
+            segmentClosed = false;
             turnStartSeq = typeof event.seq === 'number' ? event.seq : undefined;
             processInput = createTurnProcessInput();
             processInput.turnStartSeq = turnStartSeq;
             stepTexts.clear();
             stepFirstChainIdx.clear();
+        }
+        // 回合号以**事件自带**为准：快照窗口可能从回合中间开始（缺 `turn/start`），那之后的行
+        // 还得认得出自己属于哪个回合（页面按回合归组做外层折叠，见 `turn` 字段）。
+        // 只认这几类**回合内过程事件**，不认 `deliverables/presented` —— 后者自带 `turn` 是拿来
+        // 做「串台防护」的（见下文该分支），拿它覆盖当前回合号会把别的回合的声明放进来。
+        if (type === 'step/start' || type === 'step/end' || type === 'assistant-stream' || type === 'assistant/chunk' || type === 'assistant/message' || type === 'tool/call' || type === 'tool/result' || type === 'llm/retry') {
+            const turn = d['turn'];
+            if (typeof turn === 'number') {
+                currentTurn = turn;
+            }
         }
         collectTurnEvent(type, event, d);
         // 步边界是过程事实的输入：步内状态按 turn+step 归并，中断回答还要用该步的关闭边界
@@ -376,6 +422,13 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
                 seq: typeof event.seq === 'number' ? event.seq : undefined,
                 step: typeof d['step'] === 'number' ? (d['step'] as number) : undefined,
             });
+        }
+
+        // 收件箱 splice：只喂给「插话判定」的折叠（不产出行）。**必须排在 user/message 之前** ——
+        // 它决定紧随其后的那条人类消息算不算插话（按事件顺序取「当时」的状态，不是事后整表判断）。
+        if (type === 'agent/inbox/spliced') {
+            inboxFold.accept(event);
+            continue;
         }
 
         if (type === 'user/message') {
@@ -412,6 +465,14 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
             const text = contentText(d['content']);
             const imageRefs = imageRefsOf(d['content']);
             const files = fileRefsOf(d['content']);
+            // 插话分类：这条消息是否属于本步从 next-step 收件箱取用的那一批（见 rows/inbox-claims）。
+            // 只影响行的种类与 compactAnswer 锚点判定，不影响正文/附件读法。
+            const messageId = typeof d['id'] === 'string' ? (d['id'] as string) : undefined;
+            const steering = messageId !== undefined && inboxFold.claimed(messageId);
+            // 人类锚点（提问 / 插话）进过程事实：`compactAnswer` 判「区间内有没有人插话」要用
+            if (typeof event.seq === 'number') {
+                processInput.entries.push({ kind: 'human', seq: event.seq });
+            }
             // **一律出行**（含只有附件、甚至内容为空）：该事件本身就是一条用户消息，
             // 加「内容为空就丢」会让它在对话区整条消失。
             // 诊断（`DSH_RAWLOG=full` 时才打）：页面靠 `rpcId` 认领本地乐观行 ——
@@ -425,16 +486,36 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
                 key: userKey,
                 text,
                 ...(typeof source.rpcId === 'string' ? { rpcId: source.rpcId } : {}),
+                ...(steering ? { steering: true as const } : {}),
                 ...(typeof event.time === 'number' ? { timeMs: event.time } : {}),
                 ...(imageRefs.length > 0 ? { imageRefs } : {}),
                 ...(files.length > 0 ? { files } : {}),
             };
-            // **插到当前这条回答行之前**。理由与上游同构：上游把流式内容当作**该回合 step 节点的更新**，
-            // 位置由 `step/start` 这类**边界事件**建立 —— 增量自己不带位置，所以回答永远落在本回合的步里，
-            // 也就是**问话下面**。而本构建器一回合只开一条行、且由内容懒开，
-            // 于是「用户消息的回显比该回合头几个增量到得更晚」时，回答行就会先建出来。
-            // 这里按同一语义纠正：**只要还有未定稿的回答行，它属于当前回合** → 用户行插到它前面。
-            if (active >= 0) {
+            // 位置规则分两种来路，**不能混用**：
+            //  · 插话（steering）：它是回合内的一条新输入，位置就按到达顺序（紧跟在已生成内容之后），
+            //    并把当前回答行**收束成一段** —— 后续增量另开一行，得到上游的节点顺序
+            //    「前段回答 → 插话 → 后段回答」。若照下面那条规则插到回答行**之前**，已生成的内容会被
+            //    整个挤到插话下面（位置与上游相反），且流式期间画面会跟着上下跳。
+            //  · 普通提问（含迟到的回显）：**插到当前这条未定稿回答行之前**。理由与上游同构：上游把流式内容
+            //    当作该回合 step 节点的更新、位置由 `step/start` 这类边界事件建立，回答永远落在问话下面；
+            //    而本构建器一回合只开一条行、由内容懒开，于是「回显比该回合头几个增量到得更晚」时回答行先建出来 ——
+            //    这里按同一语义纠正：**只要还有未定稿的回答行，它属于当前回合**。
+            if (steering) {
+                const cur = activeRow();
+                if (cur !== undefined && !cur.done) {
+                    // 只把这一段**收束**（`done`）：过程事实是**回合级**的，统一在 `turn/end` 写给本回合
+                    // 每一条回答行（上游只有一份 `turn-process` 规格，所有节点看到的是同一份）。
+                    replaceActive({ ...cur, done: true });
+                    if (cur.text !== '') {
+                        closedSegmentTexts.push(cur.text);
+                    }
+                    segmentClosed = true;
+                    // 进行中的尝试属于刚收束的那一段：放弃它的回滚基线一并作废
+                    //（留着会把前段的正文写进后段行；宁可少撤一次半截，也不串段）
+                    attemptBase = undefined;
+                }
+                rows.push(userRow);
+            } else if (active >= 0) {
                 rows.splice(active, 0, userRow);
                 active += 1; // 回答行下标随插入后移
                 if (process.env['DSH_RAWLOG'] === 'full') {
@@ -584,7 +665,11 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
                 }
                 // 各步文本都留着：回合结束时回答步的那条当正文，其余进过程链（否则被整条覆盖后消失）
                 stepTexts.set(msgStep, text);
-                replaceActive({ ...row, text });
+                // 已被插话切开的前段行已经显示过这条文本：不再写进当前（后段）的正文，否则内容串段
+                // （正常事件顺序下前段的结算先到、插话后到，这里是兜底）
+                if (!closedSegmentTexts.includes(text)) {
+                    replaceActive({ ...row, text });
+                }
             }
             continue;
         }
@@ -714,6 +799,10 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
                 if (answerStep !== undefined && step === answerStep) {
                     continue; // 回答步的文本就是正文
                 }
+                // 被插话切开的前段：那条行已经显示了这段正文，不能再当过程文本重复进链（否则同一段出现两遍）
+                if (t !== '' && closedSegmentTexts.includes(t)) {
+                    continue;
+                }
                 // 回答步**判不出来**时（`answerStep` 缺失：末步含工具调用等），最后那条带文本的结算
                 // 仍然充当了正文 —— 同一条文本不能再进链，否则界面上正文会出现两遍
                 //（真机现象：工具行里又出现一份和正文一样的文字）。
@@ -771,6 +860,17 @@ export function buildRows(events: readonly DshStreamEvent[]): DshStreamRow[] {
             });
             active = -1;
             liveStep = undefined;
+            // 过程事实与折叠计数是**回合级**的（上游一份 `turn-process` 规格，所有节点同看）：本回合若被插话
+            // 切成多段行，剩下的段也要拿到同一份 —— 否则那些行没有 `process`，判据链第一道门就不过，
+            // 页面按回合归组时它们不跟随折叠头的展开态（真机现象：插话过的回合「折叠又没了」）。
+            if (processFacts !== null && currentTurn !== undefined) {
+                for (let i = 0; i < rows.length; i += 1) {
+                    const r = rows[i];
+                    if (r.kind === 'assistant' && r.turn === currentTurn && r.key !== row.key) {
+                        rows[i] = { ...r, process: processFacts, counts: { toolCallCount, messageCount, subagentCount } };
+                    }
+                }
+            }
             // 诊断（`DSH_RAWLOG=full`）：一轮收尾时把**行的构成**打一行 ——
             // 「工具行看不到内容 / 只出一条」这类问题，先看这里宿主到底出了几条、链上有没有它们。
             // `last={…}` 是**动作条三项的取值现场**：反馈图标要 `msgId`、用量/用时要 `stats`，

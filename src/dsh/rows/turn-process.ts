@@ -34,7 +34,14 @@ export type TurnProcessEntry =
     /** `tool/result`（只有 `append` 才算「其它」证据） */
     | { kind: 'tool-result'; seq?: number; append: boolean }
     /** 上下文注入：进过程区间（上游的独立节点类型不含它） */
-    | { kind: 'context'; seq?: number };
+    | { kind: 'context'; seq?: number }
+    /**
+     * 本回合的人类消息（用户提问 / 插话）。
+     *
+     * 只用于 `compactAnswer` 的判据；**不带插话标记** —— 上游那条判据对 user 与 steering
+     * 一视同仁（插话分类落在**行**上，见 `rows/inbox-claims.ts`）。
+     */
+    | { kind: 'human'; seq?: number };
 
 /** 一个回合的过程事实**输入**：构建器只往里登记条目，判定全在本文件。 */
 export interface TurnProcessInput {
@@ -89,6 +96,8 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
     let otherStartSeq: number | undefined;
     /** 非 assistant 步的过程成员（工具 / 上下文 / 重试）：算「过程外置」时按区间筛 */
     const otherMembers: Array<{ seq: number; step: number | undefined; kind: 'tool' | 'context' | 'retry' }> = [];
+    /** 本回合的人类消息序号（插话与追加提问都算）：`compactAnswer` 的判据 */
+    const humans: number[] = [];
 
     for (const e of input.entries) {
         switch (e.kind) {
@@ -159,6 +168,12 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
                 }
                 break;
             }
+            case 'human': {
+                if (e.seq !== undefined) {
+                    humans.push(e.seq);
+                }
+                break;
+            }
         }
     }
 
@@ -174,6 +189,27 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
     }
 
     const answer = answerOf(steps.get(stepOrder[stepOrder.length - 1]), stepOrder[stepOrder.length - 1], input.turnEndSeq);
+
+    // 「开场人类锚点」= 控制锚**之前**最早的人类消息（没有则 undefined）：回合是怎么被发起的那一条。
+    let openingHumanAnchor: number | undefined;
+    for (const seq of humans) {
+        if (seq < controlAnchorSeq) {
+            openingHumanAnchor = min(openingHumanAnchor, seq);
+        }
+    }
+    /**
+     * 紧凑回答（上游 `compactAnswer`）：开场锚点之后、回答锚点之前**又出现人类消息** → 假。
+     *
+     * 含义是「过程区间里有人插了话」，回答就不该被当作紧贴折叠头的那一段（上游据此把间距放宽）。
+     * 没有回答锚点时用 `null`：此时任何一条后续人类消息都让它为假（与上游同）。
+     */
+    const compactAnswerOf = (answerAnchorSeq: number | null): boolean =>
+        !humans.some(
+            (seq) =>
+                (openingHumanAnchor === undefined || seq > openingHumanAnchor) &&
+                (answerAnchorSeq === null || seq < answerAnchorSeq)
+        );
+
     if (answer === null) {
         return {
             answerAnchorSeq: null,
@@ -183,6 +219,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
             // 上游：没有回答时过程起点就取控制锚
             processStartSeq: controlAnchorSeq,
             hasExternalProcess: false,
+            compactAnswer: compactAnswerOf(null),
         };
     }
 
@@ -223,6 +260,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
         controlAnchorSeq,
         processStartSeq,
         hasExternalProcess,
+        compactAnswer: compactAnswerOf(answer.seq),
     };
 }
 

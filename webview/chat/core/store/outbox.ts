@@ -6,12 +6,14 @@ import type { ChatStore } from './types'
 import type { ComposerSlice } from './composer'
 import type { CatalogsSlice } from './catalogs'
 import type { MessagesSlice } from './messages'
+import type { QueueSlice } from './queue'
 
 export interface OutboxDeps {
   host: ChatHost
   composer: ComposerSlice
   catalogs: CatalogsSlice
   messages: MessagesSlice
+  queue: QueueSlice
 }
 
 export interface OutboxSlice {
@@ -21,16 +23,27 @@ export interface OutboxSlice {
 }
 
 export function createOutbox(deps: OutboxDeps): OutboxSlice {
-  const { host, composer, catalogs, messages } = deps
+  const { host, composer, catalogs, messages, queue } = deps
   const { text, attachments, images, refs, runSlash } = composer.store
   const { slashCatalog, requestSlashList } = catalogs.store
   const { processing } = messages.store
 
-  function send(): void {
+  /**
+   * 发送（用户发起的动作）。
+   *
+   * 两条路，按**回合是否在跑**分：
+   * - 空闲：提交 + 等这一轮（现有行为），本地面板里立刻出行；
+   * - 忙：只提交，消息**不进对话流** —— 它在队列卡里挂一条「发送中」，等宿主队列帧按 `rpcId` 认领。
+   *   队列不属于任何回合，所以忙时既不 `addUser`、也不 `beginAssistant`、也不置 `processing`
+   *   （那个「处理中」是别人的回合）。
+   *
+   * @param mode - 忙时的投递方式：queue = 排队（默认），steer = 插话（投到当前回合的下一步）。空闲恒 queue。
+   */
+  function send(mode: 'queue' | 'steer' = 'queue'): void {
     const msg = text.value.trim()
     const attach = attachments.value
     const imgs = images.value
-    if ((!msg && attach.length === 0 && imgs.length === 0 && refs.value.length === 0) || processing.value) return
+    if (!msg && attach.length === 0 && imgs.length === 0 && refs.value.length === 0) return
     // 「/」命令路由：纯文本单行、行首 `/` 且首词命中宿主命令目录 → 执行斜杠命令而非发消息。
     // 技能行(/技能名…)不在此列，照常走 chatSend（宿主 pre-step 识别 /技能名 头）。
     const cat = slashCatalog.value
@@ -61,12 +74,43 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     const refTokens = refs.value.map((r) => r.token)
     const prompt = [...refTokens, msg].filter(Boolean).join('\n\n') // 发给宿主：含引用 token
     const display = msg
-    const refSnap = refs.value.map((r) => ({ kind: r.kind, label: r.label }))
-    // 用户主动发送：即使滚动条在上面也强制滚到底看新内容（流式中自己翻上去则不受影响）
-    messages.bumpScroll()
+    const refSnap = refs.value.map((r) => ({ kind: r.kind, label: r.label, token: r.token }))
     // 提交标识：由本面板 mint，一路带到 session/prompt 的 requestId；
     // 服务端回显 user/message 时会带回同一个值，据它认领本地这一行（避免出现两行）
     const rpcId = crypto.randomUUID()
+
+    if (processing.value) {
+      // 忙时：消息**不进对话流**（队列不属于任何回合），只在队列卡挂一条「发送中」，
+      // 等宿主队列帧按 `rpcId` 认领。也不 bumpScroll —— 对话区这一瞬没有任何新内容。
+      queue.addSending({
+        rpcId,
+        mode,
+        text: display,
+        attachments: [
+          // 图片带上本地预览：pending 插话气泡要立刻显示缩略图（权威条目取不到字节，只有本地回显有）
+          ...imgs.map((i) => ({
+            kind: 'image' as const,
+            ...(i.name ? { name: i.name } : {}),
+            preview: { mediaType: i.mediaType, data: i.data },
+          })),
+          ...attach.map((f) => ({
+            kind: 'file' as const,
+            name: f.name,
+            ...(f.bytes === undefined ? {} : { bytes: f.bytes }),
+          })),
+        ],
+        ...(refSnap.length > 0 ? { refs: refSnap } : {}),
+      })
+      attachments.value = []
+      images.value = []
+      refs.value = []
+      text.value = ''
+      host.post({ type: 'chatSend', text: prompt, images: imgs, ...(files.length > 0 ? { files } : {}), rpcId, mode })
+      return
+    }
+
+    // 空闲：用户主动发送时即使滚动条在上面也强制滚到底看新内容（流式中自己翻上去则不受影响）
+    messages.bumpScroll()
     messages.addUser(display, imgs, undefined, refSnap.length ? refSnap : undefined, undefined, files.length > 0 ? files : undefined, rpcId)
     attachments.value = []
     images.value = []
