@@ -40,8 +40,9 @@ import {
     dshEvents,
     followSession,
     buildRows,
-    foldTodos,
-    type DshFollowHandle,
+    buildRowsIncremental,
+    type RowsFoldCheckpoint,
+    foldTodos,    type DshFollowHandle,
     type DshFollowWindow,
     type DshStreamEvent,
     type DshStreamRow,
@@ -54,6 +55,9 @@ import {
     type DshQueueAction,
     readContextPressure,
     readContextBreakdown,
+    pageSessionEvents,
+    HistoryWindow,
+    type WindowChange,
     type DshContextFacts,
     listAgentPresets as listAgentPresetsRpc,
     selectAgentPreset as selectAgentPresetRpc,
@@ -62,8 +66,11 @@ import {
     subscribeTranscriptView as subscribeTranscriptViewRpc,
     type DshAgentPresetRoster,
     type DshTranscriptView,
+    DshRpcError,
 } from '../dsh';
 import { sessionDisplayTitle } from '../dsh/official/session-title';
+import { initialContinuity, judgeAssistantFrame } from '../dsh/stream-continuity';
+import { foldTurnState, openFromTurnBoundary } from '../dsh/turn-state';
 import { liveChunkSeq } from '../dsh/official/live-chunk-seq';
 import { expandAssistantStream } from '../dsh/official/assistant-stream';
 import { increasedForkTitle } from '../dsh/official/fork-title';
@@ -77,6 +84,43 @@ const NODE_REQUIREMENT = '^22.19.0 || >=24.0.0';
  * 落盘后下次先探它、探到就复用。
  */
 const OWNED_ENDPOINT_KEY = 'dsh.ownedEndpoint';
+
+/**
+ * 断点续折的校验抽样：每这么多次**复用旧断点**的构建，全量重折一遍做逐字节比对。
+ *
+ * 校验不便宜（一次全量 = 几百毫秒），而它防的是「断点折叠与全量折叠不等价」——
+ * 那种问题的判据在**真实会话**上（`tmp/_rows.checkpoint.test.mjs` 已逐回合钉住），
+ * 生产里再按轮次抽样属于兜底：真出现了就自愈，而不是让正文悄悄错一段。
+ */
+const CHECKPOINT_VERIFY_EVERY = 5;
+
+/**
+ * 投递节流里「每 MB 载荷记多少毫秒」。
+ *
+ * 整表下发的载荷与窗口长度成正比（实测 48 回合 = 17MB、`stringify` 78ms），页面侧还要解析与重渲。
+ * 取 6ms/MB 是保守估计（比实测的 `stringify` 便宜），只用来避免「构建快了就以十几毫秒的间隔推十几 MB」。
+ */
+const PAYLOAD_MS_PER_MB = 6;
+
+/** 载荷抽样的周期（见 `measurePayload`）：行数没变时每这么多次投递重量一遍。 */
+const PAYLOAD_SAMPLE_EVERY = 8;
+
+/**
+ * 「这一轮还在跑吗」安全网轮询的周期（见 `startTurnWatch`）。
+ *
+ * 只在插件认为**有轮在跑**时开表，所以正常情况下它一次都不跑（权威投影帧先到就先停了）。
+ * 2 秒是「别处停掉之后，按钮最多滞后这么久复位」与「一条轻量投影 RPC」之间的折中。
+ */
+const TURN_WATCH_INTERVAL_MS = 2000;
+
+/**
+ * 事件窗口**不设条数上界**（与上游一致）。
+ *
+ * 上游 `session-controller/src/client` 里只有**取数页大小**（`PAGE_MESSAGES = 50` /
+ * `JUMP_PAGE_MESSAGES = 200`），窗口本身按 `seq` 合并、**从不按条数裁剪**（`contract/events.ts`
+ * 的 `publish`），显示量交给渲染层虚拟化。长会话卡顿的正解是**渲染层虚拟化**（登记在 `12` §3.3，
+ * B 类待办），不是删数据。
+ */
 
 /** 进程是否还活着（`kill(pid, 0)` 只做存在性探测；`EPERM` 说明存在但没权限动它）。 */
 function isProcessAlive(pid: number): boolean {
@@ -128,6 +172,29 @@ function normalizePath(p?: string): string {
     return (p ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
 
+/**
+ * 从 goal 投影里取出**CAS 引用** `{id, revision}`（上游 `GoalRef`）。
+ *
+ * 形状兼容两层：上游 `GoalProjection = { goal: GoalSnapshot, … }`（`goal/src/types.ts:107`），
+ * 但也见过扁平写法（`{id, revision, phase, …}`），两种都收。
+ * 缺 `revision` 时返回 undefined —— 没有版本号就无法 compare-and-set，宁可什么都不做也不盲打
+ *（盲打会被服务端按"版本不符"拒掉，用户看到的是一个没头没尾的报错）。
+ */
+function goalRefOf(raw: unknown): { id: string; revision: number } | undefined {
+    if (raw === null || typeof raw !== 'object') {
+        return undefined;
+    }
+    const outer = raw as Record<string, unknown>;
+    const nested = outer['goal'];
+    const src = nested !== null && typeof nested === 'object' ? (nested as Record<string, unknown>) : outer;
+    const id = src['id'];
+    const revision = src['revision'];
+    if (typeof id !== 'string' || id === '' || typeof revision !== 'number' || !Number.isFinite(revision)) {
+        return undefined;
+    }
+    return { id, revision };
+}
+
 /** 上游 session.list 列表 item 的 durable title：优先顶层 title，回退 projectionValues / projections.values 里的 title。
  *  空/缺返回 undefined（交 sessionDisplayTitle 走 cwd basename / sessionId 兜底）。 */
 function durableTitleOf(s: {
@@ -154,6 +221,29 @@ export class DshNoWorkspaceError extends Error {
 }
 
 export class DshService {
+    /**
+     * 事件窗口（分页）：**它才是窗口的真正持有者**，`streamEvents` 只是它的只读视图。
+     *
+     * 为什么单列一个类：这段逻辑决定「用户能看到多早以前」，埋在服务里既没法单测、也看不清
+     * 两条通路（打开历史 / 实时跟随）的差别。三种进窗口的方式各一个方法（见 `history-window.ts`）。
+     * 上游对应物是 `SessionEvents` 的窗口。
+     *
+     * **窗口不按条数裁剪**（与上游一致）：上游只设取数页大小、窗口按 `seq` 合并、从不删。
+     */
+    constructor() {
+        this.window = this.makeWindow();
+    }
+
+    /** 造一个窗口（诊断出口接 Output 面板）。 */
+    private makeWindow(): HistoryWindow<DshStreamEvent> {
+        return new HistoryWindow<DshStreamEvent>((m) => {
+            this.onWindowLog?.(String(m).replace(/^\[dsh-rows\]\s*/, ''));
+            if (process.env['DSH_RAWLOG'] !== undefined) {
+                console.warn(m);
+            }
+        });
+    }
+
     // 进程状态
     private dshProcess: ChildProcess | null = null;
     private dshStartedByUs = false;
@@ -174,8 +264,20 @@ export class DshService {
     private queueBySession = new Map<string, DshQueueItem[]>();
     /** 各会话的上下文占用缓存：由队列流（`session/control`）的投影帧与 chatInfo 快照共同填充。 */
     private contextBySession = new Map<string, DshContextFacts>();
+    /**
+     * 各会话的**投影值缓存**（`session/control` 的基线 + 逐键更新帧）。
+     *
+     * 上游客户端就是这套（`ProjectionValueStore`）：宿主只算一份，客户端按 key 存**完整值**。
+     * 本插件相应地也存整份，投影一变就把**整表**推给页面（值很小、条数很少），
+     * 页面因此拿到的永远是当前快照 —— 输入框下方的「会话统计 / Token 用量」在流式期间
+     * 会跟着变（从前它们只在 `chatInfo` 快照时刷一次，所以整轮都不动）。
+     */
+    private projectionsBySession = new Map<string, Record<string, unknown>>();
     /** 本会话收到的事件（保结构）：**行构建的唯一输入**；换会话时清空。 */
     private streamEvents: DshStreamEvent[] = [];
+    /** 事件窗口的当前实例（不按条数裁剪；见 `history-window.ts` 的类注释）。 */
+    private window: HistoryWindow<DshStreamEvent>;
+
     /** 已收到的**持久**事件的最大序号（**不含**合成序号）：实时帧的合成序号以它为基准。 */
     private durableSeq = -1;
     /** 距上一条持久事件以来已收到的实时帧数：合成序号靠它保持帧间递增，持久事件一到即归零。 */
@@ -214,11 +316,15 @@ export class DshService {
     /** 等首帧快照的就绪者（见 awaitWindowSeeded）。 */
     private seedWaiters: Array<() => void> = [];
     // ---------- 实时增量的连续性（不连续就重开订阅定基，而不是继续攒一个带洞的正文） ----------
-    /** 当前增量流版本号（取自快照基线；实时帧必须逐帧 +1）。 */
-    private assistantRevision: number | undefined;
-    /** 进行中尝试的标识与**下一个期望的块序号**（取自快照基线 + 实时 start 帧）。 */
-    private attemptId: string | undefined;
-    private attemptNextIndex = 0;
+    /**
+     * 增量流的连续性状态（判据全在 `dsh/stream-continuity.ts`，那是**纯函数**、可脚本驱动）。
+     *
+     * 要点：`revision` **只记不判**。订阅是**中途**打开的，服务端只为当前订阅者广播之后的帧，
+     * 「快照 revision」与「第一帧 revision」之间差几帧是常态；拿它当判据会让**每次开着流式打开/重连
+     * 都必然触发一次"重新定基"**（整窗替换 + 断点作废 + 全量重折）—— 观感就是"卡一下、然后一下刷出来"。
+     * 上游客户端同样不校验 revision，它只校验 `attemptId` + `index`。
+     */
+    private continuity = initialContinuity();
     /** 正在重开订阅：避免同一次不一致触发多次。新快照到达（adoptBaseline）即解除。 */
     private rebaselining = false;
     /** 连续「打开页缺基线」的次数：只重试一次，仍缺就降级继续（防与不合规的服务端死循环）。 */
@@ -227,14 +333,128 @@ export class DshService {
     private todosKey = '';
     /** 合并窗口的定时器（见 emitRows）：非空 = 已排队，不重复安排。 */
     private rowsTimer: ReturnType<typeof setTimeout> | undefined;
-    /** 上一次全量构建的耗时（毫秒）：节流的下限取它，慢会话不会把自己堆死。 */
+    /** 上一次构建的耗时（毫秒）：节流的下限取它，慢会话不会把自己堆死。 */
     private lastBuildMs = 0;
+    /**
+     * 上一批行构建留下的断点（见 `buildRowsIncremental`）。
+     *
+     * 它把「一次构建遍历整个窗口」变成「只重折当前回合」：一个上百万事件的会话里，
+     * 全量重折要 600ms 以上，而流式期间每一批事件都要重建一次 —— 跟不上时正文就停在半截，
+     * 等回合结束一次性刷出来（真机现象「快到最后字不出了，然后一下刷出很多」）。
+     * 窗口被替换（换会话 / 重定基）或历史前插时，断点自带的判据会判定失效并自动退回全量。
+     */
+    private rowsCheckpoint: RowsFoldCheckpoint | undefined;
+    /** 断点校验的抽样计数：每 `CHECKPOINT_VERIFY_EVERY` 次新的断点全量核对一次（见 buildCurrentRows）。 */
+    private checkpointUses = 0;
+    /**
+     * 上一次投递的行载荷大小（MB）。整表语义下它与窗口长度成正比：48 回合 / 105 万事件的会话是
+     * **17MB**（`tmp/_buildrows.budget.probe.mjs`），`JSON.stringify` 一项就要 78ms。
+     * 节流要把它算进去，否则「构建很快」会变成「十几毫秒推十几 MB」。
+     */
+    private lastPayloadMb = 0;
+    /** 上次算出的 turnActive（诊断日志只在翻转且 DSH_RAWLOG 时打，见 flushRows）。 */
+    private lastTurnActiveLogged: boolean | undefined;
+    /** 载荷抽样的计数与上次的行数（见 measurePayload）。 */
+    private payloadSamples = 0;
+    private lastPayloadRows = 0;
+    /** 权威回合状态（`turnBoundary` 投影）：undefined = 还没读到，此时退回窗口扫描。 */
+    private turnOpenFromHost: boolean | undefined;
+    /**
+     * 已知的最大回合号（`turn/start` / `turn/end` 的 `turn` 字段）。
+     *
+     * 只用来挡**迟到的** `turn/end`：它会把刚起来的那一轮一起关掉（状态行消失、停止按钮复位），
+     * 而这一轮其实还在跑。`turn/start` 必先于 `turn/end` 到达，所以「收官号 < 已知最大号」即迟到。
+     */
+    private lastTurnSeen = 0;
+    /** 「这一轮还在跑吗」的安全网轮询（见 startTurnWatch）：只在插件认为有轮在跑时开表。 */
+    private turnWatchTimer: ReturnType<typeof setInterval> | undefined;
+    /** 当前会话的 `$events` 常驻订阅（审批/提问）。与回合无关：上游同口径（`ui-user-questions` 常驻监听）。 */
+    private askHandle: (() => void) | undefined;
     /** 「无正文」自愈的重开次数（每会话限次：与服务端互相踢比缺正文更糟）。 */
     private reseedCount = 0;
     /** 已报过的「无正文」窗口形态（同一个形态只报一次，否则每次 flush 都刷屏）。 */
     private blankAnswerKey = '';
     // 当前工作区（缺省按 VS Code 文件夹自动解析，避免会话全部掉进"未分组"）
     private currentWorkspaceId: string | undefined;
+
+    /** 更早的历史还没进窗口（页面「加载更早」的门）。 */
+    historyHasMore(): boolean {
+        return this.window.hasMore();
+    }
+
+    /** 「加载更早」是否在飞（页面按钮据此禁用）。 */
+    historyLoading(): boolean {
+        return this.window.isLoadingOlder();
+    }
+
+    /** 当前窗口里的事件条数（诊断与直观量）。 */
+    windowEventCount(): number {
+        return this.window.size();
+    }
+
+    /** 立刻重算并下发行（「加载更早」收尾用：那一步不走事件到账的节流路径）。 */
+    flushRowsNow(): void {
+        this.flushRows();
+    }
+
+    /**
+     * 「这一轮已经不在跑了」——**停止按钮被服务端接受之后**由宿主立刻置位并下发行。
+     *
+     * 为什么需要它：页面把「终止」态挂在 `rows` 帧的 `turnActive` 上，而那一帧平时只在
+     * 事件到账时才重发。取消被接受后要先等服务端补发 `turn/end` 才复位 —— 那段空档里
+     * 用户点完看不到任何变化。这里主动推一帧，让「点 → 按钮立刻回到发送态」这一步成立；
+     * 随后真正的 `turn/end` 到达时再按权威事实覆盖。
+     *
+     * 只用于**已经确认取消被接受**的场合（`session.cancel` 返回成功），不是乐观猜测。
+     */
+    markTurnStopped(): void {
+        this.turnRunning = false;
+        this.turnOpenFromHost = false;
+        this.flushRows();
+    }
+
+    /**
+     * 往前翻一页历史并**前插**进窗口（对齐上游 `ISession.loadOlder()`）。
+     *
+     * 与「整窗替换」的区别：`session/follow` 的首帧快照是**替换**语义（它就是窗口本身），
+     * 而这一页是**追加在窗口前面**的一段更早历史 —— 所以走 `prepend`：
+     *   ① 以窗口最老事件的 `seq` 为 `beforeSeq` 读一页；
+     *   ② 按 `seq` 去重后并入窗口（`appendEvents` 已有去重与排序）；
+     *   ③ 用这一页的 `hasMore` 刷新「还有更早的吗」。
+     *
+     * 失败处理：**窗口不动、`loadingOlder` 复位**，由调用方记一条日志 —— 读不到更早的历史不是错误操作。
+     */
+    async loadOlderPage(): Promise<void> {
+        if (this.window.isLoadingOlder()) {
+            return;
+        }
+        const sessionId = this.currentSessionId;
+        const oldest = this.window.oldestSeq();
+        // 窗口还没定基（没有快照）或已经到最老：没有可翻的页，别白跑一次 RPC
+        if (sessionId === undefined || oldest === undefined || !this.window.hasMore()) {
+            return;
+        }
+        this.window.setLoadingOlder(true);
+        // 先下发一次「加载中」：按钮要立刻变成进行时，而不是等这一页读完才反应
+        this.flushRows();
+        try {
+            const page = await pageSessionEvents(sessionId, oldest);
+            // 会话可能在读这一页期间被切走：此时这一页属于上一个会话，丢弃
+            if (this.currentSessionId !== sessionId) {
+                return;
+            }
+            // 前插：窗口**不裁**（这就是纯前插，已有的一段一条不动），
+            // 并用**这一页**的 hasMore 刷新「还有更早的吗」——翻到底时按钮自然消失。
+            this.applyWindowChange(this.window.prepend({ events: page.events, hasMore: page.hasMore }));
+        } finally {
+            this.window.setLoadingOlder(false);
+        }
+    }
+
+    /** 窗口变过之后同步只读视图（窗口不裁剪，所以这里只做一次拷贝）。 */
+    private applyWindowChange(_change: WindowChange): void {
+        this.streamEvents = [...this.window.list()];
+    }
 
     /**
      * 通用通道：可调任意 DSH API（session / goal / subagent / workspace / llm / host ...）。
@@ -615,8 +835,11 @@ export class DshService {
         }
         // 等待者必须先放掉：订阅停了以后它们的收尾事件永远不会来
         this.settleTurnWaiters(new Error('会话服务已停用'));
+        this.stopTurnWatch();
         this.controlHandle?.cancel();
         this.controlHandle = undefined;
+        this.askHandle?.();
+        this.askHandle = undefined;
         dshEvents.stop();
         this.killDshIfOwned();
     }
@@ -644,6 +867,23 @@ export class DshService {
     onQueue: ((sessionId: string, items: DshQueueItem[]) => void) | undefined;
 
     /**
+     * 当前会话的**投影整表**回调（会话统计 / token 用量 / plan / goal / 权限…）。
+     *
+     * 与队列同一条流（`session/control`）、同样是整表语义：投影一变就推一份当前值。
+     * 页面的输入框下方那两张卡就读它 —— 早先它们只在 `chatInfo`（打开会话/切换时）刷一次，
+     * 于是流式期间「轮数/步数/token」整轮都不动，与网页端不一致。
+     */
+    onProjections: ((sessionId: string, values: Record<string, unknown>) => void) | undefined;
+
+    /**
+     * 事件窗口的诊断出口（写进扩展的 Output 面板，见 `extension.ts` 的 `logRows`）。
+     *
+     * 为什么单开一条：分页事实全在宿主侧（`hasMore`、快照多少条、进来多少条），
+     * 页面上只看得到「列表变没变」—— 用户报「历史看不全 / 看不到『加载更早』」时无从自查。
+     */
+    onWindowLog: ((line: string) => void) | undefined;
+
+    /**
      * 上下文占用回帧（发送按钮左侧那个环）。
      *
      * 单独一条轻帧：投影值本身很小，而 `chatInfo` 那串要跑几次 RPC —— 环每次更新都重推整串不值当。
@@ -659,6 +899,15 @@ export class DshService {
      */
     onTurnSettled: ((info: { sessionId: string; stats: DshReplyStats; timeMs?: number }) => void) | undefined;
 
+    /** 审批请求（对话行上的授权卡）：随会话常驻，不随回合开关。 */
+    onApproval: ((a: DshApproval) => void) | undefined;
+
+    /** 提问请求（输入框上方 waterfall 弹窗）：随会话常驻。 */
+    onQuestion: ((q: DshQuestionRequest) => void) | undefined;
+
+    /** 提问已失效（`$events` 断流、pending 作废）：UI 关掉弹窗，别留成死窗口。 */
+    onQuestionClosed: ((rpcId: string) => void) | undefined;
+
     /**
      * 当前会话的唯一收口：标识一变就把常驻订阅换掉。
      * 为什么收在一处：订阅是事件层的地基（会话打开即订阅、与页面同生命周期），
@@ -671,6 +920,8 @@ export class DshService {
         this.currentSessionId = sessionId;
         this.resetEvents();
         this.turnRunning = false; // 换会话：上一个会话的「进行中」不该带过来
+        this.lastTurnSeen = 0; // 回合号是会话内的编号：换会话必须清零，否则会拦掉新会话的收官
+        this.turnOpenFromHost = undefined; // 权威读数属于上一个会话，重读前先退回窗口扫描
         this.ownPendingTurns = 0; // 上一个会话没结算完的提交不再由本会话的 turn/end 结算
         // 新会话的窗口还没收到快照 → 水位不可信；同时把上一会话的等待者与就绪者放掉（否则它们永远挂着）
         this.windowSeeded = false;
@@ -680,11 +931,19 @@ export class DshService {
         this.settleTurnWaiters(new Error('会话已切换，本轮等待已取消'));
         this.followHandle?.cancel();
         this.followHandle = undefined;
+        // 审批/提问的常驻订阅随会话换（与 followHandle 同生命周期）
+        this.ensureAskSubscription();
         if (sessionId !== undefined) {
             // 队列流是 host-wide 的：建一次就够（不随会话切换重开），这里只确保它已经在
             this.ensureControl();
             this.pushQueue();
             this.pushContext();
+            this.pushProjections();
+            // 换到没有缓存投影的会话（控制流基线里没有它）→ 主动要一份，别让卡片空着，
+            // 也别让页面继续显示上一个会话的统计（重置由页面的 clear 帧负责，这里补新值）。
+            if (this.projectionsBySession.get(sessionId) === undefined) {
+                void this.refreshProjections();
+            }
             // 订阅的**首帧就是快照页**，它替换整个事件窗口（上游同口径）——所以不必再单独读一次快照：
             // 重连也由它把断线期间错过的记录补齐（断线窗口内的帧不会补发）。
             this.followHandle = followSession(sessionId, {
@@ -693,8 +952,23 @@ export class DshService {
                 },
                 onEvent: (event) => {
                     const ev = event as DshStreamEvent;
-                    if (ev.type === 'turn/end') {
-                        this.turnRunning = false; // 本轮结束（不论正常还是被停止）
+                    // 回合状态的事件级判据（**含「迟到的 turn/end 不许关掉当前这一轮」**）：
+                    // 判错的表现是「深度求索中…」中途消失 / 停止按钮提前复位。判据在
+                    // `dsh/turn-state.ts`（纯函数，由 `tmp/_turn.state.test.mjs` 钉住）。
+                    if (ev.type === 'turn/start' || ev.type === 'turn/end') {
+                        const verdict = foldTurnState(
+                            { lastTurn: this.lastTurnSeen, open: this.turnOpenFromHost },
+                            ev
+                        );
+                        this.lastTurnSeen = verdict.state.lastTurn;
+                        if (verdict.closesCurrentTurn) {
+                            this.turnRunning = false; // 本轮结束（不论正常还是被停止）
+                            this.turnOpenFromHost = false; // 权威结论，不用等重读
+                        } else if (verdict.ignoredReason !== undefined && process.env['DSH_RAWLOG'] !== undefined) {
+                            console.warn(`[dsh-turn] 忽略 ${verdict.ignoredReason}`);
+                        } else if (ev.type === 'turn/start') {
+                            this.turnOpenFromHost = true;
+                        }
                     }
                     // 增量帧先过连续性校验：不连续的那一帧**不入列**，改为重开订阅要一份新基线
                     if (ev.type === 'assistant-stream' && !this.acceptAssistantFrame(ev)) {
@@ -708,27 +982,157 @@ export class DshService {
     }
 
     /**
-     * 本会话是否**有一轮正在跑**：从事件尾部往回看，先遇到 `turn/end` 就是已结束、先遇到 `turn/start` 就是在跑。
-     * 页面需要这个**显式事实** —— 只从「行」推导不出来：用户消息回显后、回答行还没建的那一瞬，
-     * 末行是用户行，推导会把「处理中」算成 false（按钮中途变回「发送」并禁用）。
+     * 本会话是否有一轮在跑。优先读上游 `turnBoundary` 投影；未读到时退回窗口扫描。
+     *
+     * 「为真」时顺手开安全网轮询（`startTurnWatch`）—— 每次行下发都会走到这里，
+     * 于是不管是本插件提交的、还是别处驱动的一轮，只要插件认为在跑，就有人盯着权威读数。
      */
     private turnActive(): boolean {
+        const active = this.turnOpenFromHost ?? this.turnActiveFromWindow();
+        if (active) {
+            this.startTurnWatch();
+        }
+        return active;
+    }
+
+    /**
+     * 「这一轮还在跑吗」的**安全网**轮询。
+     *
+     * 投影帧（`turnBoundary`）是首选：实时、且是权威读数。但**不能只靠它** ——
+     * 控制流断线重连、或服务端没组合该投影时，插件就只剩窗口扫描，而窗口扫描只看得见
+     * **自己这条路**收到的事件。别处把这一轮停掉时，停止按钮就会一直停在停止态
+     *（真机现象：网页端已经停了、图标回到发送箭头，插件端还是停止按钮）。
+     *
+     * 所以只在「插件认为有轮在跑」时按 `TURN_WATCH_INTERVAL_MS` 重读一次权威值：
+     * 一条轻量 RPC、只读投影，读到的结论一变就重推行。结论为「没在跑」时自动停表。
+     */
+    private stopTurnWatch(): void {
+        if (this.turnWatchTimer !== undefined) {
+            clearInterval(this.turnWatchTimer);
+            this.turnWatchTimer = undefined;
+        }
+    }
+
+    /** 按需打开安全网轮询（已在跑则不动）。 */
+    private startTurnWatch(): void {
+        if (this.turnWatchTimer !== undefined) {
+            return;
+        }
+        this.turnWatchTimer = setInterval(() => {
+            if (!this.turnActive()) {
+                // 已经不在跑了（权威帧先到 / 窗口扫描已定论）：停表
+                this.stopTurnWatch();
+                return;
+            }
+            void this.refreshTurnOpen().then(() => {
+                if (this.turnOpenFromHost === false) {
+                    this.stopTurnWatch();
+                    this.flushRows();
+                }
+            });
+        }, TURN_WATCH_INTERVAL_MS);
+    }
+
+    /** 窗口扫描兜底：从尾部往回看，先遇 `turn/end` 为假、先遇 `turn/start` 为真。 */
+    private turnActiveFromWindow(): boolean {
         for (let i = this.streamEvents.length - 1; i >= 0; i -= 1) {
             const t = this.streamEvents[i].type;
             if (t === 'turn/end') {
-                // 事件流已经给出定论：**顺手清掉那个缓存标记** —— 它只是用来盖住
-                // 「提交了但 turn/start 还没到」的窗口，事件流一旦有定论就不该再影响判断。
-                // 否则任何一次没收到 turn/end 的回合都会让它永远为真（打开任何会话都显示「终止」）。
-                this.turnRunning = false;
+                this.turnRunning = false; // 事件流已有定论，乐观标记作废
                 return false;
             }
             if (t === 'turn/start') {
                 return true;
             }
         }
-        // 事件流里没有未闭合的回合：这在正常会话里意味着「不在跑」，
-        // 唯一例外是刚提交、`turn/start` 尚未到达 —— 那正是缓存标记要覆盖的窗口。
+        // 没有未闭合回合：兜住「刚提交、turn/start 未到」那一瞬
         return this.turnRunning;
+    }
+
+    /** 重读 `turnBoundary` 并缓存为同步值。读失败沿用上次结论：不因一次 RPC 抖动关掉「终止」。 */
+    private async refreshTurnOpen(): Promise<void> {
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            this.turnOpenFromHost = undefined;
+            return;
+        }
+        try {
+            const proj = await getSessionProjections(sid);
+            if (this.currentSessionId !== sid) {
+                return; // 期间换过会话：这次读数作废
+            }
+            this.applyTurnBoundary(proj['turnBoundary']);
+        } catch {
+            // 保持上次结论
+        }
+    }
+
+    /**
+     * 把 `turnBoundary` 投影折成「是否有一轮在跑」。
+     *
+     * 为什么值得单列：**这是权威读数，而且控制流会实时推它**
+     * （`sessionProjections.onChanged('turnBoundary')` → `{type:'projection'}` 帧）。
+     * 上游客户端读的是 agent 的 `running` 状态（`useSession(s => s.running)`），
+     * 本插件的窗口扫描只能看到**自己这条路**收到的事件 —— 别处（浏览器 / 另一个面板）
+     * 把这一轮停掉时，插件那边唯一的线索就是这个投影。少了它，「停止」按钮会一直停在停止态。
+     * @param raw - 投影值（形状：`{ openTurnStartSeq }`；缺键 = 能力未组合 → 退回窗口扫描）
+     * @returns 结论是否**变了**（调用方据此决定要不要重推行）
+     */
+    private applyTurnBoundary(raw: unknown): boolean {
+        const before = this.turnOpenFromHost;
+        this.turnOpenFromHost = openFromTurnBoundary(raw);
+        if (this.turnOpenFromHost === false) {
+            // 权威说「没在跑」：乐观标记与窗口扫描都要让步
+            this.turnRunning = false;
+        }
+        if (before !== this.turnOpenFromHost && process.env['DSH_RAWLOG'] !== undefined) {
+            // 「深度求索中…」忽然消失 / 停止按钮不复位，都看这一行：谁把 turnOpen 改成了什么
+            const seq = (raw as { openTurnStartSeq?: unknown } | undefined)?.openTurnStartSeq;
+            console.warn(
+                `[dsh-turn] turnOpen ${String(before)} → ${String(this.turnOpenFromHost)}` +
+                    `（投影 openTurnStartSeq=${JSON.stringify(seq ?? null)} 已知回合=${String(this.lastTurnSeen)}）`
+            );
+        }
+        return before !== this.turnOpenFromHost;
+    }
+
+    /**
+     * 会话的审批/提问**常驻**订阅（上游口径：`ui-user-questions` 等是会话打开即监听）。
+     * 挂在回合上的话，`$events` 会把无 handler 的 waterfall 帧直接丢弃（`events.ts` 的 `handlers` 为空即 return），
+     * 面板没开时到达的提问就永久不可见。
+     */
+    private ensureAskSubscription(): void {
+        this.askHandle?.();
+        this.askHandle = undefined;
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            return;
+        }
+        this.askHandle = dshEvents.subscribe(sid, {
+            onApproval: (request) => {
+                this.onApproval?.({
+                    approvalId: request.eventId,
+                    sessionId: request.agentId,
+                    toolName: request.toolName,
+                    description: request.reason, // reason 为真实原因；无则 UI 用 toolName 拼提示
+                });
+            },
+            onQuestion: (request) => {
+                // 诊断（DSH_RAWLOG 时才打）：核对「订阅按会话注册、帧按 agentId 派发」两者是否同一个键
+                if (process.env['DSH_RAWLOG'] !== undefined) {
+                    console.warn(`[dsh-ask] question agentId=${request.agentId} current=${String(this.currentSessionId)}`);
+                }
+                this.onQuestion?.({
+                    rpcId: request.eventId,
+                    sessionId: request.agentId,
+                    questions: request.questions,
+                });
+            },
+            // 断流：这些提问此刻已无法应答，让 UI 关掉弹窗
+            onCancel: (eventId) => {
+                this.onQuestionClosed?.(eventId);
+            },
+        });
     }
 
     /**
@@ -741,13 +1145,17 @@ export class DshService {
         }
         this.pushQueue();
         this.pushContext();
+        this.pushProjections();
     }
 
     /**
-     * 队列订阅（host-wide）：一条流服务所有会话，建一次就够。
+     * 控制流订阅（host-wide）：一条流服务所有会话，建一次就够。
      *
-     * 队列只活在 agent 的收件箱里、**不进日志**，所以 `session/follow` 的历史窗口里没有它 ——
-     * 页面刷新/重连之后，队列只能由这条流的首帧整表重建。
+     * 两类内容都在这里：
+     *   · **队列**只活在 agent 的收件箱里、**不进日志**，`session/follow` 的历史窗口里没有它 ——
+     *     页面刷新/重连之后，队列只能由这条流的首帧整表重建；
+     *   · **投影**（统计 / 用量 / 上下文 / plan / goal…）由宿主逐键推送，上游客户端也是这条
+     *     （`SessionControlController.control`）。首帧基线给每个键的**当前值**，之后只推变化。
      */
     private ensureControl(): void {
         if (this.controlHandle !== undefined) {
@@ -761,8 +1169,15 @@ export class DshService {
                 }
                 this.pushQueue();
             },
+            onProjectionBaseline: (bySession) => {
+                for (const [sessionId, values] of bySession) {
+                    this.projectionsBySession.set(sessionId, { ...values });
+                }
+                this.seedProjections(this.projectionsBySession.get(this.currentSessionId ?? '') ?? {});
+                this.pushProjections();
+            },
             onProjection: (sessionId, key, value) => {
-                this.noteContextProjection(sessionId, key, value);
+                this.noteProjection(sessionId, key, value);
             },
         });
     }
@@ -778,11 +1193,53 @@ export class DshService {
         this.onQueue?.(this.currentSessionId ?? '', this.currentQueue());
     }
 
+    /** 当前会话的投影整表（页面就绪、会话切换、任意投影变化时）。 */
+    currentProjections(): Record<string, unknown> {
+        const sid = this.currentSessionId;
+        return sid === undefined ? {} : this.projectionsBySession.get(sid) ?? {};
+    }
+
+    /** 把当前会话的投影整表下发给页面（整表语义，见 onProjections）。 */
+    pushProjections(): void {
+        if (this.onProjections === undefined) {
+            return;
+        }
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            return;
+        }
+        this.onProjections(sid, this.currentProjections());
+    }
+
     /**
-     * `session/control` 的投影帧：只认上下文占用那两个键。
+     * 一条投影帧：**整份**存下来（上游客户端同口径：客户端持有宿主算好的完整值，不做本地折叠），
+     * 再把整表推给页面 —— 页面因此不需要知道「哪一帧改了什么键」。
      *
-     * 其余键（todos / goal / plan / 统计…）本插件另有来路（`session/follow` 快照 + `chatInfo`），
-     * 在这里一并处理就等于同一份数据有两个来源，迟早只更新到一半。
+     * 上下文占用那两个键另外喂一份给上下文环（那条轻帧只带两个字段，不重推整表）。
+     */
+    private noteProjection(sessionId: string, key: string, value: unknown): void {
+        const values = this.projectionsBySession.get(sessionId) ?? {};
+        values[key] = value;
+        this.projectionsBySession.set(sessionId, values);
+        this.noteContextProjection(sessionId, key, value);
+        if (sessionId !== this.currentSessionId) {
+            return;
+        }
+        // `turnBoundary` 一变就说明回合开了或关了 —— 这是**权威且实时**的那条：
+        // 别处（浏览器 / 另一个面板）把这一轮停掉时，插件只有靠它才能把「停止」按钮复位
+        //（窗口扫描只看得到自己收到的事件）。结论变了就立刻重推行，不用等下一次事件到账。
+        if (key === 'turnBoundary' && this.applyTurnBoundary(value)) {
+            this.flushRows();
+            this.stopTurnWatch();
+        }
+        this.pushProjections();
+    }
+
+    /**
+     * `session/control` 的投影帧里上下文占用那两个键：形状解析后缓存，走单独一条轻帧下发给环。
+     *
+     * 其余键（统计 / 用量 / plan / goal / 权限…）由 `noteProjection` 整表下发 —— 两侧不是同一份数据的
+     * 两个来源，而是同一份数据的两种**呈现通道**（环要的是极小的两个字段，没必要跟着整表走）。
      */
     private noteContextProjection(sessionId: string, key: string, value: unknown): void {
         if (key !== 'contextPressure' && key !== 'contextBreakdown') {
@@ -816,12 +1273,20 @@ export class DshService {
         }
     }
 
-    /** 用一次投影快照（`chatInfo` 那条路）补上下文占用；两个键都没有时**不覆盖**已有缓存。 */
-    seedContext(projections: Record<string, unknown>): void {
+    /**
+     * 用一次投影**快照**（`chatInfo` 那条路 / 控制流基线）补当前会话的投影整表与上下文占用。
+     *
+     * 整表替换而不是逐键合并：这份就是该会话此刻的权威读数（服务端算好的完整值），
+     * 合并会让**已经消失的键**（如目标被清除、plan 退出）永远留在页面上。
+     * 上下文那两个键另外过一遍形状解析（认不出的形状不该覆盖已有缓存，见下）。
+     */
+    seedProjections(projections: Record<string, unknown>): void {
         const sid = this.currentSessionId;
         if (sid === undefined) {
             return;
         }
+        this.projectionsBySession.set(sid, { ...projections });
+        this.pushProjections();
         const pressure = readContextPressure(projections['contextPressure']);
         const breakdown = readContextBreakdown(projections['contextBreakdown']);
         // 诊断（DSH_RAWLOG 时才打）：环不显示时先看这里 —— 是投影没给键，还是给了但形状不认
@@ -885,51 +1350,15 @@ export class DshService {
 
     /** 实时增量帧的连续性校验通过则返回真（该帧应入列）；不通过则就地请求重开订阅并返回假。 */
     private acceptAssistantFrame(ev: DshStreamEvent): boolean {
-        const frame = ev.frame;
-        if (frame === undefined) {
+        const verdict = judgeAssistantFrame(this.continuity, ev.frame);
+        this.continuity = verdict.state;
+        if (verdict.action === 'accept') {
             return true;
         }
-        // 版本号必须逐帧 +1：跳变说明中间丢过帧，此时攒出来的正文是**带洞**的
-        const revision = typeof frame['revision'] === 'number' ? (frame['revision'] as number) : undefined;
-        if (revision !== undefined) {
-            if (this.assistantRevision !== undefined && revision !== this.assistantRevision + 1) {
-                this.requestRebaseline('增量帧版本号跳变');
-                return false;
-            }
-            this.assistantRevision = revision;
+        if (verdict.action === 'rebaseline') {
+            this.requestRebaseline(verdict.reason);
         }
-        const kind = frame['type'];
-        const frameAttempt = typeof frame['attemptId'] === 'string' ? (frame['attemptId'] as string) : undefined;
-        const index = typeof frame['index'] === 'number' ? (frame['index'] as number) : undefined;
-        if (kind === 'start') {
-            // 上一个尝试没收尾就又开一个：只有服务端侧的基线能说清当前状态 → 重新定基
-            if (this.attemptId !== undefined) {
-                this.requestRebaseline('上一个尝试未收尾就又开新尝试');
-                return false;
-            }
-            this.attemptId = frameAttempt;
-            this.attemptNextIndex = 0;
-            return true;
-        }
-        if (kind !== 'chunk' && kind !== 'end') {
-            return true;
-        }
-        // 没有 start 就来的帧（订阅是后挂上的）：丢掉即可，等下一个 start —— 与上游同一处理
-        if (this.attemptId === undefined || frameAttempt === undefined || frameAttempt !== this.attemptId) {
-            return false;
-        }
-        if (index !== undefined && index !== this.attemptNextIndex) {
-            this.requestRebaseline('增量块缺号');
-            return false;
-        }
-        if (kind === 'chunk') {
-            this.attemptNextIndex += 1;
-            return true;
-        }
-        // end：尝试收尾（放弃与否由行构建按 outcome 处理）
-        this.attemptId = undefined;
-        this.attemptNextIndex = 0;
-        return true;
+        return false;
     }
 
     /**
@@ -944,8 +1373,8 @@ export class DshService {
             return;
         }
         this.rebaselining = true;
-        this.attemptId = undefined;
-        this.attemptNextIndex = 0;
+        // 连续性状态作废：新的窗口与基线到达时由 adoptBaseline 重新定基
+        this.continuity = initialContinuity();
         console.warn(`[dsh-follow] 增量流不连续（${reason}）：重开订阅重新定基`);
         this.followHandle?.restart();
     }
@@ -962,24 +1391,20 @@ export class DshService {
                 return;
             }
             console.warn('[dsh-follow] 打开页仍缺增量基线：按「没有进行中尝试」继续（正文可能少一截）');
-            this.assistantRevision = undefined;
-            this.attemptId = undefined;
-            this.attemptNextIndex = 0;
+            this.continuity = initialContinuity();
             this.rebaselining = false;
             return;
         }
         this.missingBaselineStreak = 0;
         this.rebaselining = false;
         const revision = assistantStream['revision'];
-        this.assistantRevision = typeof revision === 'number' ? revision : undefined;
         const attempt = assistantStream['activeAttempt'] as Record<string, unknown> | undefined;
-        if (attempt === undefined) {
-            this.attemptId = undefined;
-            this.attemptNextIndex = 0;
-            return;
-        }
-        this.attemptId = typeof attempt['attemptId'] === 'string' ? (attempt['attemptId'] as string) : undefined;
-        this.attemptNextIndex = typeof attempt['nextIndex'] === 'number' ? (attempt['nextIndex'] as number) : 0;
+        // 版本号只记不判（见 continuity 的注释）；块号与尝试标识才是判据
+        this.continuity = {
+            attemptId: typeof attempt?.['attemptId'] === 'string' ? (attempt['attemptId'] as string) : undefined,
+            nextIndex: typeof attempt?.['nextIndex'] === 'number' ? (attempt['nextIndex'] as number) : 0,
+            revision: typeof revision === 'number' ? revision : undefined,
+        };
     }
 
     /**
@@ -996,14 +1421,41 @@ export class DshService {
         // 「快照里就没有结算消息」= 服务端没给；「快照里有、入列后变少」= 去重/入列丢的。
         const messagesInSnapshot = win.events.filter((e) => e.type === 'assistant/message').length;
         this.resetEvents();
-        this.appendEvents(win.events as unknown as readonly DshStreamEvent[]);
+        // 整窗替换：**快照就是窗口**，一条不裁（与上游一致），
+        // 并用快照的 `hasMore` 决定顶端出不出「加载更早」。
+        this.applyWindowChange(this.window.replace(win.events as unknown as readonly DshStreamEvent[], win.hasMore === true));
+        this.seenSeqs = new Set<number>();
+        for (const e of this.streamEvents) {
+            if (e.seq !== undefined) {
+                this.seenSeqs.add(e.seq);
+            }
+        }
         console.log(
             `[dsh-rows] 快照窗口已应用：记录=${String(win.events.length)} 事件=${String(this.streamEvents.length)} ` +
+                `hasMore=${String(this.window.hasMore())} ` +
                 `结算消息=${String(messagesInSnapshot)}→${String(this.streamEvents.filter((e) => e.type === 'assistant/message').length)}`
+        );
+        // 「为什么没看到『加载更早』/ 为什么历史不全」这一问的**唯一判据**：服务端这一页是不是完整历史。
+        // 判据来自服务端 `paginate()`：它数的是**消息**（`user/message` + `assistant/message`）条数，
+        // 数够请求的 `maxMessages` 才切；没数够就整份给。故「事件多」不等于「历史被截断」——
+        // 一个 155 步的回合能产出几万条流式增量块，而它只对应十几条消息。
+        console.log(
+            `[dsh-rows] 历史完整性：${this.window.hasMore()
+                ? '服务端分页截断（有更早的）→ 顶端应出现「加载更早」'
+                : '快照即完整历史（服务端没有更早的）→ 不出现「加载更早」是正常的'}`
+        );
+        this.onWindowLog?.(
+            `打开会话：快照 ${String(win.events.length)} 条 → 窗口 ${String(this.streamEvents.length)} 条` +
+                ` · hasMore=${String(this.window.hasMore())}` +
+                `${this.streamEvents.length < win.events.length
+                    ? ` · ⚠ 少了 ${String(win.events.length - this.streamEvents.length)} 条（去重/入列丢的，**不是**裁剪：窗口不裁）`
+                    : ' · 一条不少'}`
         );
         // 先定基再回放：基线里的 `nextIndex` 决定回放多少，同时把版本号/进行中尝试交给连续性校验
         this.adoptBaseline(win.assistantStream);
         this.appendBaseline(win.assistantStream);
+        // 快照只是记录，读不到权威回合边界（它在投影里）——补读一次，别让「终止」按钮等下一次 turn 事件
+        void this.refreshTurnOpen().then(() => { this.flushRows(); });
         // 首帧快照到位 = 水位可信（见 windowSeeded / awaitWindowSeeded）
         if (!this.windowSeeded) {
             this.windowSeeded = true;
@@ -1125,6 +1577,8 @@ export class DshService {
      * 「只记自己提交的」由 ownPendingTurns 把关：别处驱动的回合不产生消费记录。
      */
     private noteTurnSettled(rows: readonly DshStreamRow[]): void {
+        // 回合边界已过：重读权威值再下发一次，页面侧的「终止」按钮据此复位（不用等下一次 turn 事件）
+        void this.refreshTurnOpen().then(() => { this.flushRows(); });
         if (this.ownPendingTurns <= 0) {
             return;
         }
@@ -1232,13 +1686,9 @@ export class DshService {
         // 实时事件按 seq 递增到达 —— 只在"插进来的不在末尾"时才需要排序（快照合并那种情形）。
         // 仍无序号的事件用 MAX 让稳定排序把它留在末尾（`snapshot` 帧，构建器不消费它）。
         const tailSeq = this.lastEventSeq();
-        // **不要写成 `push(...fresh)`**：展开传参有数量上限（V8 大约十几万），而一份订阅快照
-        // 展开后能到二十几万条（155 步的会话实测 228502 条）——超了直接 `RangeError: Maximum call
-        // stack size exceeded`，**整个窗口替换失败**（真机现象：打开历史什么都没有）。
-        for (const e of fresh) {
-            this.streamEvents.push(e);
-        }
-        if (fresh.some((e) => e.seq !== undefined && e.seq <= tailSeq)) {
+        // 入窗（**纯追加，一条不裁** —— 与上游一致；正在跑的那一轮绝不能被抽走）
+        this.applyWindowChange(this.window.append(fresh));
+        if (this.streamEvents.some((e) => e.seq !== undefined && e.seq <= tailSeq)) {
             this.streamEvents.sort(
                 (a, b) => (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER)
             );
@@ -1255,13 +1705,29 @@ export class DshService {
     }
 
     /**
-     * 行是**整表**下发：一次构建要遍历整个事件窗口，一次投递是整份 JSON。逐事件各做一次，
+     * 行是**整表**下发：一次投递是整份 JSON。逐事件各做一次，
      * 在长会话上会**算不过来** —— 真机量到：8.5 万条事件的会话，单次构建 115ms、载荷 1.45MB，
      * 而流式期间每秒有几十个帧。跟不上时最后那几个事件（**含最终 `assistant/message` 的正文**）
      * 一直排在积压里，界面于是停在"链和卡片都在、正文没有"的那个中间状态。
      *
-     * 故这里**合并**：一串事件只换一次重建，且下一次至少等上一个重建的耗时那么久（自适应节流）。
+     * 故这里**合并**：一串事件只换一次重建，且下一次至少等上一次构建的耗时才动（自适应节流）。
      * 但有两种情形必须**立刻**下发、不能等：回合结束（末尾那几个事件正是答案本身）与快照替换（打开会话）。
+     *
+     * 节流上限压到一顿饭那么短（120ms）：一次构建如今只在**当前回合**上重折（见 `rowsCheckpoint`），
+     * 那个量级是几毫秒到几十毫秒，不再需要为「几百毫秒一次的全量重建」留出 300ms 的空档。
+     */
+    /**
+     * 行是**整表**下发的：一串事件只换一次重建，且下一次至少等上一次的代价才动（自适应节流）。
+     * 但有两种情形必须**立刻**下发、不能等：回合结束（末尾那几个事件正是答案本身）与快照替换（打开会话）。
+     *
+     * 节流的依据是**这次投递要付多少**，而不是只有构建：
+     *   · 构建（断点续折后是几毫秒到几十毫秒，见 `rowsCheckpoint`）；
+     *   · **载荷**：整表 JSON 是几 MB 到十几 MB，页面侧要解析、要重渲。
+     *
+     * 早先只看构建耗时、上限写死 300ms —— 那是「全量重折 600ms」时代的余量。现在构建快了，
+     * 若还按老公式（`buildMs * 2`，上限 120ms）就会**以十几毫秒的间隔推十几 MB**，
+     * 把页面侧压死（观感反而更糟）。所以载荷也进预算：每 MB 记 `PAYLOAD_MS_PER_MB` 毫秒，
+     * 两条取大值。这不是"又加了个上限"，而是把**已有的投递成本**如实计进节流。
      */
     private emitRows(): void {
         if (this.onRows === undefined) {
@@ -1270,13 +1736,34 @@ export class DshService {
         if (this.rowsTimer !== undefined) {
             return;
         }
-        // 上一次构建多慢，就至少等**它的两倍**那么久再建下一次：留出对半的余量，
-        // 否则慢会话会把 CPU 全吃掉、页面侧的重渲也一直排不上（刷新反而更晚）。上限保证它仍在跳。
-        const delay = Math.min(300, Math.max(24, this.lastBuildMs * 2));
+        const buildBudget = this.lastBuildMs * 2;
+        const payloadBudget = this.lastPayloadMb * PAYLOAD_MS_PER_MB;
+        const delay = Math.min(1000, Math.max(24, buildBudget, payloadBudget));
         this.rowsTimer = setTimeout(() => {
             this.rowsTimer = undefined;
             this.flushRows();
         }, delay);
+    }
+
+    /**
+     * 当前窗口的行（断点续折）。
+     *
+     * 所有需要读行的调用点都走这一处：构建一次要遍历整个窗口，三个调用点各建一次就是三倍成本
+     * （真机量到过 999ms/次）。断点只在**本实例**内传递，窗口一换就自动失效。
+     */
+    private buildCurrentRows(): DshStreamRow[] {
+        const result = buildRowsIncremental(this.streamEvents, {
+            ...(this.rowsCheckpoint === undefined ? {} : { checkpoint: this.rowsCheckpoint }),
+            // 校验（最强那种：同跑一次全量并逐字节比对）按轮次抽样，且只在**复用旧断点**时才付这份钱。
+            // 它换来的是「断点与全量不等价」这类问题在真实会话里自动被发现并以全量为准，
+            // 而不是让正文悄悄错一段 —— 代价是每 N 轮多一次全量重折。
+            verify: this.rowsCheckpoint !== undefined && this.checkpointUses % CHECKPOINT_VERIFY_EVERY === 0,
+        });
+        this.rowsCheckpoint = result.checkpoint;
+        if (result.checkpoint !== undefined) {
+            this.checkpointUses += 1;
+        }
+        return result.rows;
     }
 
     /** 立刻构建并下发（回合结束 / 快照替换 / 页面就绪用；丢弃已排队的合并窗口）。 */
@@ -1289,16 +1776,47 @@ export class DshService {
             return;
         }
         const started = Date.now();
-        const rows = buildRows(this.streamEvents);
-        this.onRows(rows, this.turnActive());
+        const rows = this.buildCurrentRows();
+        const active = this.turnActive();
+        // 诊断（DSH_RAWLOG 时才打）：只在翻转时打印 —— 查「终止按钮变回发送/禁用」时要看的就是这个布尔值
+        if (active !== this.lastTurnActiveLogged) {
+            this.lastTurnActiveLogged = active;
+            if (process.env['DSH_RAWLOG'] !== undefined) {
+                console.warn(`[dsh-turn] turnActive=${String(active)} events=${String(this.streamEvents.length)}`);
+            }
+        }
+        this.onRows(rows, active);
         // 已到期的回合结算（用**这一份**刚建好的行，不重算；见 noteTurnSettled）
         if (this.settlePending) {
             this.settlePending = false;
             this.noteTurnSettled(rows);
         }
         this.lastBuildMs = Date.now() - started;
+        this.measurePayload(rows);
         this.noteBlankAnswer(rows);
         this.emitTodos();
+    }
+
+    /**
+     * 估一次载荷大小（MB），供节流预算用（见 `emitRows` / `lastPayloadMb`）。
+     *
+     * **不是每次都量**：`JSON.stringify` 在 17MB 的整表上要 78ms —— 每帧量一遍等于自己给自己加一倍成本，
+     * 而节流要的只是个量级。抽样策略：行数变了就重量（回合增删会显著改变载荷），否则每
+     * `PAYLOAD_SAMPLE_EVERY` 次量一遍（回合内的增长由这个周期跟上）。
+     */
+    private measurePayload(rows: readonly DshStreamRow[]): void {
+        this.payloadSamples += 1;
+        const rowsChanged = rows.length !== this.lastPayloadRows;
+        if (!rowsChanged && this.payloadSamples % PAYLOAD_SAMPLE_EVERY !== 0) {
+            return;
+        }
+        this.payloadSamples = 0;
+        this.lastPayloadRows = rows.length;
+        try {
+            this.lastPayloadMb = JSON.stringify(rows).length / (1024 * 1024);
+        } catch {
+            // 序列化失败（循环引用等不该发生）：沿用上次读数，不因此中断投递
+        }
     }
 
     /**
@@ -1390,7 +1908,7 @@ export class DshService {
      * @param before - 提交前的 assistant 行条数（assistantRowCount）。
      */
     private newAssistantRow(before: number): Extract<DshStreamRow, { kind: 'assistant' }> | undefined {
-        const assistants = buildRows(this.streamEvents).filter(
+        const assistants = this.buildCurrentRows().filter(
             (r): r is Extract<DshStreamRow, { kind: 'assistant' }> => r.kind === 'assistant'
         );
         return assistants.length > before ? assistants[assistants.length - 1] : undefined;
@@ -1398,7 +1916,7 @@ export class DshService {
 
     /** 当前窗口里 assistant 行的条数。 */
     private assistantRowCount(): number {
-        return buildRows(this.streamEvents).filter((r) => r.kind === 'assistant').length;
+        return this.buildCurrentRows().filter((r) => r.kind === 'assistant').length;
     }
 
     /** 末尾**带序号**的事件的序号；一条都没有时 -1。不能直接取末元素 —— 末元素可能是无序号的事件。 */
@@ -1415,6 +1933,8 @@ export class DshService {
     /** 清空本会话的事件与去重集合（换会话时）。 */
     private resetEvents(): void {
         this.streamEvents = [];
+        // 窗口（分页事实）一起清：换会话后「还有更早的吗」「加载中」都不该沿用上一个会话
+        this.window.clear();
         this.seenSeqs.clear();
         this.durableSeq = -1;
         this.transientInGap = 0;
@@ -1430,6 +1950,16 @@ export class DshService {
             clearTimeout(this.rowsTimer);
             this.rowsTimer = undefined;
         }
+        // 行构建的断点属于上一个会话的窗口：留着虽会被判据挡下（首事件序号对不上），
+        // 但那是**巧合性**的防护 —— 换了会话就该从零开始（顺带放掉它引用的那一串行）
+        this.rowsCheckpoint = undefined;
+        this.checkpointUses = 0;
+        // 载荷读数同理：新会话第一次投递不该按上一个会话的十几 MB 去等
+        this.lastPayloadMb = 0;
+        this.payloadSamples = 0;
+        this.lastPayloadRows = 0;
+        // 回合安全网轮询跟着会话走：上一个会话的表不该在新会话上继续跑
+        this.stopTurnWatch();
     }
 
     /**
@@ -1441,6 +1971,8 @@ export class DshService {
         this.turnRunning = true;
         // 记账登记（见 noteTurnSettled）：一次提交对应一次结算
         this.ownPendingTurns += 1;
+        // 认为自己在跑 → 开安全网轮询（见 startTurnWatch）：别处停掉时按钮要能自己复位
+        this.startTurnWatch();
     }
 
     /**
@@ -1450,6 +1982,7 @@ export class DshService {
     endTurn(): void {
         this.turnRunning = false;
         this.ownPendingTurns = Math.max(0, this.ownPendingTurns - 1);
+        this.stopTurnWatch();
     }
 
     async getSession(): Promise<string> {
@@ -1967,6 +2500,70 @@ export class DshService {
         return getSessionProjections(sid);
     }
 
+    /**
+     * 主动重读一次投影并喂进缓存（换到控制流基线里没有的会话时用；失败静默 —— 常驻控制流随后会推）。
+     *
+     * 为什么需要这一下：控制流的**基线只在订阅打开时给一次**，此后新建的会话不在里面；
+     * 不主动读一次，输入框下方那两张卡要等这个会话第一次产生投影变化才出现。
+     */
+    private async refreshProjections(): Promise<void> {
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            return;
+        }
+        try {
+            const projections = await this.getProjections();
+            if (this.currentSessionId !== sid || Object.keys(projections).length === 0) {
+                return; // 期间换过会话 / 读不到：这次读数作废
+            }
+            this.seedProjections(projections);
+        } catch {
+            // 服务未就绪：控制流随后会推变化
+        }
+    }
+
+    /**
+     * 目标条的动作（编辑 / 暂停 / 恢复 / 清除）——**直接打上游的 goal RPC**，不走 `/goal` 命令。
+     *
+     * 为什么不用 `/goal`：命令要**下一轮**才被 agent 处理（会多跑一次模型回合），而目标条上的按钮
+     * 是即时操作。上游 `ui-goal` 也是这么打的（`ctx.remote.goals.edit|pause|resume|clear`，
+     * `client/index.ts:102-120`）。
+     *
+     * **CAS 用投影里的 `{id, revision}`**：上游服务端拿它做 compare-and-set（`expectCurrent`），
+     * 版本不符会报错 —— 所以每次动作**现读投影**、不缓存，避免拿旧 revision 撞 CAS。
+     * 上游动作失败时返回 `{ok:false,error}` 由条内联显示；这里同口径：返回错误文案给页面。
+     *
+     * @param action - edit（带 objective）/ pause / resume / clear
+     * @returns 成功时返回空对象；失败时返回 `{ error: '<message> (<code>)' }`
+     */
+    async goalAction(
+        action: 'edit' | 'pause' | 'resume' | 'clear',
+        objective?: string
+    ): Promise<{ error?: string }> {
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            return { error: 'no-current-goal (当前没有会话)' };
+        }
+        const proj = await getSessionProjections(sid);
+        const ref = goalRefOf(proj['goal']);
+        if (ref === undefined) {
+            return { error: 'no-current-goal (会话里没有目标)' };
+        }
+        const method = `goals/${action}`;
+        const args: Record<string, unknown> = { agentId: sid, ref };
+        if (action === 'edit') {
+            args['request'] = { objective: objective ?? '' };
+        }
+        try {
+            await this.call(method, args);
+            return {};
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            const code = e instanceof DshRpcError ? e.code : undefined;
+            return { error: code === undefined ? msg : `${msg} (${code})` };
+        }
+    }
+
     /** 列出可用模型 + 当前选择 + 推理等级（rc1：目录=session/modelCatalog，当前=modelSelection 投影） */
     async listModels(): Promise<{
         current?: { provider?: string; model?: string; reasoningEffort?: string };
@@ -2086,10 +2683,6 @@ export class DshService {
     async askStreaming(
         content: DshContentPart[],
         opts: {
-            onApproval?: (a: DshApproval) => void;
-            onQuestion?: (q: DshQuestionRequest) => void;
-            /** 提问已失效（$events 流断，pending 作废）：UI 应关掉对应弹窗，别留成死窗口 */
-            onQuestionClosed?: (rpcId: string) => void;
             isCancelled?: () => boolean;
             /** 提交标识（页面 mint）：原样传给 `session/prompt` 的 requestId，回显据此认领 */
             requestId?: string;
@@ -2099,58 +2692,32 @@ export class DshService {
             throw new Error('DSH 服务不可用，无法对话');
         }
         const sid = await this.getSession();
-        const unsubscribe = dshEvents.subscribe(sid, {
-            onApproval: (request) => {
-                opts.onApproval?.({
-                    approvalId: request.eventId,
-                    sessionId: request.agentId,
-                    toolName: request.toolName,
-                    description: request.reason, // reason 为真实原因；无则 UI 用 toolName 拼提示
-                });
-            },
-            onQuestion: (request) => {
-                opts.onQuestion?.({
-                    rpcId: request.eventId,
-                    sessionId: request.agentId,
-                    questions: request.questions,
-                });
-            },
-            // $events 流断时上游会给每个 pending 提问回调一次：此刻它已无法应答，
-            // 让 UI 关掉弹窗（否则用户点取消只会得到「未找到对应的提问」）
-            onCancel: (eventId) => {
-                opts.onQuestionClosed?.(eventId);
-            },
-        });
+        // 水位要等首帧快照到位才可信；否则会把快照回放里的历史 turn/end 当成这一轮
+        await this.awaitWindowSeeded();
+        const assistantsBefore = this.assistantRowCount();
+        const watch = this.watchTurnEnd(sid, this.durableSeq, opts.isCancelled);
         try {
-            // 水位要等首帧快照到位才可信；否则会把快照回放里的历史 turn/end 当成这一轮
-            await this.awaitWindowSeeded();
-            const assistantsBefore = this.assistantRowCount();
-            const watch = this.watchTurnEnd(sid, this.durableSeq, opts.isCancelled);
-            try {
-                await sendPrompt(sid, content, opts.requestId);
-            } catch (e) {
-                // 没发出去：撤销登记，否则下一次 turn/end 会被认成这一轮
-                watch.cancel();
-                throw e;
-            }
-            try {
-                await watch.done;
-            } finally {
-                watch.cancel();
-            }
-            const row = this.newAssistantRow(assistantsBefore);
-            return {
-                text: row?.text ?? '',
-                stats: (row?.stats ?? {}) as DshReplyStats,
-                ...(row?.timeMs === undefined ? {} : { time: row.timeMs }),
-                ...(row?.status === undefined
-                    ? {}
-                    : { end: { kind: row.status, ...(row.endMsg === undefined ? {} : { message: row.endMsg }) } }),
-                ...(row === undefined ? {} : { counts: row.counts }),
-            };
-        } finally {
-            unsubscribe();
+            await sendPrompt(sid, content, opts.requestId);
+        } catch (e) {
+            // 没发出去：撤销登记，否则下一次 turn/end 会被认成这一轮
+            watch.cancel();
+            throw e;
         }
+        try {
+            await watch.done;
+        } finally {
+            watch.cancel();
+        }
+        const row = this.newAssistantRow(assistantsBefore);
+        return {
+            text: row?.text ?? '',
+            stats: (row?.stats ?? {}) as DshReplyStats,
+            ...(row?.timeMs === undefined ? {} : { time: row.timeMs }),
+            ...(row?.status === undefined
+                ? {}
+                : { end: { kind: row.status, ...(row.endMsg === undefined ? {} : { message: row.endMsg }) } }),
+            ...(row === undefined ? {} : { counts: row.counts }),
+        };
     }
 
     /** 回答 ask_user_question（rc.1 走 $events 流应答） */

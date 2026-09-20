@@ -156,8 +156,24 @@ const ARGS_KEY_BY_METHOD: Record<string, string> = {
 // settings/describe 与 modelCatalog 同族：远端签名无参，多包一层 request 会被网关拒
 // （"Remote payload must contain exactly one plain-object args field"）。
 const NO_ARGS_METHODS = new Set<string>(['session/modelCatalog', 'agentPresets/list', 'settings/describe']);
-/** 平铺 args 的方法（payload 对象直接作为 args 的字段集）。 */
-const FLAT_ARGS_METHODS = new Set<string>(['$events/result', 'agentPresets/select']);
+/** 平铺 args 的方法（payload 对象直接作为 args 的字段集）。
+ *
+ *  `goals/*` 属于这一类：它们的远端签名是**多个命名形参**
+ *（`get(agentId)` / `edit(agentId, ref, request)` / `pause|resume|clear(agentId, ref)`，
+ *  见 `goal/src/index.ts` 的 `@Remote` 与 `api/gateway/tests/gateway.host.spec.ts` 的
+ *  `args: { agentId, request }`），**不能**再包一层 `request`
+ *（网关会拒："Remote payload must contain exactly one plain-object args field"）。
+ *
+ * 目标条的动作与读取都经这里（宿主 `dshService.goalAction` / `goalRefOf` 的来源）。 */
+const FLAT_ARGS_METHODS = new Set<string>([
+    '$events/result',
+    'agentPresets/select',
+    'goals/get',
+    'goals/edit',
+    'goals/pause',
+    'goals/resume',
+    'goals/clear',
+]);
 
 export function hasAuthCookie(port: number): boolean {
     return authCookies.has(port);

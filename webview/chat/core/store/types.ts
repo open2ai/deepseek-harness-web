@@ -277,11 +277,30 @@ export interface TokenUsageView {
   cacheWriteTokens?: number
 }
 
+/**
+ * 会话目标（目标条的数据源）。形状按上游 `GoalProjection.goal`（= `GoalSnapshot`）+ 前端补的两个展示字段。
+ *
+ * `phase` 是**durable** 阶段（`active|paused|blocked|complete`）；上游另有一个 process-local 的
+ * `activation`（armed/disarmed，决定"进行中"还是"未运行"）—— 它**不在投影里**，本插件目前拿不到，
+ * 所以那一档暂缺（登记在 `12` §2）。
+ */
+export interface GoalView {
+  objective: string
+  phase: string
+  /** CAS 引用的一半：动作（edit/pause/resume/clear）要拿 `{id, revision}` 打上游。 */
+  id?: string
+  revision?: number
+  /** 仅 `phase === 'blocked'` 时有：挂成条上的 title（上游同口径）。 */
+  blockedReason?: string
+}
+
 export interface ChatStore {
   // 信号
   messages: Signal<ChatRow[]>
   view: Signal<'welcome' | 'chat'>
   processing: Signal<boolean>
+  /** 宿主权威的「一轮在跑」（`rows` 帧 `turnActive`）。停止/插话只认它；`processing` 是推导值，会提前变假。 */
+  turnRunning: Signal<boolean>
   /** 过渡态：恢复历史/切工作区等无明确进度等待（驱动 composer 禁用 + 占位/骨架）。null=空闲 */
   busy: Signal<'loading' | 'switching' | null>
   /** 当前会话工作区根路径；'' = 未知。终端卡的 cwd 标签在工具调用未带 workdir 时用它兜底（上游同口径） */
@@ -307,8 +326,15 @@ export interface ChatStore {
   atCatalog: Signal<{ query: string; files: AtFileRef[]; sessions: AtSessionRef[] } | null>
   /** plan 协作状态(投影 plan)；null=未启用/无该能力 */
   planState: Signal<{ active: boolean; pending: boolean } | null>
-  /** 会话目标(投影 goal)；null=无目标/能力缺失。goal bar 常驻条数据源（形状按上游 GoalProjection） */
-  goalState: Signal<{ objective: string; phase: string } | null>
+  /** 会话目标(投影 goal)；null=无目标/能力缺失。目标条的数据源（形状按上游 GoalProjection.goal）。
+   *  `id`/`revision` 是**动作的 CAS 引用**（上游 `GoalRef`）——缺任一个就只能只读展示，动不了。 */
+  goalState: Signal<GoalView | null>
+  /**
+   * 目标条的动作（edit/pause/resume/clear）：交给宿主打上游 goal RPC 并等回执。
+   * 不走 `/goal` 命令 —— 命令要下一轮才被 agent 处理，而这些按钮是即时操作（上游同口径）。
+   * @returns 失败时 `{error: '<message> (<code>)'}`；成功 `{}`（新目标随投影帧回来）
+   */
+  goalAction(action: 'edit' | 'pause' | 'resume' | 'clear', objective?: string): Promise<{ error?: string }>
   /** 任务清单（宿主从 `todo/write` 事件折叠后整表下发）：输入框上方常驻卡片的数据源；
    *  空数组 = 没有清单（卡片整块不渲染）。它不是行 —— 清单不属于任何一个回合 */
   todos: Signal<TodoItem[]>
@@ -331,6 +357,16 @@ export interface ChatStore {
   pendingQuestion: Signal<{ rpcId?: string; sessionId?: string; questions: QuestionSpec[] } | null>
   /** 主动触底请求计数：用户发送/恢复会话时 +1（MessageList 消费后清零并强制滚到底） */
   scrollPend: Signal<number>
+  /** 更早的历史还没进窗口（宿主事实）：列表顶端据此出「加载更早」。 */
+  historyHasMore: Signal<boolean>
+  /** 「加载更早」这一页是否在飞（宿主事实）：按钮据此禁用并换成进行时文案。 */
+  historyLoading: Signal<boolean>
+  /** 当前窗口里的事件条数（诊断与直观量，不参与判定）。 */
+  historyEvents: Signal<number>
+  /** 记下宿主给的窗口事实（随 `rows` 帧一起来）。 */
+  applyHistory(info: { hasMore?: boolean; loading?: boolean; events?: number }): void
+  /** 往前翻一页历史（宿主读更早一页并 prepend）；在飞时不重复发。 */
+  loadOlder(): void
   /**
    * 回合级过程折叠的展开态（key = 会话内回合号）。
    *

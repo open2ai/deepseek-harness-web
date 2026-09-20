@@ -1,4 +1,4 @@
-// 聊天页核心状态(信号 store)的装配层：只做切片创建与接线，不含行为逻辑。
+﻿// 聊天页核心状态(信号 store)的装配层：只做切片创建与接线，不含行为逻辑。
 // 行模型在 messages，输入区在 composer，目录在 catalogs，选择器在 selectors，提问弹窗在 question，
 // 会话状态在 status，全局显示偏好在 prefs，发送动作在 outbox，宿主消息归约器在 reducer；
 // 跨切片依赖全部由本层注入（切片之间不互相 import）。
@@ -40,7 +40,7 @@ export function createChatStore(host: ChatHost): ChatStore {
   // 2. 其余叶切片（selectors 注入消息切片的 showNotice，不反向 import）
   const composer = createComposer(host)
   const catalogs = createCatalogs(host)
-  const status = createStatus()
+  const status = createStatus(host)
   const selectors = createSelectors(host, messages.store.showNotice)
   const question = createQuestion(host)
   const attachments = createAttachments(host)
@@ -77,7 +77,13 @@ export function createChatStore(host: ChatHost): ChatStore {
     messages: messages.store.messages,
     view: messages.store.view,
     processing: messages.store.processing,
+    turnRunning: messages.store.turnRunning,
     scrollPend: messages.store.scrollPend,
+    historyHasMore: messages.store.historyHasMore,
+    historyLoading: messages.store.historyLoading,
+    historyEvents: messages.store.historyEvents,
+    applyHistory: messages.store.applyHistory,
+    loadOlder: messages.store.loadOlder,
     showNotice: messages.store.showNotice,
     openFile: messages.store.openFile,
     answerApproval: messages.store.answerApproval,
@@ -151,6 +157,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     attachmentCache: attachments.store.attachmentCache,
     requestAttachment: attachments.store.requestAttachment,
     goalState: status.store.goalState,
+    // 目标条的动作（edit/pause/resume/clear）：请求-应答，见 store/status 的 goalAction
+    goalAction: status.store.goalAction,
     // 任务清单（输入框上方的常驻条）
     todos: status.store.todos,
     // 排队消息（输入框上方的队列卡）：与清单同级，但**不是行**
@@ -166,7 +174,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     removeQueueItem: queue.store.removeQueueItem,
     steerQueueItem: queue.store.steerQueueItem,
     steerWholeQueue: queue.store.steerWholeQueue,
-    // 全局显示偏好（上游「设置→对话显示」）
+    // 全局偏好（显示形态）
     transcriptView: prefs.store.transcriptView,
     // 渲染源开关（阶段 4：宿主下发，见 docs/design/08 §11）
   }

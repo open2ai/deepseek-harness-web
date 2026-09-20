@@ -28,7 +28,7 @@ export function QueueCard({ store }: { store: ChatStore }) {
   const sending = store.queueSending.value.filter((s) => s.mode === 'queue')
   const editing = store.queueEditing.value
   const busyId = store.queueBusy.value
-  const running = store.processing.value
+  const running = store.turnRunning.value
   // 默认折叠：队列是过渡态，多条时不该常驻占掉输入区上方的空间
   const [collapsed, setCollapsed] = useState(true)
   const total = items.length + sending.length

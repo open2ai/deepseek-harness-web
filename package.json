@@ -2,7 +2,7 @@
   "name": "deepseek-harness-web",
   "displayName": "DeepSeek Harness Web",
   "description": "DeepSeek Harness 插件",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "publisher": "sparks-dev",
   "icon": "assets/icon.png",
   "engines": {

@@ -1,7 +1,13 @@
-// 消息列表（按行类型分发）：用户/assistant/审批/提问/notice。智能跟随滚动。
+// 消息列表（按行类型分发）：用户/assistant/审批/提问/notice。智能跟随滚动（判据见 core/follow）。
+// 每条行各包一层**行级错误边界**（见 components/RowBoundary）：一行崩了只坏那一行，其余照常。
+// 顶端是「加载更早」（历史分页）：只有宿主说「还有更早的」时才出现，加载前钉住阅读位置。
 import { html } from 'htm/preact'
-import { useEffect, useRef } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import type { ChatRow, ChatStore } from '../../core/store/chat'
+import { ScrollFollow, type FollowHost } from '../../core/follow'
+import { clearRenderErrors, renderErrors } from '../../core/errors'
+import { anchoredTopAfterPrepend } from '../../../../src/dsh/rows/paging'
+import { RowBoundary } from '../RowBoundary'
 import { UserRow } from './UserRow'
 import { AssistantRow } from './AssistantRow'
 import { ApprovalRow } from './ApprovalRow'
@@ -13,47 +19,147 @@ import { TurnStatus } from './TurnStatus'
 import { PendingSteeringList } from './PendingSteeringRow'
 
 /**
- * 「读者是否移动了滚动」—— 浏览器把 `scrollTop` 收缩钳制、以及程序性写入，都**不转移滚动归属**：
- * 只有实际位置与「记录位置被钳制后」的值差超过 0.5px 才算读者移动。
- * 少了这一条，内容被整表替换时浏览器夹小 `scrollTop` 会被误判成「用户向上拖」而解除跟随。
+ * 跟随要盯住的元素（顺序：内容列在前，滚动视口在后）。
+ *
+ * **为什么必须盯内容列**：`#messages` 是滚动视口，高度由 flex 布局定死，内容再长它自己的盒也不变
+ * —— `ResizeObserver` 只报**被观察元素自己的盒**变化，所以观察它收不到「内容长高」，
+ * 流式回答时 `settle()` 一次都不会被调用，滚动条自然停住（这正是「回答时滚动条不跟随」的成因）。
+ * 内容列 `.msg-col` 的高度 = 内容高度，观察它才能拿到真正的增长。
+ * 视口本身也要看：窄面板/输入区长高会把视口改矮，那时 `maxTop` 跟着变。
+ * 上游同款：观察 `.column`（内容列）与 composer 座位，**不观察**滚动容器。
  */
-export function readerMovedScroll(top: number, floor: number, observedTop: number): boolean {
-  return Math.abs(top - Math.min(observedTop, floor)) > 0.5
+export function followTargets(content: HTMLElement | null, scroller: HTMLElement): HTMLElement[] {
+  return content === null ? [scroller] : [content, scroller]
+}
+
+/** 把真实的滚动容器接成 `FollowHost`（判据全在 `core/follow`，这里只是取数与写入的适配）。 */
+function hostOf(el: HTMLElement, col: HTMLElement | null): FollowHost {
+  const rectOf = (node: HTMLElement): { top: number; bottom: number } => {
+    const r = node.getBoundingClientRect()
+    return { top: r.top, bottom: r.bottom }
+  }
+  return {
+    get scrollTop(): number {
+      return el.scrollTop
+    },
+    set scrollTop(top: number) {
+      el.scrollTop = top
+    },
+    get scrollHeight(): number {
+      return el.scrollHeight
+    },
+    get clientHeight(): number {
+      return el.clientHeight
+    },
+    // 视口 = 滚动容器本身（**不是**行节点的父节点：那一层现在是内容列 `.msg-col`）
+    box: () => rectOf(el),
+    // 行在内容列里；取不到内容列（理论上不会发生）时退回视口，避免判据整条失效
+    rows: () => Array.from((col ?? el).children) as HTMLElement[],
+    rectOf,
+    nextFrame: (fn) => {
+      if (typeof requestAnimationFrame === 'undefined') fn()
+      else requestAnimationFrame(fn)
+    },
+  }
 }
 
 export function MessageList({ store }: { store: ChatStore }) {
   const ref = useRef<HTMLDivElement | null>(null)
-  // 是否粘在底部：只由**读者手势**与显式的「到底」请求改变
-  const stickRef = useRef(true)
-  // 最后一次**写入或观测到**的位置：判断「读者是否移动」的基准
-  const observedTopRef = useRef(0)
-  // 上次的**内容高度**：跟随只在它变化时发生。
-  // 用高度而不是「行签名」：行签名会漏掉「不是末行在长」的情况（工具卡展开、中间行变高），
-  // 而整表替换只要内容没变，高度就不变 —— 于是替换不会把正在翻阅的读者拽回底部。
-  const lastHeightRef = useRef(0)
+  // 内容列（`#messages` 里那一层）：跟随的观察对象，见 `followTargets`
+  const colRef = useRef<HTMLDivElement | null>(null)
+  // 跟随状态机：与容器的生命周期一致（判据全在 core/follow，这里只接 DOM 事件）
+  const followRef = useRef<ScrollFollow | null>(null)
+  // 容器**存在与否**（欢迎页 / 会话被清空时不渲染）决定接线时机。
+  // 必须进依赖：空会话时 `#messages` 整体不渲染（下面 `view !== 'chat'` 那条），
+  // 若只在挂载时接线一次，第一条消息到达后就再也接不上 —— 跟随与 ResizeObserver 双双永久失效。
+  const visible = store.view.value === 'chat'
+  // 容器**上一次卸载前**是否停在底部：重挂时按它恢复（新容器 scrollTop 从 0 开始，
+  // 无条件到底会让「切会话后原本读历史的位置」被打回底部；无条件保留又会丢掉"一直跟着看"的手感）。
+  const wasAtBottom = useRef(true)
 
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    // 显式的「到底」请求（发送时）：唯一该**强制**滚到底的入口
-    if (store.scrollPend.value > 0) {
-      el.scrollTop = el.scrollHeight
-      observedTopRef.current = el.scrollTop
-      lastHeightRef.current = el.scrollHeight
-      store.scrollPend.value = 0
-      stickRef.current = true
-      return
+    const host = hostOf(el, colRef.current)
+    const follow = new ScrollFollow(host)
+    followRef.current = follow
+    follow.attach(wasAtBottom.current)
+    const onScroll = (): void => {
+      follow.onScroll()
+      wasAtBottom.current = follow.following
+      if (typeof window !== 'undefined' && window.__dshFollowDebug) {
+        const d = follow.debug()
+        console.log(
+          `[follow] scroll stick=${String(d.stick)} top=${String(Math.round(d.top))}/${String(Math.round(d.maxTop))} h=${String(Math.round(d.height))}`
+        )
+      }
     }
-    if (el.scrollHeight === lastHeightRef.current) return
-    lastHeightRef.current = el.scrollHeight
-    if (stickRef.current) {
-      el.scrollTop = el.scrollHeight
-      observedTopRef.current = el.scrollTop
+    el.addEventListener('scroll', onScroll, { passive: true })
+    // 跟随由**内容高度变化**驱动（而不是「某次渲染」）：流式长高、图片加载、工具卡展开这类
+    // 不引发重渲的变化也要能跟。观察对象见 `followTargets`（**内容列是必须的**：视口自己的盒不变）。
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => follow.settle())
+    for (const target of followTargets(colRef.current, el)) observer?.observe(target)
+    if (typeof window !== 'undefined') {
+      window.__dshFollow = follow
+      // 排查用：把接线好的 host 也露出来（「观察了谁」「视口取的是谁」都能在控制台直接问）
+      window.__dshFollowHost = host
     }
-  })
+    return () => {
+      const d = follow.debug()
+      wasAtBottom.current = d.stick
+      el.removeEventListener('scroll', onScroll)
+      observer?.disconnect()
+      followRef.current = null
+      if (typeof window !== 'undefined') {
+        if (window.__dshFollow === follow) delete window.__dshFollow
+        if (window.__dshFollowHost === host) delete window.__dshFollowHost
+      }
+    }
+  }, [visible])
 
-  if (store.view.value !== 'chat') return null
+  // 显式的「到底」请求（发送时）：唯一该**强制**滚到底的入口
+  useEffect(() => {
+    if (ref.current === null || store.scrollPend.value === 0) return
+    followRef.current?.toBottom()
+    wasAtBottom.current = true
+    store.scrollPend.value = 0
+  }, [store.scrollPend.value, visible])
+
+  /**
+   * 「加载更早」的**位置锚定**（对齐上游 `loadOlderAnchored` 的语义）。
+   *
+   * 前插会让整个内容往下推，浏览器会保持 `scrollTop`，于是**读者眼前的内容被推走了**。
+   * 这里在每次行表重渲前记下「旧高度 − 顶部」，渲染后把同一段距离补回去 —— 读者停在原处。
+   */
+  const anchorRef = useRef<{ height: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    const held = anchorRef.current
+    anchorRef.current = null
+    if (el === null || held === null) return
+    // 补回前插的高度差（算准，不试；见 src/dsh/rows/paging.ts）：这一步是「把读者按回原处」，
+    // 不改变跟随归属；写完让跟随状态机复核一次真实位置（程序性写入不会被当成读者移动，见 core/follow）。
+    const next = anchoredTopAfterPrepend(held, el.scrollHeight, Math.max(0, el.scrollHeight - el.clientHeight))
+    if (next === held.top) return
+    el.scrollTop = next
+    followRef.current?.settle()
+  }, [store.messages.value])
+
+  if (!visible) return null
   const rows = store.messages.value
+  const hasMore = store.historyHasMore.value
+  const loadingOlder = store.historyLoading.value
+  const errorCount = renderErrors.value.length
+  const loadOlder = (): void => {
+    // 进行中就不要再发一次（`disabled` 只挡真实点击：脚本/辅助技术仍可能派发事件，双保险）
+    if (loadingOlder) return
+    const el = ref.current
+    if (el !== null) {
+      anchorRef.current = { height: el.scrollHeight, top: el.scrollTop }
+    }
+    store.loadOlder()
+  }
   // 过程折叠是**回合级**的（见 core/process-fold）：同一回合可能有多条回答行（插话切成「前段 / 后段」），
   // 只有**首行**出折叠头，其余行跟随同一个展开态。这里先按回合归组算好，再逐行下发。
   // 没有回合号的（本地乐观行）自成一组：它没有过程事实，本来也不会折叠。
@@ -63,44 +169,54 @@ export function MessageList({ store }: { store: ChatStore }) {
       turnHeadRow.set(row.turn, row)
     }
   }
-  return html`<div id="messages" ref=${ref}
-    onScroll=${() => {
-      const el = ref.current
-      if (!el) return
-      const floor = el.scrollHeight - el.clientHeight
-      if (!readerMovedScroll(el.scrollTop, floor, observedTopRef.current)) return
-      // 读者确实移动了：落到底部附近 → 恢复跟随；否则（含主动上翻）解除
-      stickRef.current = floor - el.scrollTop < 24
-      observedTopRef.current = el.scrollTop
-    }}>
-    ${rows.map((row, i) => {
-      const latest = i === rows.length - 1
-      switch (row.kind) {
-        case 'user':
-          return html`<${UserRow} key=${row.key} row=${row} store=${store} latest=${latest} />`
-        case 'context':
-          return html`<${ContextInjectionRow} key=${row.key} row=${row} />`
-        case 'sysprompt':
-          return html`<${SysPromptRow} key=${row.key} text=${row.text} />`
-        case 'assistant': {
-          const head = row.turn === undefined ? undefined : turnHeadRow.get(row.turn)
-          // 「只含提问行时不折叠」是插件偏离，判据必须是**回合级**的（按首行的链判），否则同回合的行会不一致
-          const noFold =
-            head !== undefined &&
-            head.chain.every((c) => c.kind === 'tool' && c.name === 'ask_user_question')
-          return html`<${AssistantRow} key=${row.key} row=${row} store=${store} latest=${latest}
-            ownsHead=${head === undefined || head.key === row.key} noFold=${noFold} />`
-        }
-        case 'approval':
-          return html`<${ApprovalRow} key=${row.key} row=${row} store=${store} />`
-        case 'question':
-          return html`<${QuestionRow} key=${row.key} row=${row} store=${store} />`
-        case 'notice':
-          return html`<${NoticeRow} key=${row.key} row=${row} />`
-      }
-    })}
-    ${store.processing.value ? html`<${TurnStatus} />` : null}
-    ${/* pending 插话气泡：排在列表与「生成中」之后（上游同序）——它们还没进日志，没有锚点序号 */ ''}
-    <${PendingSteeringList} items=${store.pendingSteering.value} />
+  return html`<div id="messages" ref=${ref}>
+    <div class="msg-col" ref=${colRef}>
+      ${hasMore
+        ? html`<button class="load-older" type="button" disabled=${loadingOlder} onClick=${loadOlder}>
+            ${loadingOlder ? '正在加载更早的历史…' : '加载更早'}
+          </button>`
+        : null}
+      ${rows.map((row, i) => {
+        const latest = i === rows.length - 1
+        // 每条行各包一层错误边界：`key` 放在边界上（边界自己也是行级 vnode），
+        // 内部再按行 key 分层，保证「换行」与「重试换子树」两件事互不干扰。
+        const body = (() => {
+          switch (row.kind) {
+            case 'user':
+              return html`<${UserRow} key=${row.key} row=${row} store=${store} latest=${latest} />`
+            case 'context':
+              return html`<${ContextInjectionRow} key=${row.key} row=${row} />`
+            case 'sysprompt':
+              return html`<${SysPromptRow} key=${row.key} text=${row.text} />`
+            case 'assistant': {
+              const head = row.turn === undefined ? undefined : turnHeadRow.get(row.turn)
+              // 「只含提问行时不折叠」是插件偏离，判据必须是**回合级**的（按首行的链判），否则同回合的行会不一致
+              const noFold =
+                head !== undefined &&
+                head.chain.every((c) => c.kind === 'tool' && c.name === 'ask_user_question')
+              return html`<${AssistantRow} key=${row.key} row=${row} store=${store} latest=${latest}
+                ownsHead=${head === undefined || head.key === row.key} noFold=${noFold} />`
+            }
+            case 'approval':
+              return html`<${ApprovalRow} key=${row.key} row=${row} store=${store} />`
+            case 'question':
+              return html`<${QuestionRow} key=${row.key} row=${row} store=${store} />`
+            case 'notice':
+              return html`<${NoticeRow} key=${row.key} row=${row} />`
+          }
+        })()
+        return html`<${RowBoundary} key=${row.key} slot=${`row:${String(row.key)}:${row.kind}`}>${body}</${RowBoundary}>`
+      })}
+      ${store.processing.value ? html`<${TurnStatus} />` : null}
+      ${/* pending 插话气泡：排在列表与「生成中」之后（上游同序）——它们还没进日志，没有锚点序号 */ ''}
+      <${PendingSteeringList} items=${store.pendingSteering.value} />
+      ${errorCount > 0
+        ? html`<div class="render-error-bar">
+            <span class="codicon codicon-warning" aria-hidden="true"></span>
+            <span>有 ${String(errorCount)} 处内容渲染失败（其余照常显示）</span>
+            <button class="render-error-retry" type="button" onClick=${() => clearRenderErrors()}>知道了</button>
+          </div>`
+        : null}
+    </div>
   </div>`
 }

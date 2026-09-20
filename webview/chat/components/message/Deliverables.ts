@@ -27,6 +27,19 @@ export function Deliverables({ row, store }: { row: AssistantRow; store: ChatSto
   // 链不变就不必重算：写盘调用的参数解析要走一遍 JSON.parse
   const produced = useMemo(() => producedPaths(row.chain), [row.chain])
   const presented = row.presentedFiles ?? []
+  /**
+   * **只有回合（这一段）收官后才出**。
+   *
+   * 上游这一块挂在 `conversation.chat.turnTail` 槽、由 `TurnTailNodeView` 渲染，
+   * 取值还要过 `producedForClosing(…, closingSeq)` —— `closingSeq` 是**收官那条** assistant 的序号，
+   * 它之后的结算一律不算。也就是说：**它是回合尾部的报告，不是过程里的进度条**。
+   *
+   * 本插件的行是流式期间一路重折的，`row.chain` 里的写盘调用一落链就会被看见 ——
+   * 少了这道门，模型还在跑的时候「本轮文件改动」就已经列出来、还随每个写盘调用往上长
+   *（真机现象：会话没结束就出现「本轮文件改动」，网页端那时候还没有）。
+   * 被插话切开的前段：那一段收束时 `done` 也会置真，于是我们与上游一样**逐段**出。
+   */
+  if (!row.done) return null
   if (produced.length === 0 && presented.length === 0) return null
   const cwd = store.sessionCwd.value
   const open = (p: string): void => store.openFile(p, undefined, cwd)

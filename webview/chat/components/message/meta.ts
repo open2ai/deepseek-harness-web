@@ -4,6 +4,7 @@
 // 追加动作（反馈 👍/👎）落在**复制之后、分叉之前** —— 反馈是对这条回答本身的评价，
 // 分叉是拿这条回答去开新对话，两者语义上就该这么排。
 import { html } from 'htm/preact'
+import { BranchIcon } from './ThumbIcons'
 
 export function RowMeta({
   time,
@@ -31,7 +32,7 @@ export function RowMeta({
     <button data-act="copy" title="复制" disabled=${!copyable} onClick=${onCopy}><span class="codicon codicon-copy"></span></button>
     ${extraActions}
     ${onBranch === undefined ? null : html`<button data-act="branch" title=${branchLabel} aria-label=${branchLabel}
-      disabled=${!branchable} onClick=${onBranch}><span class="codicon codicon-git-branch"></span></button>`}
+      disabled=${!branchable} onClick=${onBranch}><${BranchIcon} /></button>`}
     ${trailingActions}
   </span></div>`
 }

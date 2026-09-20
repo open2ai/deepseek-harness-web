@@ -18,10 +18,17 @@ export interface DshControlHandlers {
     /**
      * 一条**投影更新**（`{type:'projection'}` 帧）。
      *
-     * 消费方只关心自己那几个键（如上下文占用），所以这里原样透传 key/value，不做白名单 ——
-     * 哪些键有用是消费方的事。会话归属也由消费方判（帧里带 sessionId）。
+     * 消费方只关心自己那几个键（如上下文占用、会话统计、token 用量），所以这里原样透传 key/value，
+     * 不做白名单 —— 哪些键有用是消费方的事。会话归属也由消费方判（帧里带 sessionId）。
      */
     onProjection?: (sessionId: string, key: string, value: unknown) => void;
+    /**
+     * 打开时的**整批投影基线**（首帧 `{type:'baseline', value:{projections}}`）。
+     *
+     * 为什么必须有它：`projection` 帧只在**变化时**推，键的当前值要靠这条基线才拿得到。
+     * 少了它，「打开会话就看到统计/用量」要等下一个变化才出现（新建会话甚至永远不出现）。
+     */
+    onProjectionBaseline?: (bySession: ReadonlyMap<string, Record<string, unknown>>) => void;
 }
 
 /** 常驻订阅句柄。 */
@@ -121,12 +128,24 @@ export function followControl(handlers: DshControlHandlers): DshControlHandle {
                     }
                     const type = frame['type'];
                     if (type === 'baseline') {
-                        const queues = (frame['value'] as { queues?: unknown } | undefined)?.queues;
-                        if (queues === null || typeof queues !== 'object') {
-                            return;
+                        const value = frame['value'] as { queues?: unknown; projections?: unknown } | undefined;
+                        const queues = value?.queues;
+                        if (queues !== null && typeof queues === 'object') {
+                            for (const [sessionId, list] of Object.entries(queues as Record<string, unknown>)) {
+                                handlers.onQueue(sessionId, toItems(list));
+                            }
                         }
-                        for (const [sessionId, list] of Object.entries(queues as Record<string, unknown>)) {
-                            handlers.onQueue(sessionId, toItems(list));
+                        // 投影基线：每个会话一份 `{ asOfSeq, values }`，只取 values（本插件不按 seq 排序）
+                        const blocks = value?.projections;
+                        if (handlers.onProjectionBaseline !== undefined && blocks !== null && typeof blocks === 'object') {
+                            const bySession = new Map<string, Record<string, unknown>>();
+                            for (const [sessionId, block] of Object.entries(blocks as Record<string, unknown>)) {
+                                const values = (block as { values?: unknown } | undefined)?.values;
+                                if (values !== null && typeof values === 'object') {
+                                    bySession.set(sessionId, values as Record<string, unknown>);
+                                }
+                            }
+                            handlers.onProjectionBaseline(bySession);
                         }
                         return;
                     }

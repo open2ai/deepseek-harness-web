@@ -46,6 +46,38 @@ export interface ProcessDisclosure {
     detail: boolean
 }
 
+/** 链里的一项（只取这条判据要用的形状，避免把行模型整个引进来）。 */
+interface ChainLike {
+    kind: string
+    key: number
+    text?: string
+}
+
+/** 只看 `kind` 就能把「步骤文本」那一支挑出来（其余分支没有 `text`）。 */
+export type StepTextLike<T> = T extends { kind: 'text'; text: string } ? T : never
+
+/**
+ * 本行里**不随折叠隐藏**的步骤文本。
+ *
+ * 口径来自上游：折叠藏起来的只有**过程成员**（工具/思考/上下文注入），
+ * 而模型在步骤之间说的话是**回答内容**（上游每步一个独立回答节点，永远可见）。
+ * 插件一回合只开一条行，非回答步的文本以 `kind:'text'` 混在链里 —— 若不单独取出来，
+ * 折叠时它会陪着工具一起消失（真机现象：「工具行之间的文字跑完就看不到了」）。
+ *
+ * @param chain - 本行的链（顺序即渲染顺序）
+ * @param detailVisible - 过程明细当前是否可见（折叠/展开）—— 文本**两种情形都要显示**，此参只用于调用点对齐语义
+ * @returns 需要常显的步骤文本项（按链序）
+ */
+export function visibleStepTexts<T extends ChainLike>(
+    chain: readonly T[],
+    detailVisible: boolean
+): Array<StepTextLike<T>> {
+    // `detailVisible` 刻意不参与筛选：折叠与否都必须显示这些文本。保留形参是为了让调用点
+    // 一眼看出「它与折叠态无关」，而不是误以为这里只处理展开态。
+    void detailVisible
+    return chain.filter((item): item is StepTextLike<T> => item.kind === 'text')
+}
+
 /**
  * 判定一条回答行的过程折叠形态。
  * @param input - 回合事实 + 用户偏好 + 回合级展开态 + 本行的角色
@@ -68,3 +100,5 @@ export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclos
     // 同回合的每一行都跟随同一个展开态 —— 上游也是这么收的：折叠头一个，被收起来的是整个回合的成员。
     return { windowReady, foldable, head: foldable && input.ownsHead, detail: !foldable || input.open }
 }
+
+

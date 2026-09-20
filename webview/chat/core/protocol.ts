@@ -141,9 +141,16 @@ export type HostToViewMessage =
   | { type: 'queueActionFailed'; op: 'edit' | 'remove' | 'steer'; code?: string }
   // 上下文占用（发送按钮左侧的环）：两条投影各自可能缺失；都缺 = 该 dsh 没这个能力 → 页面不渲染那个环
   | { type: 'context'; sessionId?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown }
+  // 会话投影**整表**（会话统计 / token 用量 / plan / goal / 权限…）：来自宿主的 `session/control` 订阅，
+  // 投影一变就推一份当前值。**整表语义**：收到即代表该会话此刻的全部投影（缺键 = 能力未组合）。
+  // 页面的「会话统计 / Token 用量」两张卡读它，因此流式期间会跟着变（不是只在打开会话时刷一次）。
+  | { type: 'projections'; sessionId?: string; values?: Record<string, unknown> }
   // 任务清单（输入框上方的常驻条）：整表替换，`null`/缺省 = 没有清单（该区整块不渲染）。
   // 与「行」同源、但不是行：清单不属于任何一个回合，位置也不在对话流里。
   | { type: 'todos'; todos?: TodoItem[] | null }
+  // 目标条动作的结果：失败时页面在条内联显示 `message (code)`（上游 GoalBar 同口径）；
+  // `key` 原样回带，页面据此兑现对应的 Promise（见 core/host.ts 的 requestGoalAction）。
+  | { type: 'goalActionResult'; key: string; action: 'edit' | 'pause' | 'resume' | 'clear'; error?: string }
   | { type: 'filePicked'; path?: string }
   | { type: 'fileUploaded'; key: string; receiptId?: string; name?: string; bytes?: number; error?: string }
   // 附件字节（附件大类）：结果帧只带附件引用，渲染层要显示时按 id 向宿主懒取
@@ -158,7 +165,7 @@ export type HostToViewMessage =
       agentPreset?: string
       agentPresetLocked?: boolean
     }
-  // 上游显示偏好（全局，与会话无关）：单独一条轻消息，实时跟随只推它，不重拉 chatInfo 那串 RPC
+  // 显示偏好（全局，与会话无关）：单独一条轻消息，实时跟随只推它，不重拉 chatInfo 那串 RPC
   | { type: 'chatPrefs'; transcriptView?: 'normal' | 'compact' }
   // 宿主下发的「行」（阶段 4 切渲染源后页面据此渲染；开关关闭时不下发，见 docs/design/08 §11）。
   // 形状为宿主侧的行模型（`src/dsh/rows/types.ts`），页面消费时做一次映射。
@@ -169,6 +176,12 @@ export type HostToViewMessage =
       sessionId?: string
       /** 本会话是否有一轮**正在跑**（显式事实：页面据此决定「停止」按钮可用，不从行推导） */
       turnActive?: boolean
+      /** 更早的历史还没进窗口（窗口分页事实）：列表顶端据此出「加载更早」。 */
+      historyHasMore?: boolean
+      /** 「加载更早」这一页是否在飞（宿主侧的事实，页面按钮据此禁用）。 */
+      historyLoading?: boolean
+      /** 当前窗口里的事件条数（诊断用；页面只展示不判定）。 */
+      historyEvents?: number
     }
   // 消息反馈的状态回帧（列表 / 写入结果 / 业务失败）。**不是渲染指令**：它只喂反馈切片。
   | {
@@ -238,6 +251,7 @@ export type ViewToHostMessage =
   | { type: 'questionResponse'; rpcId?: string; sessionId?: string; answers: Array<{ id: string; selected: string[]; custom?: string }> }
   | { type: 'questionCancel'; rpcId?: string; sessionId?: string }
   | { type: 'chatSelectPermission'; preset: string }
+  | { type: 'goalAction'; key: string; action: 'edit' | 'pause' | 'resume' | 'clear'; objective?: string }
   | { type: 'chatSelectModel'; provider: string; model: string; reasoningEffort?: string }
   | { type: 'chatSelectMode'; agentPreset: string }
   | { type: 'pickFile' }
@@ -261,3 +275,6 @@ export type ViewToHostMessage =
   | { type: 'slashRun'; text: string }
   // 「@」引用：按查询串请求文件/会话候选
   | { type: 'atListReq'; query: string }
+  // 往前翻一页历史（对齐上游 `ISession.loadOlder()`）：宿主读更早的一页并 prepend 到窗口，
+  // 然后用 `rows` 帧（带 `historyHasMore`/`historyLoading`）回答。页面在飞时不重复发。
+  | { type: 'loadOlder' }

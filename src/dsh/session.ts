@@ -184,8 +184,7 @@ export async function readFollowSnapshot(sessionId: string, maxMessages = 5000, 
                         projections: proj,
                         cursor,
                         hasMore: v['hasMore'] === true,
-                    });
-                },
+                    });                },
                 onError: (err) => finish(undefined, new Error(`DSH 会话快照失败：${err.message}`)),
                 onEnd: () => finish(undefined, new Error('DSH 会话流意外结束')),
                 onClose: () => finish(undefined, new Error('DSH 会话流关闭')),
@@ -613,6 +612,36 @@ export async function createSession(opts: { workspaceId?: string; cwd?: string; 
 export interface DshImageAttachment {
     mediaType: string;
     data: string;
+}
+
+/**
+ * 往前翻**一页**历史（适配上游 0.1.5-rc.2 的 `session.page`，见 `SessionPageRequest`）。
+ *
+ * 上游客户端 `ISession.loadOlder()` 走的就是这条路：`events.prepend({ beforeSeq, maxMessages })`
+ * —— 以**当前窗口的第一条事件序号**为 `beforeSeq`，取它之前的一页；返回的 `hasMore` 说明再往前还有没有。
+ * 本插件同口径：`beforeSeq` 传窗口最老的那条 `seq`，返回的这一页由调用方**前插**进窗口。
+ *
+ * `throughSeq` 传 `-1` = 「不设上界」（上游把 -1 当作"以源日志末端为准"）。
+ * @param sessionId - 目标会话
+ * @param beforeSeq - 窗口里最老事件的序号（**非负安全整数**；服务端会校验）
+ * @param maxMessages - 这一页最多取多少条"消息对齐"记录（上游默认 50，这里按插件窗口放大）
+ * @returns 这一页的事件（已展开内嵌增量、按 `seq` 升序）与「再往前还有没有」
+ */
+export async function pageSessionEvents(
+    sessionId: string,
+    beforeSeq: number,
+    maxMessages = 600
+): Promise<{ events: RawEvent[]; hasMore: boolean }> {
+    const value = await rpcCall<{ records?: unknown[]; hasMore?: boolean }>('session.page', {
+        address: { kind: 'session', sessionId },
+        throughSeq: -1,
+        beforeSeq: Math.floor(beforeSeq),
+        maxMessages,
+    });
+    return {
+        events: snapshotRecordsToEvents(Array.isArray(value?.records) ? value.records : []),
+        hasMore: value?.hasMore === true,
+    };
 }
 
 /**

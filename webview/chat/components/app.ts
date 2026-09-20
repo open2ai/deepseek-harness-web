@@ -13,6 +13,7 @@ import { SearchPicker } from './SearchPicker'
 import { ModelPicker } from './ModelPicker'
 import { keepRowVisible } from '../core/scroll'
 import { useTriggerMenu } from '../core/trigger/useTrigger'
+import { decideInputKey } from '../core/inputKeys'
 import { slashTrigger } from '../core/trigger/slash'
 import { atTrigger } from '../core/trigger/at'
 import { MessageList } from './message/MessageList'
@@ -23,14 +24,7 @@ import { TodoCard } from './TodoCard'
 import { QueueCard } from './QueueCard'
 import { ContextMeter } from './ContextMeter'
 import { StatsCards } from './StatsCards'
-
-// goal chip 的阶段中文标签（与上游 GoalPhase 对应；complete 时不显示 chip）
-const GOAL_PHASE_LABEL: Record<string, string> = {
-  active: '进行中',
-  paused: '已暂停',
-  blocked: '阻塞',
-  complete: '已完成',
-}
+import { GoalBar } from './goal/GoalBar'
 
 // ---------------- Welcome ----------------
 function Welcome({ store }: { store: ChatStore }) {
@@ -252,10 +246,23 @@ function Popup({ store }: { store: ChatStore }) {
 }
 
 // ---------------- Composer ----------------
-function Composer({ store }: { store: ChatStore }) {
+// 导出供脚本级验收（`tmp/_composer.dom.test.mjs`）用真组件渲染。
+export function Composer({ store }: { store: ChatStore }) {
   const text = store.text.value
   const processing = store.processing.value
+  // 「空」= 草稿 + 附件 + 图片 + 引用**全都空**（上游 `InputBar.tsx:75` 的同一判据）
+  const empty =
+    text.trim() === '' &&
+    store.attachments.value.length === 0 &&
+    store.images.value.length === 0 &&
+    store.refs.value.length === 0
+  const running = store.turnRunning.value
+  // 主钮三态照上游 `InputBar.tsx:346-365`：`primaryStops = running && subagent===null && (empty || blocked)`
+  //（后者本插件取「普通会话」那一支：拿不到 subagent/blocked）。
+  // 于是：**只有输入区空着才是「停止生成」**；非空时主钮是发送（忙时=排队发送）。
+  const stops = (running || processing) && empty
   const busy = store.busy.value // 过渡态：恢复历史/切工作区时禁用输入
+  const sendLabel = stops ? '停止生成' : busy ? '加载中…' : running ? '排队发送' : '发送消息'
   const sel = store.sel.value
   const focusTick = store.focusTick.value
   const taRef = useRef<HTMLTextAreaElement | null>(null)
@@ -377,7 +384,7 @@ function Composer({ store }: { store: ChatStore }) {
     const c = store.slashCatalog.value?.commands.find((cc) => cc.name.toLowerCase() === name)
     return c?.input?.hint ? t : null
   })()
-  // 已认领的技能行(/技能 参数…)：普通 Enter = 作为技能正常发送（chatSend，宿主 pre-step 识别 /技能名）
+  // 已认领的技能行(/技能 参数…)：Enter = 作为技能正常发送（chatSend，宿主 pre-step 识别 /技能名）
   const skillClaim = ((): string | null => {
     const v = text
     if (!v || v.includes('\n') || !v.startsWith('/')) return null
@@ -386,29 +393,54 @@ function Composer({ store }: { store: ChatStore }) {
     if (!name || !/\s/.test(t.slice(1))) return null
     return store.slashCatalog.value?.skills.some((sk) => sk.name.toLowerCase() === name) ? t : null
   })()
+  /**
+   * 输入框键位：判定全在 `core/inputKeys`（纯函数、脚本可覆盖），这里只按结果派发。
+   * 顺序要紧：先让触发菜单/弹层吃事件（`defaultPrevented` 就收手），再做输入框自己的判定。
+   */
   const inputKeyDown = (e: KeyboardEvent): void => {
     trigger.onKeyDown(e)
     if (e.defaultPrevented) return
-    if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
-      if (argCommand) {
+    onBackspace(e)
+    if (e.defaultPrevented) return
+    const decided = decideInputKey(e, {
+      text,
+      menuOpen: trigger.open,
+      claim: argCommand !== null ? 'command' : skillClaim !== null ? 'skill' : null,
+      running: store.turnRunning.value,
+      queued: store.queueItems.value.some((i) => i.placement === 'queued'),
+    })
+    switch (decided.action) {
+      case 'none':
+      case 'newline':
+        // `newline` 什么都不做 = 交给 textarea 原生换行；`none`（如空草稿下的发送键）也不拦
+        return
+      case 'menu-pick':
+        // 交给触发菜单自己处理（它已经处理过一轮；这里只保证不被当成发送）
+        return
+      case 'run-command':
         e.preventDefault()
         store.text.value = '' // 回车执行 host 指令：无条件清空输入
-        store.runSlash(argCommand)
+        store.runSlash(argCommand as string)
         return
-      }
-      if (skillClaim) {
+      case 'send':
         e.preventDefault()
-        store.send() // 技能行：回车即作为技能正常发送（宿主 pre-step 识别）
+        store.send(decided.mode)
         return
-      }
-    } else if (e.key === 'Backspace') {
-      // 贴片在文字之前：光标在最左(前面没有字符)时，退格删除最靠右(离文字最近)的贴片
-      const ta = taRef.current
-      const refs = store.refs.value
-      if (ta && refs.length > 0 && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+      case 'steer-whole-queue':
         e.preventDefault()
-        store.removeRef(refs[refs.length - 1].key)
-      }
+        store.steerWholeQueue()
+        return
+    }
+  }
+
+  /** 退格：贴片在文字之前 —— 光标在最左（前面没有字符）时删除最靠右（离文字最近）的贴片。 */
+  const onBackspace = (e: KeyboardEvent): void => {
+    if (e.key !== 'Backspace') return
+    const ta = taRef.current
+    const refs = store.refs.value
+    if (ta && refs.length > 0 && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+      e.preventDefault()
+      store.removeRef(refs[refs.length - 1].key)
     }
   }
 
@@ -418,8 +450,6 @@ function Composer({ store }: { store: ChatStore }) {
     store.images.value.length > 0 ||
     store.refs.value.length > 0
   const plan = store.planState.value
-  const goal = store.goalState.value
-
   return html`<div id="composer" class=${busy ? 'is-busy' : ''}
     onDragOver=${(e: Event) => e.preventDefault()}
     onDrop=${(e: DragEvent) => {
@@ -450,6 +480,9 @@ function Composer({ store }: { store: ChatStore }) {
     <${AttachmentBar} store=${store} />
     <${TodoCard} todos=${store.todos.value} />
     <${QueueCard} store=${store} />
+    ${/* 目标条必须挂在 `#inputbox` **外面**（对齐上游 `conversation.input.dock`）：它是个带边框的
+         flex 列容器，塞进去会掉到「输入框内底部」并把边框撑高。 */ ''}
+    <${GoalBar} store=${store} />
     <div id="inputbox">
       ${store.refs.value.length > 0
         ? html`<div id="refRow" ref=${refRowRef}>${store.refs.value.map(
@@ -460,7 +493,7 @@ function Composer({ store }: { store: ChatStore }) {
             </span>`
           )}</div>`
         : null}
-      <textarea id="input" ref=${taRef} placeholder=${text || store.refs.value.length > 0 ? '' : '向 AI 提问（Ctrl+Enter 发送）'} value=${text}
+      <textarea id="input" ref=${taRef} placeholder=${text || store.refs.value.length > 0 ? '' : '向 AI 提问（Enter 发送，Shift+Enter 换行）'} value=${text}
         onInput=${(e: Event) => { store.text.value = (e.target as HTMLTextAreaElement).value; trigger.sync() }}
         onKeyDown=${inputKeyDown}
         onKeyUp=${trigger.sync}
@@ -505,29 +538,20 @@ function Composer({ store }: { store: ChatStore }) {
         </div>
         <span class="send-group">
           <${ContextMeter} store=${store} />
-          <button id="send" title=${processing ? '终止' : busy ? '加载中…' : '发送'} class=${processing ? 'stop' : ''} disabled=${!processing && (!canSend || !!busy)}
-            onClick=${() => (processing ? store.cancel() : store.send())}>
+          <button id="send" title=${sendLabel} class=${stops ? 'stop' : ''} disabled=${stops ? false : (!canSend || !!busy)}
+            onClick=${() => (stops ? store.cancel() : store.send())}>
             <svg class="send-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14V3"/><path d="M3.5 6.5 8 2l4.5 4.5"/></svg>
             <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
           </button>
         </span>
       </div>
-      ${(plan && (plan.active || plan.pending)) || goal ? html`<div id="chipRow">
-        ${plan && (plan.active || plan.pending)
-          ? html`<button id="planChip" disabled=${plan.pending ? true : undefined}
+      ${plan && (plan.active || plan.pending)
+        ? html`<div id="chipRow">
+            <button id="planChip" disabled=${plan.pending ? true : undefined}
               title=${plan.pending ? 'Plan 切换中…' : 'Plan 模式中，点击退出'}
-              onClick=${() => store.runSlash('/plan off')}>plan${plan.pending ? '…' : ' ✕'}</button>`
-          : null}
-        ${goal && goal.phase !== 'complete'
-          ? html`<div id="goalChip" class=${'goal-' + (goal.phase || 'active')}
-              title=${`目标（${GOAL_PHASE_LABEL[goal.phase] || goal.phase}）：${goal.objective}`}>
-              <span class="goal-obj">🎯 ${goal.objective}</span>
-              ${goal.phase === 'active' ? html`<button class="chip-act" title="暂停目标" onClick=${() => store.runSlash('/goal pause')}>⏸</button>` : null}
-              ${goal.phase === 'paused' ? html`<button class="chip-act" title="继续目标" onClick=${() => store.runSlash('/goal resume')}>▶</button>` : null}
-              <button class="chip-act" title="清除目标" onClick=${() => store.runSlash('/goal clear')}>✕</button>
-            </div>`
-          : null}
-      </div>` : null}
+              onClick=${() => store.runSlash('/plan off')}>plan${plan.pending ? '…' : ' ✕'}</button>
+          </div>`
+        : null}
     </div>
   </div>`
 }

@@ -22,12 +22,33 @@ import {
 
 const dsh = new DshService();
 
+/**
+ * 事件窗口的诊断输出通道（「历史看不全 / 看不到『加载更早』」这一类问题的**唯一可查处**）。
+ *
+ * 为什么必须有一个：分页事实全在宿主侧（`hasMore`、快照多少条、进来多少条），
+ * 页面上只看得到「列表有没有变」。此前这些只走 `console.log`（要开开发者工具才看得见），
+ * 用户问「为什么没有『加载更早』」时无从自查。写进 Output 面板后，打开会话就能看到那一行。
+ */
+let rowsLog: vscode.OutputChannel | undefined;
+function logRows(line: string): void {
+    rowsLog?.appendLine(`${new Date().toLocaleTimeString()}  ${line}`);
+}
+
 // 渲染源的唯一通路：宿主把**行**下发给页面，页面据此渲染（旧指令通路已退役，见 docs/design/08 §13）。
 dsh.onRows = (rows, turnActive) => {
     // 带上会话标识：页面靠它判断「本地的乐观行是不是这个会话的」——
     // 不带的话切会话时上一个会话的乐观行会被当成未认领而留下，processing 恒真（一直「深度求索中」）。
     // 带上 turnActive：**是否在跑是本轮的显式事实**，页面从「行」推导不出来（见 dshService.turnActive）。
-    postToChats({ type: 'rows', rows, sessionId: dsh.getSessionId(), turnActive });
+    // 窗口分页事实（hasMore/loading/events）与行同帧：列表顶端的「加载更早」按钮只读它，不自己猜。
+    postToChats({
+        type: 'rows',
+        rows,
+        sessionId: dsh.getSessionId(),
+        turnActive,
+        historyHasMore: dsh.historyHasMore(),
+        historyLoading: dsh.historyLoading(),
+        historyEvents: dsh.windowEventCount(),
+    });
 };
 // 任务清单（输入框上方的常驻条）：与行同源、同一处派生，页面按整表替换；`null` = 没有清单。
 dsh.onTodos = (todos) => {
@@ -41,6 +62,28 @@ dsh.onQueue = (sessionId, items) => {
 // 上下文占用（发送按钮左侧的环）：单独一条轻帧 —— 投影值很小，不重推整串 chatInfo
 dsh.onContext = (sessionId, value) => {
     postToChats({ type: 'context', sessionId, pressure: value.pressure, breakdown: value.breakdown });
+};
+// 会话投影整表（会话统计 / token 用量 / plan / goal / 权限…）：来自 `session/control`，
+// 投影一变就推一份当前值 —— 输入框下方那两张卡据此**跟着流式实时变**（见 dshService.onProjections）。
+dsh.onProjections = (sessionId, values) => {
+    postToChats({ type: 'projections', sessionId, values });
+};
+// 审批/提问：宿主侧常驻（见 dshService.ensureAskSubscription）。缓存最后一帧，新 webview ready 时重放。
+dsh.onApproval = (a) => {
+    const frame = { type: 'chatApproval', approvalId: a.approvalId, description: a.description, toolName: a.toolName };
+    pendingAsk = frame;
+    postToChats(frame);
+};
+dsh.onQuestion = (q) => {
+    const frame = { type: 'chatQuestion', rpcId: q.rpcId, sessionId: q.sessionId, questions: q.questions };
+    pendingAsk = frame;
+    pendingAskRpcId = q.rpcId;
+    postToChats(frame);
+};
+dsh.onQuestionClosed = (rpcId) => {
+    pendingAsk = undefined;
+    pendingAskRpcId = undefined;
+    postToChats({ type: 'questionClosed', rpcId });
 };
 // 输入框功能宿主侧服务：承载 "/" 斜杠命令/技能，后续输入触发类功能都挂这里（复用 dsh 的会话/就绪）
 const chatInput = new ChatInputService(dsh);
@@ -302,6 +345,25 @@ let chatPanel: vscode.WebviewPanel | undefined;
 /** 已收到 webview `ready` 的聊天视图（保证 postMessage 到达已挂好监听的页面） */
 const readyChats = new WeakSet<vscode.Webview>();
 
+/**
+ * 待答的交互帧（`chatApproval` / `chatQuestion`）：只发给发起该回合的 webview，且不进日志，
+ * 故缓存最后一帧供新 webview（如「在编辑区打开」）ready 时重放。
+ */
+let pendingAsk: unknown = undefined;
+
+/** 待答提问的 rpcId（回合作废时广播 `questionClosed` 用；审批帧没有该字段）。 */
+let pendingAskRpcId: string | undefined;
+
+/** 待答交互作废：清缓存并让各 webview 收起弹窗。 */
+function clearPendingAsk(): void {
+    const rpcId = pendingAskRpcId;
+    pendingAsk = undefined;
+    pendingAskRpcId = undefined;
+    if (rpcId !== undefined) {
+        postToChats({ type: 'questionClosed', rpcId });
+    }
+}
+
 /** 全部存活聊天 webview：侧栏视图 launcherView + 当前 chatTarget + 编辑器面板 chatPanel（去重） */
 function allChatWebviews(): vscode.Webview[] {
     const set = new Set<vscode.Webview>();
@@ -404,8 +466,9 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
             // 模型列表失败不阻塞投影
         }
         const projections = await dsh.getProjections();
-        // 上下文占用也在这份投影里：顺手喂给服务层（环形图那条轻帧的数据源之一），免得再跑一次 RPC
-        dsh.seedContext(projections);
+        // 投影整表也在这份里：顺手喂给服务层 —— 上下文环（那条轻帧）与输入框下方的
+        // 「会话统计 / Token 用量」都读它，免得再跑一次 RPC
+        dsh.seedProjections(projections);
         let agentPresets:
             | { presets: Array<{ id: string; name?: string; description?: string; isDefault: boolean; broken?: string }> }
             | undefined;
@@ -439,24 +502,43 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
     }
 }
 
-/** 推上游「设置 → 对话显示」偏好（全局，与会话无关）。读不到就不推：webview 侧默认 compact = 接入前的形态 */
+/** 推偏好（全局，与会话无关）：上游「设置 → 对话显示」的显示形态。
+ *  显示形态读不到就不推那一个字段：webview 侧默认 compact = 接入前的形态 */
 async function postChatPrefs(): Promise<void> {
     const transcriptView = (await dsh.readTranscriptView()) ?? dsh.getCachedTranscriptView();
     if (transcriptView === undefined) {
-        return; // 别把「读失败」当 compact 推下去，否则会抹掉上次读到的 normal
+        return;
     }
     postToChats({ type: 'chatPrefs', transcriptView });
 }
 
-/** 上游设置变更跟随：进程内只订阅一次，变更（含重连后重读发现的变化）广播给所有存活聊天页 */
+/**
+ * 偏好变更跟随：进程内只订阅一次，广播给所有存活聊天页。
+ * 来源是上游设置（`settings/document-updated` 经 `subscribeTranscriptView`）。
+ * 输入框键位是固定值（与宿主页面同口径），没有本插件的配置项，所以不在这里跟。
+ */
 let settingsFollowed = false;
 function ensureSettingsFollow(): void {
     if (settingsFollowed) {
         return;
     }
     settingsFollowed = true;
-    dsh.subscribeTranscriptView((transcriptView) => {
-        postToChats({ type: 'chatPrefs', transcriptView });
+    // 诊断出口：分页/窗口的事实全在宿主侧，页面上只看得到「列表变没变」——
+    // 排查「历史看不全 / 看不到『加载更早』」时这里是唯一可查处。
+    rowsLog = vscode.window.createOutputChannel('DSH 事件窗口');
+    dsh.onWindowLog = (line) => {
+        logRows(line);
+    };
+    rowsLog.appendLine(
+        [
+            '──── DSH 历史窗口自查 ────',
+            '事件窗口**不按条数裁剪**（与 dsh 网页端一致）：会话有多少历史就能看多少。',
+            '顶端「加载更早」只在**服务端分页截断**时出现 —— 它的门是 `hasMore`，不是本插件配出来的。',
+            '────────────────────────',
+        ].join('\n')
+    );
+    dsh.subscribeTranscriptView(() => {
+        void postChatPrefs();
     });
 }
 
@@ -576,6 +658,8 @@ function setupChatWebview(
      * 两条路径各记一次迟早会变成两套口径（先前的记账挂在 askStreaming 返回之后）。
      */
     dsh.onTurnSettled = (info) => {
+        // 回合已结算：待答交互（若有）随本轮作废
+        clearPendingAsk();
         void recordUsage(globalState, info.stats, info.timeMs);
         for (const w of allChatWebviews()) {
             void postChatInfo(w);
@@ -584,20 +668,38 @@ function setupChatWebview(
 
     /** 整轮停止：使进行中的 askStreaming 失效，并请 dsh 取消当前会话回合，随后复位聊天 UI。 */
     const stopTurn = (): void => {
+        clearPendingAsk();
         gen.n++; // 使进行中的流失效
         void (async () => {
+            const sid = await dsh.getSession().catch(() => undefined);
+            if (sid === undefined) {
+                logRows('停止：拿不到当前会话 id，取消未发出');
+                return;
+            }
             try {
-                const sid = await dsh.getSession();
                 await dsh.call('session.cancel', { sessionId: sid });
-            } catch {
-                // 取消失败忽略
+                logRows(`停止：已请求取消 session=${sid}`);
+                // 取消被接受 = 这一轮不再跑。立刻把「在跑」这个事实推下去，
+                // 不必等服务端补发 `turn/end`（那段时间里页面看不出变化）。
+                dsh.markTurnStopped();
+            } catch (e) {
+                const code = e instanceof DshRpcError ? e.code : undefined;
+                const msg = e instanceof Error ? e.message : String(e);
+                // 取消失败必须说出来：否则界面上只表现为「点了没反应」，原因无从查起。
+                logRows(`停止：取消失败 ${code ?? '(无码)'} ${msg}`);
+                if (code === 'session/agent-busy') {
+                    // 子会话的取消不走 `session.cancel`（服务端要求走子代理投递路径）：给出可行动的话术。
+                    void vscode.window.showWarningMessage(
+                        '这个会话是分叉出来的子会话，不能单独停止。请在它的源会话里停止，或等它自己结束。'
+                    );
+                } else {
+                    void vscode.window.showWarningMessage(`未能停止本轮：${msg}${code === undefined ? '' : `（${code}）`}`);
+                }
             }
         })();
-        // 停止的 UI 复位**不再由这里发完成帧**：服务端会补发该回合的 `turn/end`，
-        // 宿主的行构建据此把回答行定稿（`done`）并带上终止原因，页面随之复位（见 docs/design/08 §13）。
-        // 停止不走正常收尾那次投影刷新，而服务端已经把这轮算进去了 —— 不补刷新的话，
-        // 左下角统计（轮次/用量）会一直停在停止前的值，直到切会话或重开面板才对齐。
-        // 取消是异步结算的（服务端要先落 turn/end 再更新投影），所以延时读；再补一次兜住更慢的结算。
+        // 停止后的界面复位仍以服务端补发的 `turn/end` 为准（行构建据此定稿并带终止原因）。
+        // 但那一步不经过正常的投影刷新，而服务端已经把这轮算进去了 —— 不补这几次读，
+        // 左下角统计（轮次/用量）会停在停止前的值。取消是异步结算的，所以延时读，再补一次兜住更慢的结算。
         for (const delay of [400, 1200]) {
             setTimeout(() => {
                 void postChatInfo(webview);
@@ -656,10 +758,40 @@ function setupChatWebview(
                 await postChatInfo(webview);
                 await postChatPrefs();
                 ensureSettingsFollow();
+                // 待答交互（审批/提问）不在日志里、也只发给发起那一轮的 webview：新建的面板补原帧
+                if (pendingAsk !== undefined) {
+                    post(pendingAsk);
+                }
                 // 页面是**重建**的，而行的唯一来源是宿主（开关打开时旧的历史指令被忽略）：
                 // 就绪后补发当前会话的行，否则重开面板/切换视图时对话区空白。
                 dsh.pushCurrentRows();
             })();
+            return;
+        }
+        if (msg.type === 'goalAction') {
+            // 目标条的动作：**直接打上游 goal RPC**（不等下一轮），回执原样回带 `key`。
+            // 失败把 `message (code)` 交给页面内联显示（上游 GoalBar 同口径）。
+            const m = msg as { key?: unknown; action?: unknown; objective?: unknown };
+            const action = m.action;
+            const key = typeof m.key === 'string' ? m.key : '';
+            if (action === 'edit' || action === 'pause' || action === 'resume' || action === 'clear') {
+                void (async () => {
+                    const result = await dsh.goalAction(
+                        action,
+                        typeof m.objective === 'string' ? m.objective : undefined
+                    );
+                    post({
+                        type: 'goalActionResult',
+                        key,
+                        action,
+                        ...(result.error === undefined ? {} : { error: result.error }),
+                    });
+                    // 成功：投影随之变化，刷新一次 chatInfo 让目标条立刻换成新状态（不必等下一次轮询/事件）
+                    if (result.error === undefined) {
+                        await postChatInfo(webview);
+                    }
+                })();
+            }
             return;
         }
         if (msg.type === 'chatSend') {
@@ -713,37 +845,9 @@ function setupChatWebview(
                     // 提交这一刻就把「进行中」立起来：不等 turn/start 到达，
                     // 否则「用户消息回显」到「turn/start」之间按钮会中途变回「发送」（见 dshService.turnRunning）
                     dsh.beginTurn();
-                    await dsh.askStreaming(parts, {
-                        requestId: submitId,
-                        // **渲染不再走这里**：全部由宿主下发的「行」驱动（见 docs/design/08 §13）。
-                        // 只留**交互类**回调 —— 审批 / 提问 / 提问关闭，它们不是渲染指令。
-                        onApproval: (a) => {
-                            if (g === gen.n) {
-                                post({
-                                    type: 'chatApproval',
-                                    approvalId: a.approvalId,
-                                    description: a.description,
-                                    toolName: a.toolName,
-                                });
-                            }
-                        },
-                        onQuestion: (q) => {
-                            if (g === gen.n) {
-                                post({
-                                    type: 'chatQuestion',
-                                    rpcId: q.rpcId,
-                                    sessionId: q.sessionId,
-                                    questions: q.questions,
-                                });
-                            }
-                        },
-                        // $events 流断了：该提问已无法应答，关掉弹窗（留着只会让用户点了报错）
-                        onQuestionClosed: (rpcId) => {
-                            if (g === gen.n) {
-                                post({ type: 'questionClosed', rpcId });
-                            }
-                        },
-                    });
+                    // 审批/提问不再从这里接：它们由宿主侧**常驻**订阅广播（见 dsh.onApproval/onQuestion）。
+                    // 挂在回合上的话，面板没开时到达的 waterfall 帧会被直接丢弃。
+                    await dsh.askStreaming(parts, { requestId: submitId });
                     // 回合的渲染结果（正文/统计/计数）由宿主下发的「行」承载。
                     // 用量记账与统计刷新**不在这里**：它们收在回合结算回调里（见上面的 dsh.onTurnSettled）——
                     // 忙时提交没有返回值可挂，两条提交路径只能共用一个时机。
@@ -898,6 +1002,8 @@ function setupChatWebview(
             void (async () => {
                 try {
                     await dsh.approvalResponse(msg.approvalId, !!msg.allow);
+                    pendingAsk = undefined;
+                    pendingAskRpcId = undefined;
                 } catch (e) {
                     // 本地应答失败（如缺少 rpcId / 服务端拒绝）：提示用户去网页面板处理
                     vscode.window.showErrorMessage((e as Error).message);
@@ -907,6 +1013,9 @@ function setupChatWebview(
             void (async () => {
                 try {
                     await dsh.answerQuestion(msg.rpcId, msg.sessionId, msg.answers);
+                    // 成功才算答完：清缓存并广播关帧。放成功分支里 —— 回答失败时卡片必须还在
+                    //（发起侧本地已收起，两边都清就无从重试）。
+                    clearPendingAsk();
                 } catch (e) {
                     vscode.window.showErrorMessage((e as Error).message);
                 }
@@ -914,7 +1023,7 @@ function setupChatWebview(
         } else if (msg.type === 'questionCancel') {
             void (async () => {
                 // 关掉弹窗是**无论如何**都要做的第一步：它是本地 UI，不依赖这次取消是否送到服务端
-                post({ type: 'questionClosed', rpcId: msg.rpcId });
+                clearPendingAsk();
                 try {
                     // dsh 接受"只取消该提问"：卡片移除，本轮 agent 继续。
                     // 返回 false = 该提问已不在挂起表里（已被处理 / 断流清过 / 网页端答过）——
@@ -985,6 +1094,19 @@ function setupChatWebview(
                         return;
                     }
                     vscode.window.showErrorMessage((e as Error).message);
+                }
+            })();
+        } else if (msg.type === 'loadOlder') {
+            // 往前翻一页历史（对齐上游 `ISession.loadOlder()`）：读更早的一页 prepend 进窗口，
+            // 完成后由 `onRows` 自然下发（带 `historyHasMore`/`historyLoading`），页面按钮据此复位。
+            // 失败**不上抛**：窗口没变、按钮复位即可，读不到更早的历史不是错误操作。
+            void (async () => {
+                try {
+                    await dsh.loadOlderPage();
+                } catch (e) {
+                    console.warn('[dsh-rows] 加载更早的历史失败：', e);
+                } finally {
+                    dsh.flushRowsNow();
                 }
             })();
         } else if (msg.type === 'slashListReq') {

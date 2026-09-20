@@ -39,7 +39,7 @@ export function TerminalBlock({ card, store }: { card: TermCard; store: ChatStor
   const outputLines = (card.output ?? '').split('\n').map((l) => stripAnsi(l))
 
   const dot = html`<span class="term-dot" data-state=${dotState(card.state)}></span>`
-  // 命令行首行前：官方状态点(runState) done绿/ongoing蓝/error红/stopped琥珀（上游终端卡不出 stopped，本插件为「与行一致」补）
+  // 命令行首行前：状态点 done绿/ongoing蓝/error红/stopped琥珀（本插件为「与行状态一致」补 stopped）
   const promptRows = card.command.map((line, i) => html`
     <div class="term-prompt-line" key=${i}>
       ${i === 0 ? dot : null}

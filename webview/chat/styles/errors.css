@@ -1,0 +1,58 @@
+// 行级兜底与「加载更早」的样式（判据见 core/errors.ts 与 components/RowBoundary.ts）。
+//
+// 兜底块要**一眼看出是坏的那一行、而不是整片空白**：错误色边框 + 一行摘要 + 重试按钮；
+// 它不是对话内容，所以用等宽字体与弱底色，与 markdown 正文区分开。
+
+  /* ===== 行级兜底（渲染失败的某一行）===== */
+  .row-error {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin: 4px 0; padding: 8px 10px;
+    border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(241, 76, 76, 0.6));
+    border-left-width: 3px;
+    border-radius: 6px;
+    background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.08));
+    font-size: 12px;
+  }
+  .row-error-ico {
+    flex: none; color: var(--vscode-errorForeground, #f14c4c); font-size: 14px; line-height: 18px;
+  }
+  .row-error-body { flex: 1 1 auto; min-width: 0; }
+  .row-error-title { color: var(--vscode-foreground, #ddd); }
+  /* 错误摘要单行省略：整条错误靠 title 悬停看（完整栈在账本里，控制台也有） */
+  .row-error-msg {
+    margin-top: 2px;
+    font-family: var(--vscode-editor-font-family, monospace); font-size: 11px;
+    color: var(--vscode-descriptionForeground, #999);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .row-error-retry {
+    flex: none; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.2));
+    background: transparent; color: var(--vscode-foreground, #ddd);
+    font: inherit; font-size: 11px;
+  }
+  .row-error-retry:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
+
+  /* 账本计数条（只在有错误时出现）：贴在列表末尾，点「全部重试」重挂所有行 */
+  .render-error-bar {
+    display: flex; align-items: center; gap: 6px;
+    margin: 6px 0; padding: 2px 6px;
+    color: var(--vscode-descriptionForeground, #999); font-size: 11.5px;
+  }
+  .render-error-bar .codicon { font-size: 12px; color: var(--vscode-charts-yellow, #cca700); }
+  .render-error-retry {
+    border: none; background: none; padding: 0; cursor: pointer; font: inherit;
+    color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline dotted;
+  }
+
+  /* ===== 「加载更早」（历史分页）=====
+     位置在列表顶端、整行可点：与上游 `chat.loadOlder` 同一个位置与语义。
+     加载中禁用并换成进行时文案（不是转圈：这一处不需要动效，文案足够）。 */
+  .load-older {
+    display: block; width: 100%; padding: 6px 8px; margin: 0 0 4px;
+    border: none; border-radius: 6px; cursor: pointer;
+    background: none; color: var(--vscode-textLink-foreground, #3794ff);
+    font: inherit; font-size: 12px; text-align: center;
+  }
+  .load-older:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
+  .load-older:disabled { cursor: default; color: var(--vscode-descriptionForeground, #999); }

@@ -23,21 +23,21 @@
     color: var(--vscode-foreground, #ddd);
     font-size: 12px; line-height: 1.5;
   }
-  /* 思考全文框：全文保留，截断只用 max-height+渐隐遮罩（peek/live/open，不删 DOM 文本） */
+  /* 思考全文框：**纯文本**（上游 `thinkBody` 同款：pre-wrap + break-word，`**` 等标记原样显示、不解析）。
+     展开时标题行 sticky 吸附在顶部，保证折叠开关一直可达（插件便利，上游无此条）。
+     字号/行高走「二级档」：默认 13px / 20px（`--dsh-content-font-size-secondary`
+     在宿主页面里是 min(size-1, max(13, size-2))，本插件单面板取 13/20 常量）。 */
   .chain-reason {
-    position: relative; margin: 2px 2px; padding: 2px 8px;
-    white-space: pre-wrap; word-break: break-word; line-height: 1.55;
-    font-size: 11.5px; color: var(--vscode-descriptionForeground, #999);
-    border-radius: 5px; background: rgba(128,128,128,0.05);
+    position: relative; margin: 2px 2px 2px 22px; padding: 4px 0;
+    color: var(--vscode-descriptionForeground, #999);
+    font-size: 13px; line-height: 20px;
+    white-space: pre-wrap; word-break: break-word;
   }
-  .chain-reason.is-peek { max-height: 84px; overflow: hidden; cursor: pointer; }
-  .chain-reason.is-peek::after {
-    content: ''; position: absolute; inset: auto 0 0 0; height: 40px;
-    background: linear-gradient(transparent, var(--vscode-editor-background, #1e1e1e));
-    pointer-events: none;
+  /* 展开时：头部吸附，滚动思考全文时折叠开关不跑掉 */
+  .chain-disclosure:has(.chain-reason.is-open) .chain-row-head {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--vscode-editor-background, #1e1e1e);
   }
-  .chain-reason.is-live { max-height: 160px; overflow-y: auto; }
-  .chain-reason.is-open { max-height: none; overflow: visible; cursor: pointer; }
 
   /* 过程链行内件 */
   .chain-tool-ico { font-size: 12px; color: var(--vscode-descriptionForeground, #999); flex: none; }
@@ -88,6 +88,13 @@
     font-size: 11px; line-height: 1.5;
     color: var(--vscode-descriptionForeground, #999);
   }
+  /* 流式思考的摘要**右对齐跟随尾部**（宿主页面 data-follow-end 同款）：
+     文字从右往左推进，读者看到的是"最新那一行"，而不是被省略号截断的开头。 */
+  .chain-row-preview[data-follow-end] { display: flex; justify-content: flex-end; }
+  .chain-row-preview[data-follow-end] .chain-row-preview-text {
+    flex: 0 0 auto; width: max-content; min-width: 100%;
+    overflow: visible; text-overflow: clip; text-align: start;
+  }
   /* 收起行摘要里的**文件路径**：可点击，在编辑器区打开（上游为宿主默认程序——本插件有意偏离）。
      用按钮承载（键盘可达），点它不触发展开收起（组件里 stopPropagation）。 */
   .chain-file-link {
@@ -130,8 +137,6 @@
   /* 真失败行（isError）的摘要位装着结果文本首行 → 上行错误色（上游 ToolRow `.errorSummary` 同义）。
      注意与行首红点不同源：这条只在 isError 时挂，非零退出的行仍是描述色。 */
   .chain-row-preview.is-error { color: var(--vscode-errorForeground, #f14c4c); }
-  /* 展开且仍在流式：独立内滚容器(靠后覆盖 is-open 的 full 高) */
-  .chain-reason.is-live { max-height: 160px; overflow-y: auto; }
 
   /* 工具通用卡的「输入 / 输出」分区（ioCard：标签 + 内容两列网格）。
      输入=调用参数(pretty JSON)，输出=调用结果；两段之间一条 hairline。 */
@@ -140,7 +145,7 @@
   .chain-io-card {
     display: flex; flex-direction: column;
     margin: 0 0 0 4px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
     font-family: var(--vscode-editor-font-family, monospace);
@@ -165,7 +170,7 @@
   .chain-io-text.is-error { color: var(--vscode-errorForeground, #f14c4c); }
   .chain-io-divider {
     flex: none; height: 0.5px;
-    background: var(--vscode-panel-border, rgba(255,255,255,0.12));
+    background: var(--dsh-hairline);
   }
 
   /* ===== 交付文件行（present）=====
@@ -186,7 +191,7 @@
   /* 展开体：只有结果正文（等宽、浅底、保留换行，超宽断行不横滚） */
   .chain-present-output {
     margin: 0 0 0 4px; padding: 8px 10px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
     color: var(--vscode-foreground, #ddd);
@@ -267,7 +272,7 @@
     position: relative;
     margin: 4px 0 4px 4px;            /* 官方 bash-sample .terminal 的 4px 缩进（代替原语独立 margin） */
     padding-left: 30px;               /* --dsl-terminal-gutter：状态点独立列 */
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
     color: var(--vscode-foreground, #ddd);
@@ -275,8 +280,11 @@
     font-size: 12px;
     overflow: hidden;
   }
-  /* l2 分隔线：定稿才有（命令横幅 ↔ 输出体）；running 只横幅无分隔 */
-  .term:not([data-running]) .term-head { border-bottom: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); }
+  /* l2 分隔线：定稿才有（命令横幅 ↔ 输出体）；running 只横幅无分隔。
+     颜色走 `--dsh-hairline`（见 chat.css 顶部）：**不能用 `--vscode-panel-border`** ——
+     VS Code 主题里没有这个变量，浅色主题下会吃到「白 12%」的兜底色 = 白线画在白底上，看不见。
+     上游同一条线用 `--dsw-alias-border-l2`（浅 `rgba(0,0,0,.1)` / 暗 `rgba(255,255,255,.12)`）。 */
+  .term:not([data-running]) .term-head { border-bottom: 0.5px solid var(--dsh-hairline); }
   .term-head {
     display: flex; align-items: flex-start; gap: 12px;
     margin-left: -30px; padding: 9px 14px 9px 30px;
@@ -334,7 +342,7 @@
   .diff-block {
     position: relative;
     margin: 4px 0 4px 4px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
     font-family: var(--vscode-editor-font-family, monospace);
@@ -374,7 +382,7 @@
      故与差异卡不同，超宽交给横滚而不是折行。 */
   .read-block {
     margin: 4px 0 4px 4px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
     font-family: var(--vscode-editor-font-family, monospace);
@@ -416,7 +424,7 @@
      不折叠、不限高、超宽折行；上游「点文件头折叠该组」也不做——既然不折叠，展开即全部。 */
   .search-block {
     margin: 4px 0 4px 4px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
     font-family: var(--vscode-editor-font-family, monospace);
@@ -505,7 +513,7 @@
   .ctx-unknown { margin: 6px 0; }
   .ctx-unknown-label { color: var(--vscode-descriptionForeground, #999); font-family: var(--vscode-font-family); font-size: 11px; margin-bottom: 2px; }
   .ctx-unknown-json { margin: 0; color: var(--vscode-foreground, #ccc); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .ctx-fields { display: flex; flex-direction: column; gap: 2px; margin: 8px 0 0; padding-top: 8px; border-top: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); }
+  .ctx-fields { display: flex; flex-direction: column; gap: 2px; margin: 8px 0 0; padding-top: 8px; border-top: 0.5px solid var(--dsh-hairline); }
   .ctx-field { display: flex; gap: 8px; min-width: 0; }
   .ctx-field-key { flex: none; min-width: 96px; color: var(--vscode-descriptionForeground, #999); }
   .ctx-field-value { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--vscode-descriptionForeground, #888); overflow-wrap: anywhere; }
@@ -568,7 +576,7 @@
   .web-published { margin-top: 2px; color: var(--vscode-descriptionForeground, #999); font-size: 12px; }
 
   /* ===== 提问卡（官方 ui-tool AskQuestionCard.module.css 复刻 + 待答交互）===== */
-  .ask-card { display: flex; flex-direction: column; gap: 16px; max-height: 360px; margin: 4px 0 4px 4px; padding: 16px 20px; overflow-y: auto; border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); border-radius: 12px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.2)); }
+  .ask-card { display: flex; flex-direction: column; gap: 16px; max-height: 360px; margin: 4px 0 4px 4px; padding: 16px 20px; overflow-y: auto; border: 0.5px solid var(--dsh-hairline); border-radius: 12px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.2)); }
   .ask-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .ask-question, .ask-answer, .ask-verdict, .ask-q-unanswered { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
   .ask-question, .ask-q-unanswered { color: var(--vscode-descriptionForeground, #888); }
@@ -578,13 +586,13 @@
   .ask-verdict { color: var(--vscode-foreground, #ddd); }
   .ask-question-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding-left: 20px; }
   /* 待答交互（官方问答对话卡观感） */
-  .ask-pending { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 4px 4px; padding: 16px 20px; border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); border-radius: 12px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.2)); }
+  .ask-pending { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 4px 4px; padding: 16px 20px; border: 0.5px solid var(--dsh-hairline); border-radius: 12px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.2)); }
   .ask-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .ask-q-text { color: var(--vscode-foreground, #ddd); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .ask-options { display: flex; flex-wrap: wrap; gap: 6px; }
   .ask-option {
     display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); background: transparent;
+    border: 1px solid var(--dsh-hairline); background: transparent;
     color: var(--vscode-foreground, #ddd); cursor: pointer; font: inherit; font-size: 12px;
   }
   .ask-option:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
@@ -592,7 +600,7 @@
   .ask-opt-desc { color: var(--vscode-descriptionForeground, #888); }
   .ask-input {
     width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 6px;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); background: var(--vscode-input-background, rgba(0,0,0,0.2));
+    border: 1px solid var(--dsh-hairline); background: var(--vscode-input-background, rgba(0,0,0,0.2));
     color: var(--vscode-input-foreground, #ddd); font: inherit; font-size: 12px;
   }
   .ask-input:disabled { opacity: 0.6; }

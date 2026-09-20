@@ -174,3 +174,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // ---- 通用兜底：其余工具都用上面的 ioBody（「输入」调用参数 pretty JSON + 「输出」调用结果）----
   return wrap(ioBody())
 }
+
+// 这里**不做组件层跳渲**（曾经试过 `memo`）：卡片会读若干**会话级信号**（`sessionCwd`、
+// 「设置 → 对话显示」、反馈/用量…），而 `memo` 只比 props —— 跳渲会把信号变化也一起挡掉，
+// 表现为「切设置后卡片不跟着变」。真要做，得先把这些信号以 props 显式喂进来（见 ReasoningRow）。

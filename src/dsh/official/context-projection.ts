@@ -1,7 +1,7 @@
 // 上下文注入投影：把注入事件投影成 UI 需要的 role/label 与展示形态（适配上游 0.1.5-rc.2）。
 // 背景：dsh 的上下文注入是一条 source.kind !== 'user' 的 user/message durable 事件
 // （agent-instructions / skill-invocation / plugin / session-reference…），
-// 官方 Chat 据此在时间线里渲染成一条「上下文注入 / 跨会话召回」折叠行。
+// 宿主页面据此在时间线里渲染成一条「上下文注入 / 跨会话召回」折叠行。
 // 判据只看事件自带字段，不自行发明规则；认不出的形态一律走兜底。
 
 /** 表单：生产者声明的信息形态；null = opaque 兜底展示。 */

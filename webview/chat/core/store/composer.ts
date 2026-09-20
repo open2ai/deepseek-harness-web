@@ -1,4 +1,4 @@
-// 输入区切片：文本、图片、附件、@ 引用贴片，以及不经由消息行的宿主直通动作
+﻿// 输入区切片：文本、图片、附件、@ 引用贴片，以及不经由消息行的宿主直通动作
 // （取消 / 复制 / 选文件 / 执行斜杠命令）。不依赖 messages 信号。
 import { signal } from '@preact/signals'
 import type { ChatHost } from '../host'

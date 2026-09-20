@@ -92,6 +92,11 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       case 'context':
         status.applyContext(m.pressure, m.breakdown)
         break
+      // 会话投影整表（会话统计 / token 用量 / plan / goal…）：与上下文分开一条，
+      // 因为它一变就要重推整个整表、而环只要那两个字段。**整表语义**：直接替换。
+      case 'projections':
+        status.applyProjections(m.values ?? {})
+        break
       case 'attachmentBytes':
         attachments.receiveAttachment(
           m.attachmentId,
@@ -124,12 +129,14 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         break
       }
       case 'chatPrefs':
-        // 上游显示偏好（全局）：只改展示形态，不动会话数据；rowsSource 是渲染源开关（阶段 4）
+        // 全局偏好（显示形态）：只改展示，不动会话数据
         prefs.apply(m.transcriptView)
         break
       case 'rows':
         // 宿主下发的行（阶段 4，见 docs/design/08 §11）：渲染源切到宿主侧
         messages.applyHostRows(m.rows, m.sessionId, m.turnActive)
+        // 窗口分页事实（「加载更早」按钮的门与进行态）：跟同一帧下发，页面只做镜像
+        messages.applyHistory({ hasMore: m.historyHasMore, loading: m.historyLoading, events: m.historyEvents })
         // 队列卡的本地「发送中」也按提交标识认领：这次提交可能落在对话流（空闲）或队列（忙时），
         // 两条路都以同一个 `rpcId` 回显 —— 只认队列帧的话，竞态下会有一条「发送中」永远挂着。
         // 同时记下「日志里已落账」的标识：pending 插话气泡据此去重（队列帧可能比行帧慢一帧）。

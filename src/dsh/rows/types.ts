@@ -29,6 +29,11 @@ export type DshRowItem =
     | {
         kind: 'context';
         key: number;
+        /**
+         * 落在哪一步（可缺省）。**必须尽量填**：链按步归位时「没有步号」的项恒定排在所有已知步之后
+         * —— 缺了它，注入就会跑到链尾（真机现象「工具行上下文注入跑到下面去了」）。
+         */
+        step?: number;
         content: unknown[];
         source: unknown;
         provenance: { role: 'inject' | 'recall'; label: string | null };

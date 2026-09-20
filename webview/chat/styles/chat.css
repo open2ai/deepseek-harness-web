@@ -1,5 +1,35 @@
 @import './chain.css';
 @import './state.css';
+@import './errors.css';
+
+  /*
+   * 主题感知的细线色（**所有卡内细线**用它，与 dsh 网页端同口径）。
+   *
+   * 为什么必须自己定：**`--vscode-panel-border` 不是 VS Code 主题变量**（那是别的自绘网页的命名），
+   * 取不到值时只能吃各调用点的兜底色 —— 而那些兜底色全是「白 x%」，在**浅色主题**下就是白线画在白底上，
+   * 等于整片细线消失（真机反馈「pwsh 卡片那条分割线插件没有」就是这么来的；同类还有正文 h1/hr/表格框、
+   * 引用块左边线、工具卡与弹层边框）。
+   *
+   * 取值复刻上游 `--dsw-alias-border-l2`（`ui-theme/src/styles/design-platform.css:174` / `:267`）：
+   * 浅 `rgba(0,0,0,.1)` / 暗 `rgba(255,255,255,.12)`；VS Code 会把
+   * `body.vscode-light|dark|high-contrast` 注进 webview，据此切。高对比主题交给语义变量，保证可见。
+   */
+  :root {
+    --dsh-hairline: rgba(255, 255, 255, 0.12);
+    --dsh-hairline-strong: rgba(255, 255, 255, 0.25);
+    /* 把值也接到 `--vscode-panel-border`：历史样式里大量 `var(--vscode-panel-border, …)` 调用点
+       因此一次性拿到正确颜色，不必逐个改（各调用点的兜底色只在**本变量也取不到**时才生效）。 */
+    --vscode-panel-border: var(--dsh-hairline);
+  }
+  body.vscode-light {
+    --dsh-hairline: rgba(0, 0, 0, 0.1);
+    --dsh-hairline-strong: rgba(0, 0, 0, 0.2);
+  }
+  body.vscode-high-contrast,
+  body.vscode-high-contrast-light {
+    --dsh-hairline: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.4));
+    --dsh-hairline-strong: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.4));
+  }
 
   * { box-sizing: border-box; }
   html, body {
@@ -17,7 +47,7 @@
     flex: none; display: flex; align-items: center; gap: 2px;
     padding: 2px 8px 2px 6px; min-width: 0;
     background: var(--vscode-sideBar-background, var(--vscode-editor-background, #1e1e1e));
-    border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border-bottom: 1px solid var(--dsh-hairline);
     font-size: 11px;
   }
   /* 观感对齐原生 view/title 动作按钮：~24px 命中区 + 16px codicon */
@@ -135,7 +165,12 @@
   .suggestion:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(255,255,255,0.1)); }
 
   /* 消息列表 */
-  #messages { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 16px; }
+  /* #messages 是**滚动视口**，.msg-col 是它里面的**内容列**。
+     两者分开是必需的：#messages 的高度由布局定死（flex:1 + overflow:auto），内容再长它自己的盒也不变，
+     所以 **ResizeObserver 观察 #messages 收不到「内容长高」** —— 流式回答时跟随就永远不动。
+     观察对象必须是会随内容长高的那个元素（上游同款：观察 .column，不观察滚动容器）。 */
+  #messages { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; }
+  .msg-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   #messages.hidden { display: none; }
   .msg { display: flex; gap: 10px; align-items: flex-start; }
   .msg .avatar {
@@ -182,7 +217,7 @@
   .msg.user .body .user-text .msg-ref-chip { vertical-align: -3px; margin: 0 1px; }
   .msg.user .body .user-img img {
     max-width: 100%; max-height: 240px; border-radius: 8px; display: block;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 1px solid var(--dsh-hairline);
   }
   /* pending 插话气泡（对话列末尾）：与最终用户行同款气泡，只多一层弱化 —— 它还没进日志，
      被取用后由日志里那条真实用户行接位（见 components/message/PendingSteeringRow）。 */
@@ -237,14 +272,14 @@
   /* 行内 code（非代码块内）：浅底圆角，主题底走 textCodeBlock */
   .msg .body :not(pre) > code {
     background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.18));
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 1px solid var(--dsh-hairline);
     border-radius: 4px; padding: 0 4px; font-size: 12px;
     overflow-wrap: anywhere;
   }
   /* 代码块 */
   .msg .body pre {
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.35));
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 1px solid var(--dsh-hairline);
     border-radius: 8px; padding: 10px 12px; overflow-x: auto;
     font-size: 12px; line-height: 1.55;
     font-family: var(--vscode-editor-font-family, monospace);
@@ -312,25 +347,49 @@
   }
   #planChip:hover { background: rgba(177, 128, 215, 0.28); }
   #planChip:disabled { opacity: 0.55; cursor: default; }
-  /* goal 常驻 chip（与 plan chip 同排）：显示目标 + 阶段动作；active 默认绿，paused/blocked 变色 */
-  #goalChip {
-    display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%;
-    border: 1px solid var(--vscode-charts-green, #89d185);
-    color: var(--vscode-charts-green, #89d185);
-    background: rgba(137, 209, 133, 0.13);
-    font-size: 11px; line-height: 1; padding: 2px 4px 2px 8px; border-radius: 10px; flex: 0 1 auto;
+  /* ===== 目标条（GoalBar）：停靠在输入框上方的独立卡片 =====
+     行为对齐上游 `ui-goal/GoalBar`（阶段文字 + 字形 + 目标 + 图标动作 + 行内编辑），
+     **宽高按插件自己的刻度**（用户定）：高度 26（与 plan chip 同档）而不是上游的 36，
+     圆角 10 而不是 12，图标钮 22×22 与输入区其它图标钮一致。 */
+  .goal-bar { flex: none; display: flex; margin: 0 0 4px; }
+  .goal-bar-row {
+    display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%;
+    height: 26px; padding: 0 4px 0 8px;
+    border: 1px solid var(--dsh-hairline-strong);
+    border-radius: 10px;
+    background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.14));
+    font-size: 11px; line-height: 1;
   }
-  #goalChip.goal-paused { border-color: var(--vscode-charts-yellow, #e2c08d); color: var(--vscode-charts-yellow, #e2c08d); background: rgba(226, 192, 141, 0.12); }
-  #goalChip.goal-blocked { border-color: var(--vscode-charts-red, #f14c4c); color: var(--vscode-charts-red, #f14c4c); background: rgba(241, 76, 76, 0.12); }
-  #goalChip .goal-obj {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    max-width: min(46vw, 240px); /* 窄面板时截断，长目标不撑爆 chipRow */
+  .goal-glyph { display: inline-flex; flex: none; color: var(--vscode-descriptionForeground, #999); font-size: 14px; }
+  /* 阶段文字：主色 + 中等字重（上游 `.label` 13/24/500；这里按插件的 11 字号）
+     —— 目标条靠它一眼看出是"进行中/已暂停/受阻"，不再只挂在 title 上 */
+  .goal-label { flex: none; color: var(--vscode-foreground, #ddd); font-weight: 500; }
+  .goal-objective {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--vscode-descriptionForeground, #999);
   }
-  #goalChip .chip-act {
-    border: none; background: none; color: inherit; cursor: pointer;
-    font-size: 10px; line-height: 1; padding: 1px 2px; border-radius: 4px; flex: none; opacity: 0.85;
+  /* 动作失败内联显示（上游同口径）：与目标原文抢同一行，故也省略号 */
+  .goal-error {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--vscode-errorForeground, #f14c4c);
   }
-  #goalChip .chip-act:hover { background: rgba(128, 128, 128, 0.28); opacity: 1; }
+  .goal-acts { display: flex; align-items: center; gap: 2px; flex: none; }
+  .goal-act {
+    width: 22px; height: 22px; padding: 0; border: none; border-radius: 6px;
+    background: none; color: var(--vscode-descriptionForeground, #999); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 13px; line-height: 0;
+  }
+  .goal-act:hover:not(:disabled) { background: rgba(128, 128, 128, 0.28); color: var(--vscode-foreground, #ddd); }
+  .goal-act:disabled { opacity: 0.4; cursor: default; }
+  /* 行内编辑表单：输入 + 保存/取消（上游 `.objectiveInput` 的同构，尺寸按插件） */
+  .goal-input {
+    flex: 1; min-width: 0; height: 22px; padding: 0 6px;
+    border: 1px solid var(--dsh-hairline-strong); border-radius: 6px;
+    background: var(--vscode-input-background, rgba(0, 0, 0, 0.2));
+    color: var(--vscode-input-foreground, #ddd);
+    font-family: inherit; font-size: 11px; outline: none;
+  }
+  .goal-input:focus { border-color: var(--vscode-focusBorder, #4daafc); }
   #attach, #permBtn, #modelBtn, #modeBtn {
     width: 22px; height: 22px; border: none; background: none;
     color: var(--vscode-foreground, #ddd); cursor: pointer; border-radius: 4px;
@@ -391,7 +450,7 @@
     position: absolute; bottom: 100%; left: 8px; z-index: 50;
     min-width: 180px; max-width: 300px; max-height: 46vh; overflow-y: auto;
     background: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background, var(--vscode-menu-background, var(--vscode-editor-background, #1e1e1e))));
-    border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-dropdown-border, var(--vscode-panel-border, rgba(255,255,255,0.25))));
+    border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-dropdown-border, var(--dsh-hairline-strong)));
     border-radius: 8px;
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 6px 22px rgba(0,0,0,0.45);
     padding: 6px; display: flex; flex-direction: column; gap: 1px;
@@ -587,7 +646,7 @@
   }
   .ctx-trigger:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); color: var(--vscode-foreground, #ddd); }
   .ctx-trigger svg { display: block; }
-  .ctx-track { fill: none; stroke: var(--vscode-panel-border, rgba(255,255,255,0.25)); stroke-width: 2px; }
+  .ctx-track { fill: none; stroke: var(--dsh-hairline-strong); stroke-width: 2px; }
   .ctx-fill { fill: none; stroke: currentColor; stroke-width: 2px; stroke-linecap: round; }
   /* 明细弹窗：向上展开、右边缘对齐自己那个环（输入区在窗口底部，向下会被状态栏截断） */
   .ctx-pop {
@@ -599,7 +658,7 @@
     min-width: min(180px, calc(100vw - 24px));
     max-width: min(340px, calc(100vw - 24px));
     padding: 12px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-editorWidget-background, rgba(30,30,30,0.98));
     box-shadow: 0 4px 14px rgba(0,0,0,0.4);
@@ -690,7 +749,7 @@
   .dv-chip {
     display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
     padding: 2px 9px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 11.5px;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 1px solid var(--dsh-hairline);
     background: transparent; color: var(--vscode-foreground, #ddd);
   }
   .dv-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
@@ -702,7 +761,7 @@
   .dv-card {
     display: flex; align-items: center; gap: 8px; min-width: 0; text-align: left;
     padding: 6px 8px; border-radius: 8px; cursor: pointer; font: inherit;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 1px solid var(--dsh-hairline);
     background: transparent; color: var(--vscode-foreground, #ddd);
   }
   .dv-card:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
@@ -720,7 +779,7 @@
   /* 任务清单卡（输入框上方常驻条）：位置紧贴输入框之上，整块不与输入区抢焦点 */
   .todo-card {
     flex: none; margin: 0 0 6px; overflow: hidden;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-editorWidget-background, rgba(0,0,0,0.25));
   }
@@ -761,7 +820,7 @@
      容器与任务清单同款；条目是过渡态，同样给列表封顶高度，别把输入框挤出视野 */
   .queue-card {
     flex: none; margin: 0 0 6px; overflow: hidden;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--vscode-editorWidget-background, rgba(0,0,0,0.25));
   }
@@ -820,9 +879,8 @@
   .tm-btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 2px;
     min-width: 20px; height: 20px; flex: 0 0 auto;
-    border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.18));
-    background: none; color: var(--vscode-descriptionForeground, #999);
-    padding: 0 6px; border-radius: 4px; cursor: pointer; line-height: 0;
+    border: none; background: none; color: var(--vscode-descriptionForeground, #999);
+    padding: 0 5px; border-radius: 4px; cursor: pointer; line-height: 0;
     white-space: nowrap;
   }
   .tm-btn .codicon { font-size: 13px; line-height: 1; }
@@ -948,6 +1006,8 @@
     font-size: 12px; cursor: pointer; padding: 2px 5px; border-radius: 4px; line-height: 1;
   }
   .msg-actions button .codicon { font-size: 13px; display: block; line-height: 1; }
+  /* 分叉图标已换成自绘 svg（见 ThumbIcons.ts）：尺寸显式给，与同排 codicon 一致 */
+  .msg-actions button svg { width: 13px; height: 13px; display: block; }
   /* hover 高亮背景(工具类按钮的悬停选中感) */
   .msg-actions button:hover {
     color: var(--vscode-foreground, #ddd);
@@ -956,8 +1016,7 @@
   /* 用量/用时图标并入动作区(排在最末：复制/反馈/分叉之后)，覆盖 msg-actions button 默认外观 */
   .msg-actions .turn-meta { margin: 0; }
   .msg-actions .tm-btn {
-    border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.18));
-    background: none; color: var(--vscode-descriptionForeground, #999);
+    border: none; background: none; color: var(--vscode-descriptionForeground, #999);
     min-width: 18px; height: 18px; padding: 0 5px; border-radius: 4px;
   }
   .msg-actions .tm-btn:hover { background: rgba(255,255,255,0.08); color: var(--vscode-foreground, #ddd); }
@@ -985,12 +1044,12 @@
   .sp-ico { flex: none; font-size: 13px; line-height: 1; }
   .sp-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   /* 图标、分隔点与两段读数之间只留 2~3px：一行里三样东西，间距一大就散成三块 */
-  .sp-sep { flex: none; margin: 0 1px; color: var(--vscode-panel-border, rgba(255,255,255,0.3)); }
+  .sp-sep { flex: none; margin: 0 1px; color: var(--dsh-hairline-strong); }
   /* 明细卡：向上展开（常驻条在窗口底部，向下会被输入区/状态栏截断），左边缘对齐自己那张 pill */
   .sp-pop {
     position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 100;
     box-sizing: border-box; min-width: min(220px, calc(100vw - 24px)); max-width: calc(100vw - 16px); padding: 10px 12px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px; /* 菜单面：与上游的浮层圆角一致 */
     background: var(--vscode-editorWidget-background, rgba(30,30,30,0.98));
     box-shadow: 0 4px 14px rgba(0,0,0,0.4);
@@ -1179,7 +1238,7 @@
   .sysp-body {
     margin: 2px 0 4px; padding: 8px 12px; overflow-x: auto; max-height: 200px; overflow-y: auto;
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); border-radius: 6px;
+    border: 1px solid var(--dsh-hairline); border-radius: 6px;
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px; line-height: 1.5; color: var(--vscode-descriptionForeground, #bbb);
   }
@@ -1201,7 +1260,7 @@
   /* ===== 上游 waterfall 提问弹窗（输入框上方）：一题一屏 + 翻页 + 跳过 + 折叠（对齐上游 QuestionComposer） ===== */
   .q-dialog {
     margin: 0 14px 4px; padding: 12px 14px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 8px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.25));
     display: flex; flex-direction: column; gap: 10px;
     max-height: min(60vh, 520px);
@@ -1223,7 +1282,7 @@
   .q-dialog-options { display: flex; flex-direction: column; gap: 6px; }
   .q-dialog-opt {
     display: flex; align-items: flex-start; gap: 8px; padding: 6px 10px; border-radius: 6px; text-align: left;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); background: transparent;
+    border: 1px solid var(--dsh-hairline); background: transparent;
     color: var(--vscode-foreground, #ddd); cursor: pointer; font: inherit; font-size: 12px;
   }
   .q-dialog-opt:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
@@ -1243,7 +1302,7 @@
   .q-opt-desc { color: var(--vscode-descriptionForeground, #888); }
   .q-dialog-custom {
     width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 6px; resize: vertical;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); background: var(--vscode-input-background, rgba(0,0,0,0.2));
+    border: 1px solid var(--dsh-hairline); background: var(--vscode-input-background, rgba(0,0,0,0.2));
     color: var(--vscode-input-foreground, #ddd); font: inherit; font-size: 12px;
     min-height: 28px; max-height: 144px;
   }
@@ -1258,7 +1317,7 @@
   }
   .q-dialog-submit:disabled { opacity: 0.5; cursor: default; }
   .q-dialog-skip {
-    padding: 4px 10px; border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); border-radius: 6px;
+    padding: 4px 10px; border: 1px solid var(--dsh-hairline); border-radius: 6px;
     background: transparent; color: var(--vscode-descriptionForeground, #999); cursor: pointer; font: inherit; font-size: 12px;
   }
   .q-dialog-skip:hover { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
@@ -1271,9 +1330,11 @@
   /* 已记录的一侧要**常显**（不靠 hover 才看得见），否则用户看不出自己评过 */
   .fb-btn.active { color: var(--vscode-foreground, #ddd); background: rgba(128,128,128,0.25); }
   .fb-btn .codicon { font-size: 13px; display: block; }
+  /* 拇指已换成自绘 svg（见 ThumbIcons.ts，字形与上游一致）：尺寸显式给，保持原来的 13px 占位 */
+  .fb-btn svg { width: 13px; height: 13px; display: block; }
   .fb-dialog {
     margin: 0 14px 4px; padding: 12px 14px;
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     border-radius: 8px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.25));
     display: flex; flex-direction: column; gap: 10px;
   }
@@ -1286,7 +1347,7 @@
   .fb-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .fb-chip {
     padding: 3px 10px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 11.5px;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); background: transparent;
+    border: 1px solid var(--dsh-hairline); background: transparent;
     color: var(--vscode-foreground, #ddd);
   }
   .fb-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
@@ -1294,7 +1355,7 @@
   .fb-chip:disabled { opacity: 0.5; cursor: default; }
   .fb-detail {
     width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; resize: vertical;
-    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); background: var(--vscode-input-background, rgba(0,0,0,0.2));
+    border: 1px solid var(--dsh-hairline); background: var(--vscode-input-background, rgba(0,0,0,0.2));
     color: var(--vscode-input-foreground, #ddd); font: inherit; font-size: 12px; min-height: 56px; max-height: 144px;
   }
   .fb-dialog-error { font-size: 11px; color: var(--vscode-errorForeground, #f48771); }
@@ -1310,7 +1371,7 @@
     display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 8px;
     font-size: 11.5px; color: var(--vscode-foreground, #ddd);
     background: var(--vscode-editorWidget-background, rgba(0,0,0,0.75));
-    border: 0.5px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+    border: 0.5px solid var(--dsh-hairline);
     box-shadow: 0 2px 8px rgba(0,0,0,0.35);
   }
   .fb-toast.is-error { color: var(--vscode-errorForeground, #f48771); }

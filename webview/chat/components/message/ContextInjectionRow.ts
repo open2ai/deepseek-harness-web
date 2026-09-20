@@ -1,8 +1,9 @@
 // 上下文注入/召回行（展开体渲染在 ContextBody；适配上游 0.1.5-rc.2）。
 // 收进 assistant 过程链：收起=一行（图标 + 角色标题「上下文注入/跨会话召回」+ 来源标签 + notice 单行说明），
 // 展开=按生产者声明的 form（instructions/catalog/snapshot/notice/relay/recall/opaque）展示该行内容。
-// 铁律：文案/结构取自官方字典与逻辑，不自行翻译/不编造；未知 form 与官方一致退回 opaque（原文不丢）。
+// 铁律：文案/结构取自字典与协议申报的事实，不自行翻译、不编造；未知 form 退回 opaque（原文不丢）。
 import { html } from 'htm/preact'
+import { memo } from 'preact/compat'
 import { useMemo, useState } from 'preact/hooks'
 import type { DshTurnProcessItem } from '../../core/store/chat'
 import { contextLabels } from '../../core/context-labels'
@@ -10,7 +11,7 @@ import { contextView, type ContextBodySpec, type ContentRun } from '../../core/c
 
 type ContextItem = Extract<DshTurnProcessItem, { kind: 'context' }>
 
-/** 未知内容块（block run）→ 官方 JsonBlock 结构：标签 + pretty JSON。 */
+/** 未知内容块（block run）→ 标签 + pretty JSON。 */
 function JsonBlock({ label, payload }: { label: string; payload: unknown }) {
   let text = ''
   try {
@@ -92,7 +93,7 @@ function Body({ spec }: { spec: ContextBodySpec }) {
   }
 }
 
-export function ContextInjectionRow({ item }: { item: ContextItem }) {
+function ContextInjectionRowView({ item }: { item: ContextItem }) {
   const [open, setOpen] = useState(false)
   const labels = contextLabels()
   const view = useMemo(
@@ -120,3 +121,12 @@ export function ContextInjectionRow({ item }: { item: ContextItem }) {
       : null}
   </div>`
 }
+
+/**
+ * 组件层跳渲：流式期间链上 vnode 每帧重建，而**已出现的注入行 item 不会变**。
+ * 不加这层的话，每帧都要把 `contextView` 与展开体重算一遍（系统提示词注入尤其大）。
+ */
+export const ContextInjectionRow = memo(
+  ContextInjectionRowView,
+  (a: { item: ContextItem }, b: { item: ContextItem }) => a.item === b.item
+)

@@ -20,6 +20,13 @@ const STREAM_TIMEOUT_MS = 10_000;
 export interface DshFollowWindow {
     /** 窗口记录：持久事件（内嵌增量已展开成 `assistant/chunk`、按 `seq` 排序）。 */
     events: RawEvent[];
+    /**
+     * 更早的历史还没进这份窗口（上游快照的 `hasMore`）。
+     *
+     * 缺省 = `false`：快照**完整**。上游 `SessionFollowRequest` 支持 `maxMessages` 限额，
+     * 限额到顶时服务端给 `hasMore: true` —— 列表顶端的「加载更早」按钮就是它的消费方。
+     */
+    hasMore?: boolean;
     /** 进行中尝试的紧凑基线：`stream` 是本次订阅之前已流出的增量。缺省 = 打开时没有在跑的尝试。 */
     assistantStream?: Record<string, unknown>;
 }
@@ -88,6 +95,8 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                             events: snapshotRecordsToEvents(
                                 Array.isArray(frame['records']) ? frame['records'] : []
                             ),
+                            // 快照分页事实：限额到顶时服务端说还有更早的（「加载更早」的门）
+                            hasMore: frame['hasMore'] === true,
                             ...(frame['assistantStream'] === undefined
                                 ? {}
                                 : { assistantStream: frame['assistantStream'] as Record<string, unknown> }),

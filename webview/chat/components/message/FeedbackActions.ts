@@ -6,10 +6,11 @@
 import { html } from 'htm/preact'
 import type { ChatStore } from '../../core/store/chat'
 import type { FeedbackRating } from '../../core/protocol'
+import { ThumbDownIcon, ThumbUpIcon } from './ThumbIcons'
 
 export function FeedbackActions({ store, messageId }: { store: ChatStore; messageId: string }) {
   const rating = store.feedbackItems.value.get(messageId)?.rating
-  const button = (kind: FeedbackRating, icon: string, label: string, activeLabel: string) => {
+  const button = (kind: FeedbackRating, label: string, activeLabel: string, icon: (filled: boolean) => unknown) => {
     const active = rating === kind
     return html`<button data-act=${kind === 'positive' ? 'like' : 'dislike'}
       class=${'fb-btn' + (active ? ' active' : '')}
@@ -18,11 +19,12 @@ export function FeedbackActions({ store, messageId }: { store: ChatStore; messag
       onFocus=${() => store.ensureFeedbackLoaded()}
       onPointerEnter=${() => store.ensureFeedbackLoaded()}
       onClick=${() => store.chooseFeedback(messageId, kind)}>
-      <span class=${'codicon ' + icon}></span>
+      ${icon(active)}
     </button>`
   }
+  // 字形用上游自绘路径（见 ThumbIcons.ts）：已评切实心，指针离开后仍看得出评过
   return html`<span class="fb-actions">
-    ${button('positive', 'codicon-thumbsup', '好的回答', '取消标记')}
-    ${button('negative', 'codicon-thumbsdown', '有问题的回答', '取消标记')}
+    ${button('positive', '好的回答', '取消标记', (filled) => html`<${ThumbUpIcon} filled=${filled} />`)}
+    ${button('negative', '有问题的回答', '取消标记', (filled) => html`<${ThumbDownIcon} filled=${filled} />`)}
   </span>`
 }

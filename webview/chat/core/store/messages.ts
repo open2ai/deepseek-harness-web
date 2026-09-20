@@ -10,7 +10,22 @@ import { toChatRows } from './host-rows'
 import type { ChatRow, ChatStore, RefSnap } from './types'
 
 export interface MessagesSlice {
-  store: Pick<ChatStore, 'messages' | 'view' | 'processing' | 'scrollPend' | 'showNotice' | 'answerApproval' | 'openFile'>
+  store: Pick<
+    ChatStore,
+    | 'messages'
+    | 'view'
+    | 'processing'
+    | 'turnRunning'
+    | 'scrollPend'
+    | 'historyHasMore'
+    | 'historyLoading'
+    | 'historyEvents'
+    | 'applyHistory'
+    | 'loadOlder'
+    | 'showNotice'
+    | 'answerApproval'
+    | 'openFile'
+  >
   /** 追加一条审批行。 */
   pushApproval(approvalId: string, description: string, toolName?: string): void
   /** 追加一条用户行（本地乐观行：发出即显示，等宿主行回显后由提交标识认领）。 */
@@ -30,6 +45,16 @@ export interface MessagesSlice {
   /** 接受宿主下发的行（阶段 4）：映射后写入列表，并保留本地尚未被回显认领的乐观行。
    *  `sessionId` 用于判归属：会话一变，上一个会话的乐观行必须丢弃（否则 processing 恒真）。 */
   applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean): void
+  /** 更早的历史还没有进窗口（宿主给的窗口事实）：列表顶端据此出「加载更早」。 */
+  historyHasMore: Signal<boolean>
+  /** 「加载更早」是否在飞：按钮据此禁用并换成进行时文案。 */
+  historyLoading: Signal<boolean>
+  /** 窗口里的事件条数（诊断与「还需要往下翻多久」的直观量，不参与判定）。 */
+  historyEvents: Signal<number>
+  /** 记下宿主给的窗口事实（跟 `rows` 帧一起来，见 core/protocol 的 `rows`）。 */
+  applyHistory(info: { hasMore?: boolean; loading?: boolean; events?: number }): void
+  /** 请求往前翻一页（宿主去读更早的一页并 prepend；失败由宿主回 `history` 帧复位）。 */
+  loadOlder(): void
   /** 本次提交**失败**（宿主 `chatError`）：把该标识对应的本地乐观行标为「未提交成功」，
    *  并把仍挂着的回答行定稿成错误。不这么做的话，它会一直被当成「在等回显」→ `processing` 恒真。 */
   failSubmission(rpcId: string | undefined, message: string): void
@@ -46,7 +71,13 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const messages = signal<ChatRow[]>([])
   const view = computed<'welcome' | 'chat'>(() => (messages.value.length === 0 ? 'welcome' : 'chat'))
   const processing = signal(false)
+  /** 宿主权威的「一轮在跑」：只喂停止/插话门控。 */
+  const turnRunning = signal(false)
   const scrollPend = signal(0)
+  /** 更早的历史还没进窗口（宿主事实，见 `src/api/dshService.ts` 的窗口分页）。 */
+  const historyHasMore = signal(false)
+  const historyLoading = signal(false)
+  const historyEvents = signal(0)
   /** 回合级折叠展开态（见 core/process-fold）：key 是**会话内**回合号，换会话必须清 */
   const turnFoldOpen = signal<ReadonlyMap<number, boolean>>(new Map<number, boolean>())
   const setTurnFoldOpen = (turn: number, open: boolean): void => {
@@ -128,8 +159,13 @@ export function createMessages(host: ChatHost): MessagesSlice {
       if (rowsSessionId !== undefined && rowsSessionId !== sessionId) {
         messages.value = []
         processing.value = false
+        turnRunning.value = false
         // 回合号是**会话内**编号：换会话后同一个号会指到别的回合，折叠展开态必须一起清
         turnFoldOpen.value = new Map<number, boolean>()
+        // **打开一个会话一律从底部开始**（对齐上游：没有存下的阅读位置时 `toBottom()`）。
+        // 少了这一下，新会话的内容是在「保留原 scrollTop」的前提下长出来的 ——
+        // 上一条会话若停在靠下的位置，打开新历史会话时视野就留在**最上面**（真机现象「光标跑到最上面去了」）。
+        bumpScroll()
       }
       rowsSessionId = sessionId
     }
@@ -213,6 +249,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
     const lastAssistant = [...messages.value].reverse().find((r) => r.kind === 'assistant')
     processing.value =
       waiting.length > 0 || turnActive === true || (lastAssistant !== undefined && !lastAssistant.done)
+    // 停止/插话只认宿主权威：processing 会在回答中被推导成 false
+    turnRunning.value = turnActive === true
   }
 
   /**
@@ -267,18 +305,54 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const bumpScroll = (): void => {
     scrollPend.value = scrollPend.value + 1
   }
+  /** 记下宿主给的窗口事实（跟 `rows` 帧一起来；缺项不动，避免每帧把已知状态清回默认）。 */
+  const applyHistory = (info: { hasMore?: boolean; loading?: boolean; events?: number }): void => {
+    if (info.hasMore !== undefined) historyHasMore.value = info.hasMore
+    if (info.loading !== undefined) historyLoading.value = info.loading
+    if (info.events !== undefined) historyEvents.value = info.events
+  }
+  /** 往前翻一页：宿主去读更早的历史并 prepend；在飞时不重复发（按钮也已禁用）。 */
+  const loadOlder = (): void => {
+    if (historyLoading.value) return
+    historyLoading.value = true
+    host.post({ type: 'loadOlder' })
+  }
   /** 清空消息与进行中标记。不清 scrollPend（触底语义独立）、不清 rowKey（保持单调，避免复用 key 让 diff 误判）。 */
   const resetRows = (): void => {
     messages.value = []
     processing.value = false
+    turnRunning.value = false
     turnFoldOpen.value = new Map<number, boolean>()
+    // 窗口事实随会话一起换：新会话的窗口由它自己的 `rows` 帧重写
+    historyHasMore.value = false
+    historyLoading.value = false
+    historyEvents.value = 0
   }
 
   return {
-    store: { messages, view, processing, scrollPend, showNotice, answerApproval, openFile },
+    store: {
+      messages,
+      view,
+      processing,
+      turnRunning,
+      scrollPend,
+      historyHasMore,
+      historyLoading,
+      historyEvents,
+      applyHistory,
+      loadOlder,
+      showNotice,
+      answerApproval,
+      openFile,
+    },
     openFile,
     applyHostRows,
     failSubmission,
+    applyHistory,
+    loadOlder,
+    historyHasMore,
+    historyLoading,
+    historyEvents,
     pushApproval,
     addUser,
     beginAssistant,
