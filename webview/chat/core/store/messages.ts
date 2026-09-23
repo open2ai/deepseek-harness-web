@@ -237,10 +237,28 @@ export function createMessages(host: ChatHost): MessagesSlice {
       console.warn(`[chat] 本地行未被标识认领，按同文案去重（宿主已有该消息，位置以宿主为准）`)
       return false
     })
-    messages.value =
-      openAssistantAt === -1
+    /**
+     * **本地独有行**：宿主行里根本不会有的那些 —— 审批卡、斜杠结果/错误提示。
+     *
+     * 为什么必须在这里挑出来：本函数是**整表替换**（`messages.value = ...`），而 `merged` 只是宿主行、
+     * `pendingKept` 只留用户乐观行 —— 不显式保留的话，审批卡会在**宿主下一次推行的瞬间被整段丢掉**。
+     *
+     * 这正是真机现象「审批请求到了、授权卡却不出现」的成因：提权发生在回合进行中，
+     * 而回合进行中每一步都会推一次行（`tool/call`、流式增量…），所以卡片几乎立刻被冲掉。
+     * 帧侧是好的（`$events` 已收到、agentId 与会话键一致），坏的是这里。
+     *
+     * 位置：统一附在**末尾**。审批卡是「等你操作」的交互卡，不随时间线滚动，附末尾最直观
+     * （上游的审批是覆盖层，也不在时间线里）。会话切换时由上面的分支整表清空，不会带到别的会话。
+     */
+    const localOnly = messages.value.filter(
+      (r) => r.kind === 'approval' || r.kind === 'notice'
+    )
+    messages.value = [
+      ...(openAssistantAt === -1
         ? [...merged, ...pendingKept]
-        : [...merged.slice(0, openAssistantAt), ...pendingKept, ...merged.slice(openAssistantAt)]
+        : [...merged.slice(0, openAssistantAt), ...pendingKept, ...merged.slice(openAssistantAt)]),
+      ...localOnly,
+    ]
     // 「处理中」三个来源：本地还有**在等回显**的乐观行 / **宿主说本轮在跑** / 最后一条回答行尚未定稿。
     // **不能**看「末行」：用户消息回显后、回答行还没建的一瞬末行是用户行，
     // 按末行判会把处理中算成 false —— 按钮中途变回「发送」并禁用（真机：停止点不动）。

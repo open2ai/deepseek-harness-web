@@ -321,7 +321,40 @@ class RemoteEventHub {
             event: frame.event ?? '',
         };
         const set = this.handlers.get(frame.agentId);
-        if (set === undefined || set.size === 0) {
+        // 诊断（DSH_RAWLOG）：这一层最容易**静默失效** —— 没有 handler 的 waterfall 帧被直接丢弃，
+        // 上游那个工具调用就一直等审批，界面什么都不显示（表现为「卡住不动，不自己判断」）。
+        // 实证（扫 ~/.dsh/sessions 下全部会话日志）：存在**未配对**的 approval/asked —— 请求已入日志、
+        // 却没有任何 approval/decided，会话就停在 approval/asked 上。同型样本含
+        // 「read-only 下 write 被拒 → 请求提权到 workspace-write → 无人应答」。
+        // 归属：**插件自身的 bug，与 dsh 0.1.x 的版本无关** —— 同型日志早于后来那次升级（最早 2026-08-31），
+        // 因为病灶在页面侧的行合并（见 webview/chat/core/store/messages.ts 的 applyHostRows）。
+        // 注：不要在这里写死命中条数（每复现一次就变），需要时重跑扫描脚本。
+        if (process.env['DSH_RAWLOG'] !== undefined) {
+            console.warn(
+                `[dsh-ask] waterfall event=${frame.event} agentId=${String(frame.agentId).slice(0, 12)}… ` +
+                    `handlers=${set?.size ?? 0} subscribedKeys=[${[...this.handlers.keys()].map((k) => String(k).slice(0, 12)).join(',')}] ` +
+                    `requestKeys=${Object.keys(frame.request ?? {}).join(',')}`
+            );
+        }
+        // 键对不上时的兜底：**只在恰好一个会话在订阅时**把帧交给它。
+        // 为什么安全：这张表只会由 `subscribe(sessionId, …)` 写入，而插件同一时刻只订阅当前会话；
+        // 只有一个订阅者时，不存在「投错会话」的可能。这样 agentId 与会话 id 不一致
+        // （子代理会话、或上游换了 agent 身份）就不再静默丢弃 —— 丢掉就等于让 agent 一直等。
+        // 多个订阅者时不猜：那才是真的分不清归属，宁可不动（并已被上面的诊断记录）。
+        let target = set;
+        if ((target === undefined || target.size === 0) && this.handlers.size === 1) {
+            const only = [...this.handlers.values()][0];
+            if (only !== undefined && only.size > 0) {
+                target = only;
+                if (process.env['DSH_RAWLOG'] !== undefined) {
+                    console.warn(
+                        `[dsh-ask] agentId=${String(frame.agentId).slice(0, 12)}… 与订阅键不符，` +
+                            `唯一订阅者兜底投递 event=${frame.event}`
+                    );
+                }
+            }
+        }
+        if (target === undefined || target.size === 0) {
             return;
         }
         this.pending.set(frame.eventId, invocation);
@@ -330,7 +363,7 @@ class RemoteEventHub {
             const toolName = typeof request['toolName'] === 'string' ? request['toolName'] : undefined;
             const callId = typeof request['callId'] === 'string' ? request['callId'] : undefined;
             const reason = typeof request['reason'] === 'string' ? request['reason'] : undefined;
-            for (const handler of set) {
+            for (const handler of target) {
                 handler.onApproval?.({
                     clientId: invocation.clientId,
                     eventId: frame.eventId,
@@ -344,7 +377,7 @@ class RemoteEventHub {
         }
         if (frame.event === 'user-questions/request') {
             const rawQuestions = Array.isArray(request['questions']) ? request['questions'] : [];
-            for (const handler of set) {
+            for (const handler of target) {
                 handler.onQuestion?.({
                     clientId: invocation.clientId,
                     eventId: frame.eventId,
