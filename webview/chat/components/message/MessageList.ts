@@ -1,11 +1,14 @@
 // 消息列表（按行类型分发）：用户/assistant/审批/提问/notice。智能跟随滚动（判据见 core/follow）。
 // 每条行各包一层**行级错误边界**（见 components/RowBoundary）：一行崩了只坏那一行，其余照常。
 // 顶端是「加载更早」（历史分页）：只有宿主说「还有更早的」时才出现，加载前钉住阅读位置。
+// **聊天区可见性**（对齐上游 0.1.7-alpha.1 起的口径）：系统提示词行与普通上下文注入行不进列表，
+// 只有含工具增删块的注入行保留 —— 判据在 `core/chat-visibility.ts`，**在构造渲染列表那一层**过滤。
 import { html } from 'htm/preact'
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import type { ChatRow, ChatStore } from '../../core/store/chat'
 import { ScrollFollow, type FollowHost } from '../../core/follow'
 import { clearRenderErrors, renderErrors } from '../../core/errors'
+import { isVisibleChatRow } from '../../core/chat-visibility'
 import { anchoredTopAfterPrepend } from '../../../../src/dsh/rows/paging'
 import { RowBoundary } from '../RowBoundary'
 import { UserRow } from './UserRow'
@@ -13,8 +16,9 @@ import { AssistantRow } from './AssistantRow'
 import { ApprovalRow } from './ApprovalRow'
 import { QuestionRow } from './QuestionRow'
 import { NoticeRow } from './NoticeRow'
+import { TurnNoticeRow } from './TurnNoticeRow'
+import { attachTailNotices } from '../../core/tail-notice'
 import { ContextInjectionRow } from './ContextInjectionRow'
-import { SysPromptRow } from './SysPromptRow'
 import { TurnStatus } from './TurnStatus'
 import { PendingSteeringList } from './PendingSteeringRow'
 
@@ -164,11 +168,27 @@ export function MessageList({ store }: { store: ChatStore }) {
   // 只有**首行**出折叠头，其余行跟随同一个展开态。这里先按回合归组算好，再逐行下发。
   // 没有回合号的（本地乐观行）自成一组：它没有过程事实，本来也不会折叠。
   const turnHeadRow = new Map<number, Extract<ChatRow, { kind: 'assistant' }>>()
+  // 每回合的**回答行数**：`> 1` = 这个回合被插话/中断切成了多段行。
+  // 用途是**外层折叠**（⑧）：上游一个回合是一个 seat，外层折叠折的是"整座"；插件把回合切成多条行，
+  // 跨行折会藏掉用户当下正在看的那一段 —— 所以行数 > 1 时整支关闭（见 components/chain/plan.ts 的
+  // `outerFold` 与 `14` §7）。
+  const turnRowCount = new Map<number, number>()
+  for (const row of rows) {
+    if (row.kind === 'assistant' && row.turn !== undefined) {
+      turnRowCount.set(row.turn, (turnRowCount.get(row.turn) ?? 0) + 1)
+    }
+  }
   for (const row of rows) {
     if (row.kind === 'assistant' && row.turn !== undefined && !turnHeadRow.has(row.turn)) {
       turnHeadRow.set(row.turn, row)
     }
   }
+  // 终局通知的排序锚点（上游 `turn-max-tokens` 的 `noticeAnchor`）：`warning` 通知归并到回答行内、动作条之前
+  const laid = attachTailNotices(rows)
+  // **可见性过滤放在这一层**（不是逐行 `return null`）：`latest`（最后一条）与滚动锚点都按
+  // **真正显示出来的**行算 —— 否则末尾一条被隐藏的注入行会把 `latest` 顶掉，
+  // 动作条的分叉可用性、时间/复制常显判据就全部跟着错（上游也是先过滤可见节点再算这些）。
+  const shown = laid.filter(({ row }) => isVisibleChatRow(row))
   return html`<div id="messages" ref=${ref}>
     <div class="msg-col" ref=${colRef}>
       ${hasMore
@@ -176,8 +196,8 @@ export function MessageList({ store }: { store: ChatStore }) {
             ${loadingOlder ? '正在加载更早的历史…' : '加载更早'}
           </button>`
         : null}
-      ${rows.map((row, i) => {
-        const latest = i === rows.length - 1
+      ${shown.map(({ row, tailNotices }, i) => {
+        const latest = i === shown.length - 1
         // 每条行各包一层错误边界：`key` 放在边界上（边界自己也是行级 vnode），
         // 内部再按行 key 分层，保证「换行」与「重试换子树」两件事互不干扰。
         const body = (() => {
@@ -185,9 +205,12 @@ export function MessageList({ store }: { store: ChatStore }) {
             case 'user':
               return html`<${UserRow} key=${row.key} row=${row} store=${store} latest=${latest} />`
             case 'context':
+              // 已被上面的可见性过滤挡掉（到这里只剩含工具增删块的注入行）；类型上仍可能出现，故保留分支
               return html`<${ContextInjectionRow} key=${row.key} row=${row} />`
             case 'sysprompt':
-              return html`<${SysPromptRow} key=${row.key} text=${row.text} />`
+              // **聊天区不显示系统提示词**（上游 0.1.7-alpha.1 起 `isVisibleChatNode` 排除该 kind）。
+              // 数据仍在会话日志里、宿主照旧下发，只是不再渲染 —— 这里返回 null 只作防御。
+              return null
             case 'assistant': {
               const head = row.turn === undefined ? undefined : turnHeadRow.get(row.turn)
               // 「只含提问行时不折叠」是插件偏离，判据必须是**回合级**的（按首行的链判），否则同回合的行会不一致
@@ -195,7 +218,9 @@ export function MessageList({ store }: { store: ChatStore }) {
                 head !== undefined &&
                 head.chain.every((c) => c.kind === 'tool' && c.name === 'ask_user_question')
               return html`<${AssistantRow} key=${row.key} row=${row} store=${store} latest=${latest}
-                ownsHead=${head === undefined || head.key === row.key} noFold=${noFold} />`
+                ownsHead=${head === undefined || head.key === row.key} noFold=${noFold}
+                soleRow=${row.turn === undefined || (turnRowCount.get(row.turn) ?? 1) <= 1}
+                tailNotices=${tailNotices} />`
             }
             case 'approval':
               return html`<${ApprovalRow} key=${row.key} row=${row} store=${store} />`
@@ -203,6 +228,9 @@ export function MessageList({ store }: { store: ChatStore }) {
               return html`<${QuestionRow} key=${row.key} row=${row} store=${store} />`
             case 'notice':
               return html`<${NoticeRow} key=${row.key} row=${row} />`
+            case 'turnNotice':
+              // 回合终局通知行（上游 `turn-error` / `turn-max-tokens`）：独立行，永远可见（不参与过程折叠）
+              return html`<${TurnNoticeRow} key=${row.key} row=${row} />`
           }
         })()
         return html`<${RowBoundary} key=${row.key} slot=${`row:${String(row.key)}:${row.kind}`}>${body}</${RowBoundary}>`

@@ -2,7 +2,7 @@
 import * as crypto from "node:crypto";
 import * as net from "node:net";
 import { getEndpoint, hasAuthCookie, authCookieForPort, loginEndpoint } from "./auth";
-// ---------- /api/remote.mux WebSocket（dsh v0.1.5-rc.2 流载体；迷你客户端，支持自定义 Header） ----------
+// ---------- /api/remote.mux WebSocket（dsh 0.1.7+ 的流载体；迷你客户端，支持自定义 Header） ----------
 /** 最小 WebSocket 客户端（RFC 6455：客户端掩码、文本/关闭帧、ping→pong；无外部依赖）。 */
 class MiniWebSocket {
     static async open(url: string, headers: Record<string, string>, timeoutMs: number): Promise<MiniWebSocket> {
@@ -212,7 +212,7 @@ class MiniWebSocket {
 function cookieOf(port: number): string | undefined {
     return authCookieForPort(port);
 }
-/** 打开一个 remote.mux 逻辑流（适配 dsh v0.1.5-rc.2；endpoint 如 session/follow、workspace/follow、$events）。 */
+/** 打开一个 remote.mux 逻辑流（适配 dsh 0.1.7+；endpoint 如 session/follow、workspace/follow、$events）。 */
 export async function openMuxStream(
     endpoint: string,
     payload: unknown,

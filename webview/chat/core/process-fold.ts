@@ -1,4 +1,4 @@
-// 回合过程折叠的判定（适配上游 0.1.5-rc.2）：镜像上游「过程窗口就绪 → 可折叠 → 谁被藏起来」那条判据链。
+// 回合过程折叠的判定（适配上游 0.1.7-rc.2）：镜像上游「过程窗口就绪 → 可折叠 → 谁被藏起来」那条判据链。
 //
 // 上游是**逐节点**判的（每个节点各自算 `processWindowReady` / `processMember` / `foldable` / `processHidden`）；
 // 插件一回合只有几条行（普通回合一条，被插话切开的回合多条），所以把同一套判据投影到「行 + 链」这一层：
@@ -8,10 +8,17 @@
 //   - 行的正文 = 上游的**回答步**（回答节点不随折叠隐藏）。
 // 判据集中在本文件（纯函数、不碰 store 与 DOM），组件只按结果渲染 —— 与 `core/*-card.ts` 同一路子。
 //
-// 与上游的两处**已知差异**（都不是漏做，是有意为之，改前先看这里）：
-//   1. `historyIncomplete`（快照分页是否完整）**尚未接入**：上游拿它做过程窗口的最后一道门，
-//      插件链路里还没有这个字段，故暂缺（`undefined` 视为完整）。
-//   2. 插件的**有意偏离**：链里只有提问行时不出折叠头（提问不参与过程折叠，见 design/06 §4）。
+// 与上游的一处**有意偏离**（不是漏做，改前先看这里）：
+//   插件的提问不参与过程折叠：链里只有提问行时不出折叠头（见 design/06 §4）。
+//
+// 已对齐（2026-10-01，dsh 0.2.0-rc.2 复核）：
+//   1. 上游策略表的 `stepGrouping` 列（`grouped`）—— `collapsed`（compact/standard）下**进行中的回合也出
+//      分组头**、`history`（detailed）只有已关闭回合有、`none`（verbose）不分组。插件的折叠头兼作上游的
+//      「分组头」与「回合级折叠控制」，故 `collapsed` 档下进行中回合会多出一个（默认展开的）折叠头。
+//   2. 过程窗口的最后一道门：上游在 0.2.0 里**已删掉** `historyIncomplete`（分页不完整不再禁止折叠），
+//      改成**按回合**判 —— `窗口里有本回合的 turn/start` **或** `本回合已关闭`：
+//      `processWindowReady = … && (turnStarted || turnClosed)`。所以「历史被分页截断」**不是**不折叠的理由，
+//      「拿到了回合结尾但没拿到它的开头」照样折。本文件按这条判（见 `turnStarted`）。
 //
 // 注：上游的 `compactAnswer`（区间内有插话时不按紧凑形态收回答）**不在这里判** —— 它只影响
 // 「链与正文之间的间距」，事实由过程规格给出（`DshTurnProcess.compactAnswer`），渲染侧按其落一个属性
@@ -25,8 +32,17 @@ export interface ProcessDisclosureInput {
     process: DshTurnProcess | undefined
     /** 用户偏好：紧凑才折叠（上游 `compactTranscript`） */
     compact: boolean
-    /** 历史分页不完整（上游 `historyIncomplete`）；链路未接入，缺省视为完整 */
-    historyIncomplete?: boolean
+    /**
+     * 用户偏好的过程分组覆盖范围（0.2.0 起）：`collapsed` = 所有回合都有可折叠的分组头
+     * （**含进行中的回合**）、`history` = 只有已关闭的回合有、`none` = 不分组（过程行平铺）。
+     * 缺省按 `history` 处理 = 接入前的形态（进行中不出折叠头）。
+     */
+    grouping?: 'collapsed' | 'history' | 'none'
+    /**
+     * 窗口里**有没有本回合的 `turn/start`**（上游 `turnStarted`）：窗口就绪的两条之一，
+     * 与 `done` 取**或**。读不到时按「没拿到开头」处理，只剩 `done` 那一条门（与上游同形）。
+     */
+    turnStarted?: boolean
     /** 回合级展开态（同回合所有行共用；上游按 (turn, answerStep) 持久化） */
     open: boolean
     /** 本行是不是**折叠头的归属行**（回合首行 ＝ 上游的 `turn-process` 控制节点；只有它渲染折叠头） */
@@ -40,6 +56,8 @@ export interface ProcessDisclosure {
     windowReady: boolean
     /** 可折叠：窗口就绪 **且**（过程外置 或 回答步自带推理） */
     foldable: boolean
+    /** 上游 `grouped`：本回合有没有分组头（`stepGrouping` 覆盖到本回合） */
+    grouped: boolean
     /** 折叠头是否出现（只有归属行会出） */
     head: boolean
     /** 本行的链（过程成员）是否可见 */
@@ -85,20 +103,35 @@ export function visibleStepTexts<T extends ChainLike>(
  */
 export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclosure {
     const process = input.process
-    // 上游的 `processWindowReady`：事实齐全 + 紧凑 + **有回答锚点** + 回合已关闭（+ 历史分页完整）
+    // 上游的 `processWindowReady`：事实齐全 + 紧凑 + **有回答锚点** + （**窗口里有本回合的 turn/start**
+    // 或 **本回合已关闭**）。最后那条在 0.2.0 里是 per-Turn 的 `turnStarted || turnClosed` ——
+    // 历史分页截断**不再**是禁止折叠的理由（旧版那道 `historyIncomplete` 已被上游删除）。
     const windowReady =
         process !== undefined &&
         input.compact &&
         process.answerAnchorSeq !== null &&
-        input.done &&
-        input.historyIncomplete !== true
+        (input.turnStarted === true || input.done)
     // 上游的 `foldable`（对回合而言）：窗口就绪 **且**（过程外置 或 回答步自带推理）
     // —— 「区间内什么都没有」时不折叠，但这不等于"没有过程"：回答步的推理同样算。
-    // `noFold` 是插件的**有意偏离**（链里只含提问行）：它在回合级生效，故同回合所有行一致。
-    const foldable = windowReady && (process.hasExternalProcess || process.inlineReasoning) && !input.noFold
+    //
+    // ⚠️ **`noFold`（"只含提问行不折叠"）这条偏离已于 2026-10-02 撤销**（维护者的左右对照图）：
+    // 插件折起态里多出一行 `向用户提出了问题`，而 web 折起态下面什么都没有 —— 说明**提问行也参与过程折叠**。
+    // 形参先留着（调用点仍传），但**不再参与判据**；等服务端确认后可以整体删掉。
+    void input.noFold
+    const foldable = windowReady && (process.hasExternalProcess || process.inlineReasoning)
+    // 上游 `ChatGroupSeat` 的 `grouped`（`stepGrouping` 决定分组头覆盖谁）：与「外层折叠」是**两道独立的门**。
+    // 缺省 `history` = 接入前的形态（只有已关闭回合有折叠头）。
+    const grouping = input.grouping ?? 'history'
+    const grouped = grouping !== 'none' && (grouping === 'collapsed' || input.done)
+    // 进行中回合的分组头（只在 `collapsed` 档出现）：上游 compact/standard 下 running 回合也有可折叠分组头，
+    // 默认展开着看过程在动；`history`（detailed）与 `none`（verbose）下进行中平铺、没有头。
+    const runningHead = grouped && !input.done && process !== undefined
+        && (process.hasExternalProcess || process.inlineReasoning)
+    const groupable = foldable || runningHead
     // 折叠时藏的是**过程成员**（本行的链）；回答步的正文在行的正文里，不受影响（上游同）。
     // 同回合的每一行都跟随同一个展开态 —— 上游也是这么收的：折叠头一个，被收起来的是整个回合的成员。
-    return { windowReady, foldable, head: foldable && input.ownsHead, detail: !foldable || input.open }
+    // `detail` 由 `groupable`（有没有可收的东西）与回合级展开态决定；没有分组头时明细永远可见（上游 `expandedBody` 同）。
+    return { windowReady, foldable, grouped, head: groupable && input.ownsHead, detail: !groupable || input.open }
 }
 
 

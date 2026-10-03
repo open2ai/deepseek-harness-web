@@ -168,7 +168,7 @@ export interface DshCommandExec {
     commandId?: string;
     result?: { kind?: 'success' | 'error'; text?: string };
 }
-/** 执行一条斜杠命令（适配 dsh v0.1.5-rc.2）。上游接口：`commands/execute`，
+/** 执行一条斜杠命令（适配 dsh v0.1.7-rc.2）。上游接口：`commands/execute`，
  *  args 形参为 agentId / line / **submittedAttachments**（agent 作用域的命令远程；如 /permission <preset>）。
  *  上游 0.1.5 起第三个形参由 `images: EncodedImageAttachment[]` 改为 `submittedAttachments: CommandSubmitAttachment[]`
  *  （元素形如 `{ type:'image', mediaType, data, name? }` 或 `{ type:'file', receiptId }`）；形参名不符会被网关的
@@ -248,6 +248,57 @@ export interface DshSkillEntry {
 export async function listCommands(sessionId: string): Promise<DshCommandDescriptor[]> {
     const value = await postWire<DshCommandDescriptor[]>(getEndpoint().port, 'commands/list', { args: { agentId: sessionId } });
     return Array.isArray(value) ? value : [];
+}
+// ---------- 进程级权限目录（0.1.7 起） ----------
+/** 一个可选权限预设（上游 `PresetOption`）。 */
+export interface DshPermissionPresetOption {
+    /** 稳定取值：配置表里的键、`auto`，或派生的 `custom`。 */
+    value: string;
+    /** 展示名。 */
+    name: string;
+    description?: string;
+}
+/** 进程级权限目录（上游 `PermissionCatalog`；`permissionPresets/catalog` 的返回值）。 */
+export interface DshPermissionCatalog {
+    options: DshPermissionPresetOption[];
+    defaultOptions?: DshPermissionPresetOption[];
+    defaultPreset?: string;
+}
+/**
+ * 拉取**进程级**权限预设目录（上游 `permissionPresets/catalog`，无参 remote）。
+ *
+ * 为什么不再从投影里取：0.1.5-rc.2 的 `permissions` 投影是 `PermissionSelect{options,currentValue}`，
+ * 0.1.7 把它缩成 `PermissionSelection{currentValue}`，选项目录搬到这条进程级 remote
+ * （上游 `interaction/permission-presets/src/types.ts` 明确写了 "Selectable options come from
+ * the process-level catalog Remote"）。照旧读投影只会拿到空列表。
+ *
+ * 目录随**实时贡献**变化（如 auto 预设的注册/注销），上游用 emit 事件
+ * `permission-presets/catalog-changed` 通知失效 —— 调用方据此重读。
+ *
+ * @returns 目录；形状不符时返回 undefined（调用方保留上一次的目录，而不是清空）
+ */
+export async function readPermissionPresetCatalog(): Promise<DshPermissionCatalog | undefined> {
+    const value = await rpcCall<{ options?: unknown }>('permissionPresets/catalog', {});
+    const options = Array.isArray(value?.options) ? value.options : undefined;
+    if (options === undefined) {
+        return undefined;
+    }
+    const normalized: DshPermissionPresetOption[] = [];
+    for (const entry of options) {
+        if (entry === null || typeof entry !== 'object') {
+            continue;
+        }
+        const o = entry as { value?: unknown; name?: unknown; description?: unknown };
+        if (typeof o.value !== 'string') {
+            continue;
+        }
+        normalized.push({
+            value: o.value,
+            name: typeof o.name === 'string' && o.name !== '' ? o.name : o.value,
+            ...(typeof o.description === 'string' ? { description: o.description } : {}),
+        });
+    }
+    return { options: normalized };
 }
 /** 拉取当前会话的用户可调用技能：`skills/list`（Typert namespace+method，rc.1 实测）。
  *  payload `{ args:{ request:{ sessionId } } }`：技能的 args 描述符**不接受 `agentId`**（报

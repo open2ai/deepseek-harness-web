@@ -74,6 +74,28 @@ export function StatsCards({ store }: { store: ChatStore }) {
   // 门控照上游两条：① **有 token 活动**（输入侧计费或输出 > 0）才出用量卡 —— 投影在、但四个桶全零
   // （新建会话）时出一张只写着卡名的空卡是错的；② 步数为 0 且没有用量 → 整条不渲染。
   const hasTokens = usage !== null && (billed > 0 || (usage.outputTokens ?? 0) > 0)
+
+  // 【性能与用量 = 简洁】上游不是「什么都不显示」，而是**只留两枚静态药丸**：
+  //   ① [仪表图标] `{tps} tok/s`（需要 `decodeMs > 0`）；
+  //   ② [数据库图标] `缓存命中 {percent}%`（需要在 token 活动，且 `cacheReadTokens`/计费输入 > 0）。
+  // 两项都取不到时**整条不渲染**（上游 `StatsPills` 的 compact 分支同）。
+  // 注意这段必须在下面「整条不渲染」的门**之前**：否则简洁档会被 steps/tokens 的门提前吞掉（真机即"输入框下面什么都没有"）。
+  if (store.performanceUsage?.value === 'compact') {
+    const speed = tps === '' ? null : `${tps} tok/s`
+    const hitText = hasTokens && hit !== '' ? `缓存命中 ${hit}%` : null
+    if (speed === null && hitText === null) return null
+    const pill = (icon: string, text: string): unknown => html`<span class="sp-wrap" key=${icon}>
+      <span class="sp-pill is-static">
+        <span class=${'codicon sp-ico codicon-' + icon} aria-hidden="true"></span>
+        <span class="sp-text">${text}</span>
+      </span>
+    </span>`
+    return html`<div class="stats-cards" data-compact ref=${rootRef}>
+      ${speed !== null ? pill('dashboard', speed) : null}
+      ${hitText !== null ? pill('database', hitText) : null}
+    </div>`
+  }
+
   if (steps === 0 && !hasTokens) return null
 
   const countsText = stats === null ? '' : `${String(stats.turns ?? 0)} 轮 ${String(stats.steps ?? 0)} 步`

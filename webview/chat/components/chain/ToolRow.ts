@@ -9,7 +9,7 @@ import { html } from 'htm/preact'
 import { useState } from 'preact/hooks'
 import type { DshTurnProcessItem, ChatStore } from '../../core/store/chat'
 import { toolTitle, toolIconOfTool, resultFirstLine } from '../../core/format'
-import { toolStateLabel } from '../../core/states'
+import { toolStateLabel, ToolState } from '../../core/states'
 import { filePathOf, terminalCardModel, relativizeToCwd } from '../../core/terminal'
 import { webCardModel } from '../../core/web-card'
 import { askCardModel } from '../../core/ask-card'
@@ -31,14 +31,21 @@ type Tool = Extract<DshTurnProcessItem, { kind: 'tool' }>
 export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   const [open, setOpen] = useState(false)
   const cwd = store.sessionCwd.value
+  // **准备中**（上游 `phase: 'preparing'`）：参数还没到 → 这条行**不可展开**、按运行中的样子画
+  //（进行感照旧由掠光带承担）。准备阶段没有任何卡数据，所以卡模型一律按"运行中且无参数"求解；
+  // 一旦工具真被调用（`tool/call` 到达）宿主会把它原地升级成 `running`，这里自然恢复正常。
+  const preparing = item.status === 'preparing'
+  /** 喂给卡模型的形状：准备中一律按「运行中且无参数」求解（准备阶段没有任何卡数据）。 */
+  type CardInput = Parameters<typeof terminalCardModel>[0]
+  const cards = (preparing ? { ...item, status: ToolState.Running } : item) as CardInput
   // 六个卡模型都求值，按上游瀑布取第一个命中的（各自形状不符即 null，自然落到下一张）
-  const ask = askCardModel(item)
-  const terminal = terminalCardModel(item, cwd)
-  const diff = diffCardModel(item)
-  const read = readCardModel(item, cwd)
-  const image = imageCardModel(item, cwd)
-  const search = searchCardModel(item)
-  const web = webCardModel(item)
+  const ask = askCardModel(cards)
+  const terminal = terminalCardModel(cards, cwd)
+  const diff = diffCardModel(cards)
+  const read = readCardModel(cards, cwd)
+  const image = imageCardModel(cards, cwd)
+  const search = searchCardModel(cards)
+  const web = webCardModel(cards)
 
   // 行状态三级（**单一来源**：卡内状态点与文案取的就是这个 rowState，行与卡不可能打架）：
   //   1) 提问卡可覆盖（ASK_CANCELLED→ok / ASK_ABORTED→stopped，见 ask-card）
@@ -47,12 +54,13 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   //      与调用真失败（isError）同序；行不再自己判一次
   //   3) 其余用宿主判好的 item.status（由 isError + code 特例判出，见 src/dsh/official/tool-status.ts）
   const rowState = ask?.state ?? terminal?.state ?? item.status
-  const running = rowState === 'running'
+  const running = rowState === 'running' || preparing
   // ① leading 二选一（上游 leadingFor）：error→红点、stopped→琥珀点；**其余（含 running）显变体图标**。
   // 行尾不再有状态角标——上游整行只有这一个标记位；running 的进行感由行上的掠光带（②）承担。
   const dotState = rowState === 'error' ? 'error' : rowState === 'stopped' ? 'warning' : null
   // ③ 状态点与掠光都是 colour-only 且 aria-hidden，读屏靠这段视觉隐藏文字播报
-  const stateLabel = toolStateLabel(rowState)
+  //（**准备中**按运行中播报：上游那阶段没有独立状态词）
+  const stateLabel = toolStateLabel(rowState === 'preparing' ? ToolState.Running : rowState)
 
   // 收起行预览，优先级照上游 `summaryText = failureLine ?? description ?? summary`：
   //   真失败行（⑤）→ 结果文本首行；其余 → item.summary（终端卡回落 description）
@@ -84,9 +92,13 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   const openLine = typeof openLineRaw === 'number' && Number.isInteger(openLineRaw) && openLineRaw > 0 ? openLineRaw : undefined
   const failureStyled = failureLine !== null && failureLine !== ''
 
-  const head = html`<button class="chain-row-head" data-state=${rowState} onClick=${() => setOpen((o) => !o)} aria-expanded=${open} title=${item.name}>
+  // 展开体的门：**准备中的行不给展开**（上游 README：准备中节点渲染成一条不可展开的行）
+  const head = html`<${preparing ? 'div' : 'button'} class="chain-row-head" data-state=${preparing ? 'running' : rowState}
+    data-preparing=${preparing ? 'true' : undefined}
+    onClick=${preparing ? undefined : () => setOpen((o) => !o)}
+    aria-expanded=${preparing ? undefined : open} title=${item.name}>
     ${stateLabel ? html`<span class="chain-row-state">${stateLabel}</span>` : null}
-    <span class=${'codicon chain-chev ' + (open ? 'codicon-chevron-down' : 'codicon-chevron-right')}></span>
+    ${preparing ? null : html`<span class=${'codicon chain-chev ' + (open ? 'codicon-chevron-down' : 'codicon-chevron-right')}></span>`}
     ${dotState !== null
       ? html`<span class=${'chain-tool-dot is-' + dotState} data-state=${dotState} aria-hidden></span>`
       : html`<span class="chain-tool-ico codicon codicon-${toolIconOfTool(item.name)}"></span>`}
@@ -100,13 +112,13 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
               }}>${headSummary}</button>`
           : html`<span class=${'chain-row-preview' + (failureStyled ? ' is-error' : '')}>${headSummary}</span>`}`
       : null}
-  </button>`
+  </${preparing ? 'div' : 'button'}>`
 
-  /** 收起头 + 展开体（各卡体共用同一层 disclosure 外壳）。 */
+  /** 收起头 + 展开体（各卡体共用同一层 disclosure 外壳）。准备中的行没有展开体。 */
   const wrap = (body: unknown): unknown =>
     html`<div class=${'chain-disclosure' + (running ? ' is-running' : '')}>
       ${head}
-      ${open && body !== null ? html`<div class="chain-disclosure-body">${body}</div>` : null}
+      ${open && !preparing && body !== null ? html`<div class="chain-disclosure-body">${body}</div>` : null}
     </div>`
 
   /**
@@ -150,7 +162,13 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // ---- 提问卡（ask_user_question）：只做问答记录；交互在 composer 上方 waterfall 弹窗 ----
   // **有问答记录才出提问卡**；无记录（运行中 / 问答配对不上 / 结果坏形）落回通用「输入/输出」区。
   // **只影响 ask 行**：其余卡的分派与渲染一字未动。
-  if (ask !== null) return wrap(ask.transcript === null ? ioBody() : html`<${AskCardBody} card=${ask} />`)
+  if (ask !== null) {
+    // 补答入口也算「有内容」：即使问答记录取不到（问题清单坏形），只要该条仍可补答也要出卡片
+    const lateAnswerable = ask.lateCallId !== undefined && store.canAnswerLate(ask.lateCallId)
+    return wrap(
+      ask.transcript === null && !lateAnswerable ? ioBody() : html`<${AskCardBody} card=${ask} store=${store} />`
+    )
+  }
 
   // ---- 终端卡（bash / pwsh / shell）----
   if (terminal !== null) return wrap(html`<${TerminalBlock} card=${terminal} store=${store} />`)
@@ -176,5 +194,5 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
 }
 
 // 这里**不做组件层跳渲**（曾经试过 `memo`）：卡片会读若干**会话级信号**（`sessionCwd`、
-// 「设置 → 对话显示」、反馈/用量…），而 `memo` 只比 props —— 跳渲会把信号变化也一起挡掉，
+// 「设置 → 通用设置 → 工作步骤展示」、反馈/用量…），而 `memo` 只比 props —— 跳渲会把信号变化也一起挡掉，
 // 表现为「切设置后卡片不跟着变」。真要做，得先把这些信号以 props 显式喂进来（见 ReasoningRow）。

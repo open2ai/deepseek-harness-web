@@ -40,6 +40,9 @@ export function Deliverables({ row, store }: { row: AssistantRow; store: ChatSto
    * 被插话切开的前段：那一段收束时 `done` 也会置真，于是我们与上游一样**逐段**出。
    */
   if (!row.done) return null
+  // 上游：**只有开启「代码工作工具」才展示这一区**（关闭时立即隐藏；显式交付卡片与行内文件链接不受影响）。
+  // 判据写成「只有显式 false 才隐藏」：上游该项**默认开**，读不到/未装该字段都按开启处理。
+  if (store.developerTools?.value === false) return null
   if (produced.length === 0 && presented.length === 0) return null
   const cwd = store.sessionCwd.value
   const open = (p: string): void => store.openFile(p, undefined, cwd)

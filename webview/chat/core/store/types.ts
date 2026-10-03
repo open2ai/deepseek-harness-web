@@ -2,7 +2,12 @@
 // 独立成文件是为了让各切片能 Pick<ChatStore, K> 而不与 store/chat.ts 形成环；
 // 依赖方向固定为 chat.ts 与各切片 → types.ts。
 import type { Signal } from '@preact/signals'
-import type { DshTurnProcess as DshRowProcess, DshPresentedFile } from '../../../../src/dsh/rows/types'
+import type { LateAnswerCall, LateAnswerItem, LateAnswerQuestion } from '../late-answer'
+import type {
+  DshTurnProcess as DshRowProcess,
+  DshPresentedFile,
+  DshRowGroup,
+} from '../../../../src/dsh/rows/types'
 import type {
   HostToViewMessage,
   ImageAttachment,
@@ -34,7 +39,7 @@ export type DshTurnProcessItem =
       title?: string
       summary?: string
       argsRaw?: string
-      status: 'running' | 'ok' | 'error' | 'stopped'
+      status: 'preparing' | 'running' | 'ok' | 'error' | 'stopped'
       error?: string
       /** 错误名（`tool/result.data.error.name`）；交付文件行的兜底正文用它和错误码拼 */
       errorName?: string
@@ -110,6 +115,23 @@ export type ChatRow =
       refs?: RefSnap[] }
   /** 系统提示词行（上游 `system-prompt` 节点）：该回合实际发给模型的 system，可折叠；位置在该回合用户提问之前 */
   | { kind: 'sysprompt'; key: number; text: string }
+  /**
+   * 回合**终局通知**行（**独立行**，镜像上游 `turn-error` 与 `turn-max-tokens` 两个节点）：
+   * 上游两节点都由 `turn/end` 建、与本回合有没有内容无关；都在 `INDEPENDENT` 集合里 → 不被折进过程组。
+   * 渲染 `[状态点] 标题 + 文案 [code]`，见 `components/message/TurnNoticeRow.ts`。
+   */
+  | {
+      kind: 'turnNotice'
+      key: number
+      /** `error` = 回合失败 / `warning` = 输出 token 上限 */
+      tone: 'error' | 'warning'
+      turn?: number
+      step?: number
+      /** 失败原文（**仅 `error` 有**；`AUTH` 下不带：可能回显被掩码的凭据） */
+      message?: string
+      /** 失败标识（上游 `turn/end.reason` 的 code）：页面据此取上游固定中文 */
+      code?: string
+    }
   | {
       kind: 'context'
       key: number
@@ -129,8 +151,8 @@ export type ChatRow =
       stats: string
       /** chatDone.stats 原始值（含 usage 与 provider/model/ttftSec/tps/wallSec），供用量/用时弹窗 */
       usageRaw?: Record<string, unknown>
-      /** turn/end 非正常终止原因（已本地化的短句），正常完成则空 */
-      endMsg?: string
+      /** **消息级**「这条回答被中断」：正文末尾出「已停止」（上游 `AssistantMarkdown` 的位置） */
+      interrupted?: true
       /** 停止状态展示文案（已停止 · Stopped），仅被停止/中断/取消的回答有 */
       status?: string
       /** 过程链：思考/工具按发生顺序排列（折叠窗口成员） */
@@ -141,6 +163,13 @@ export type ChatRow =
       bodyStarted: boolean
       /** 折叠判定的事实（宿主下发，见 docs/design/08 §12）：回答锚点非空 = 末步是有回答内容的定稿步 */
       process?: DshRowProcess
+      /**
+       * **过程分组**（上游 step-group；宿主在「带回答内容的步」处收口时下发）。
+       *
+       * 有它 → 页面**按片**渲染（每片一个折叠头、每片自己的事实与展开态）；
+       * 没有 → 退回整回合一条头的既有形态（旧宿主 / 单回答步的回合）。
+       */
+      groups?: DshRowGroup[]
       /** 回答锚点的事件序号：仅在「显示层」用于「从此处分叉」的禁用判定与传参（宿主侧 fork 的 atSeq） */
       seq?: number
       /** 回答锚点的消息标识：消息反馈（👍/👎）的目标；缺失即该条不提供反馈 */
@@ -155,7 +184,16 @@ export type ChatRow =
        */
       turn?: number
     }
-  | { kind: 'approval'; key: number; approvalId: string; description: string; toolName?: string }
+  | {
+      kind: 'approval'
+      key: number
+      approvalId: string
+      /** 上游 `request.reason`：审计原文（英文），本地化文案缺失时的回退 */
+      description: string
+      /** 上游 `request.displayReason`（dsh 0.1.7-rc.2 新增）：本地化展示文案 `{ en, zh, … }` */
+      displayReason?: Record<string, string>
+      toolName?: string
+    }
   | { kind: 'question'; key: number; rpcId: string; sessionId?: string; questions: QuestionSpec[]; disabled: boolean }
   | { kind: 'notice'; key: number; text: string; command?: string; tone?: 'error' | 'ok' }
 
@@ -348,13 +386,39 @@ export interface ChatStore {
   queueBusy: Signal<string | null>
   /** 对话区末尾的 pending 插话气泡（还没进日志的插话：服务端收件箱里的 steering 项 + 本地回显） */
   pendingSteering: Signal<PendingSteering[]>
-  /** 上游「设置→对话显示」的只读镜像：compact=定稿收起成折叠头(上游默认)，normal=过程行平铺。
+  /** 上游「设置 → 通用设置 → 工作步骤展示」的只读镜像（四档 → 插件两档）：
+   *  compact=定稿收起成折叠头（上游 compact/standard/detailed 三档都收起），normal=过程行平铺（仅上游 verbose）。
    *  全局偏好，**不随会话切换清空**（见 store/prefs）。 */
   transcriptView: Signal<'normal' | 'compact'>
+  /** 上游「性能与用量」：`compact` 时不显示会话统计与每轮用量 */
+  performanceUsage: Signal<'compact' | 'detailed'>
+  /** 上游「代码工作工具」（默认开）：关掉时不显示会话模式选择器与交付卡片 */
+  developerTools: Signal<boolean>
+  /** 上游「繁忙时的发送行为」：空闲/繁忙时按 Enter 的投递方式；加速键（Ctrl/Cmd+Enter）取相反值 */
+  busyEnter: Signal<'queue' | 'steer'>
+  /** 上游四档策略门（`presentation-policy.ts`）：已定稿思考行是否在标题旁预览首行（`compact` 关） */
+  settledReasoningPreview: Signal<boolean>
+  /** 上游四档策略门：进行中是否显示过程细节（`compact`/`verbose` 关） */
+  liveProcessDetail: Signal<boolean>
+  /** 上游四档策略门（`presentation-policy.ts` 的 `stepGrouping`）：过程分组头的覆盖范围 ——
+   *  `collapsed`=所有回合都有（含进行中）、`history`=仅已关闭回合（进行中平铺）、`none`=不分组。
+   *  消费点在 `core/process-fold.ts`（决定进行中回合出不出折叠头）。 */
+  stepGrouping: Signal<'collapsed' | 'history' | 'none'>
   /** 渲染源开关（宿主下发，见 docs/design/08 §11）：true = 页面只认宿主下发的「行」，
    *  忽略旧的渲染指令（两条通路二选一，不能同时改列表）。 */
   /** 上游 waterfall 提问弹窗（输入框上方）：pending 时让用户选择/提交/取消/关闭；null=无 */
-  pendingQuestion: Signal<{ rpcId?: string; sessionId?: string; questions: QuestionSpec[] } | null>
+  pendingQuestion: Signal<{ rpcId?: string; sessionId?: string; questions: QuestionSpec[]; callId?: string } | null>
+  /** 仍可补答的限时提问（投影 `userQuestions` 里 `state === 'continued'` 的那些；阻塞式会话恒空） */
+  lateCalls: Signal<LateAnswerCall[]>
+  /** 正在补答的那一条；非 null 时提问弹窗进入补答模式 */
+  lateDraft: Signal<{ callId: string; questions: LateAnswerQuestion[] } | null>
+  /** 该条调用当前是否该显示补答入口（已提交过的先收起来，等投影收敛） */
+  canAnswerLate(callId: string): boolean
+  /** 点提问卡上的「回答」：用该条的问题清单进入补答模式 */
+  openLateDraft(callId: string): void
+  closeLateDraft(): void
+  /** 提交补答（经宿主走补答通道；作答会成为新一轮用户消息） */
+  submitLateAnswer(callId: string, answers: LateAnswerItem[]): void
   /** 主动触底请求计数：用户发送/恢复会话时 +1（MessageList 消费后清零并强制滚到底） */
   scrollPend: Signal<number>
   /** 更早的历史还没进窗口（宿主事实）：列表顶端据此出「加载更早」。 */
@@ -377,6 +441,28 @@ export interface ChatStore {
   turnFoldOpen: Signal<ReadonlyMap<number, boolean>>
   /** 记下某个回合的折叠展开态。 */
   setTurnFoldOpen(turn: number, open: boolean): void
+  /**
+   * **片**级过程折叠的展开态（B′：按片渲染后各片独立开合），键 = `${turn}:${group.key}`。
+   *
+   * 为什么另立一个信号而不是把 `turnFoldOpen` 的键改成字符串：整回合路径（无 `groups` 的旧宿主 /
+   * 片数对不上的回退）仍按 `turn` 走；两条路径的键**同时存在**、互不干扰，回退时旧键自然还在。
+   * 回合号是**会话内**编号，所以换会话要整表清掉（与 `turnFoldOpen` 同一处清理）。
+   */
+  groupFoldOpen: Signal<ReadonlyMap<string, boolean>>
+  /** 记下**某片**的折叠展开态（键由 `turn` 与片的稳定 key 拼出）。 */
+  setGroupFoldOpen(turn: number, groupKey: string, open: boolean): void
+  /**
+   * **外层折叠**的"已唤出世代"（上游 `turnProcesses {turn, answerStep}`）：键 = 会话内回合号。
+   *
+   * 缺省（没记录）= 已关闭的回合只留**当前回答世代**可见，更早的世代整片用 `hidden="until-found"`
+   * 折起（可被网页查找命中、命中即唤出）。用户唤出后记下当前 `answerStep`，之后就按记录判定。
+   * 键是会话内回合号，换会话整表清。
+   */
+  outerAnswerStep: Signal<ReadonlyMap<number, number>>
+  /** 记下某回合"已唤出到的回答世代"（点开隐藏片 / 网页查找命中时调用）。 */
+  revealOuter(turn: number, answerStep: number): void
+  /** 反向：清掉该回合的"已唤出世代" → 回到"只留当前世代"的折起状态（完成态行上的 chevron 用它收起）。 */
+  foldOuter(turn: number): void
   /** 附件字节缓存（附件大类，按 attachmentId；子类卡渲染时读） */
   attachmentCache: Signal<Record<string, AttachmentEntry>>
   // ---- 消息反馈（👍/👎） ----
@@ -443,12 +529,15 @@ export interface ChatStore {
   togglePopup(w: 'perm' | 'model' | 'mode'): void
   /** 打开「仅模型列表的可搜索弹窗」（/model 斜杠入口用；与按钮的完整模型弹窗区分） */
   openModelSearch(): void
-  /** 标记下一次 selectPerm/selectModel 是「/」菜单发起（结果追加到对话区）；按钮入口不调用 */
-  markSlashPick(kind: 'permission' | 'model'): void
+  /** 标记下一次 selectModel 是「/」菜单发起（结果追加到对话区）；按钮入口不调用。
+   *  权限不在此列：切权限在对话区不显示任何行（上游 `isVisibleChatNode()` 排除权限命令）。 */
+  markSlashPick(kind: 'model'): void
   closePopups(): void
   selectPerm(value: string): void
   selectModel(provider: string, model: string, effort?: string): void
   selectMode(id: string): void
+  /** 查看某个会话模式声明的子插件组合（宿主 `agentPresets/read` → 打开只读 YAML）【v0.1.15 · dsh 0.1.7】 */
+  openModeConfig(agentPreset: string): void
   answerApproval(approvalId: string, allow: boolean, key: number): void
   submitQuestion(key: number, rpcId: string | undefined, sessionId: string | undefined, answers: Array<{ id: string; selected: string[]; custom?: string }>): void
   cancelQuestion(key: number, rpcId: string | undefined, sessionId: string | undefined): void

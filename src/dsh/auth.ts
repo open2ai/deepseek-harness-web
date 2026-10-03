@@ -1,9 +1,13 @@
 // dsh 端点状态与浏览器鉴权 cookie。
 // DSH 协议层：端点/鉴权/RPC/commands/probe/端口/mux（高层会话与流式方法见同目录 session.ts/stream.ts）。
-// DSH 本地服务的 JSON-RPC 客户端 —— 适配 dsh v0.1.5-rc.2。
+// DSH 本地服务的 JSON-RPC 客户端 —— 适配 dsh 0.1.7+。
 //
 // ── 适配的 dsh 版本与上游接口映射（dsh 升级时按此表核对；勿按 0.1.1点号协议写）──
-//   “wire 协议”基线 = dsh v0.1.5-rc.2（typert gateway）
+//   “wire 协议”基线 = dsh v0.1.7-rc.2（typert gateway）；自 v0.1.15 起只支持 0.1.7+
+//   复核记录（0.1.7-rc.1 → 0.1.7-rc.2）：契约面零破坏 —— 事件目录/control 帧/follow/page/list/
+//   commands/execute/gateway 错误码表逐字节未变；rc.2 新增 9 个 remote（schedule×5、account×3、
+//   session/initializeDefaultModel）本插件都不调用；唯一破坏性字段 `agentPresets/list` 的
+//   `modeSelectionEnabled` 本插件从未消费（见 agentPresets.ts 的登记）。
 //
 //   1. RPC 信封：POST /api/<method>，body { type:'client-request', rpcId, method, payload }，
 //      应答 { type:'server-response', rpcId, result:{ ok, value|error } }。
@@ -155,7 +159,14 @@ const ARGS_KEY_BY_METHOD: Record<string, string> = {
 /** 无参 remote（payload 必须为 { args: {} }）。 */
 // settings/describe 与 modelCatalog 同族：远端签名无参，多包一层 request 会被网关拒
 // （"Remote payload must contain exactly one plain-object args field"）。
-const NO_ARGS_METHODS = new Set<string>(['session/modelCatalog', 'agentPresets/list', 'settings/describe']);
+// permissionPresets/catalog 同族：dsh 0.1.7 起进程级权限目录就是这条无参 remote
+// （`permission-presets/src/index.ts` 的 `@Remote('catalog')`）。
+const NO_ARGS_METHODS = new Set<string>([
+    'session/modelCatalog',
+    'agentPresets/list',
+    'settings/describe',
+    'permissionPresets/catalog',
+]);
 /** 平铺 args 的方法（payload 对象直接作为 args 的字段集）。
  *
  *  `goals/*` 属于这一类：它们的远端签名是**多个命名形参**
@@ -168,11 +179,19 @@ const NO_ARGS_METHODS = new Set<string>(['session/modelCatalog', 'agentPresets/l
 const FLAT_ARGS_METHODS = new Set<string>([
     '$events/result',
     'agentPresets/select',
+    // 【v0.1.15 · dsh 0.1.7-rc.1】读某个 preset 的子插件组合，远端签名是单个命名形参
+    // `readDocument(agentPreset)`，**必须平铺**。包一层 request 会被网关拒：
+    // `gateway/arguments-invalid: args fields do not match the descriptor: missing "agentPreset"; unexpected "request"`
+    //（2026-09-23 在隔离的 0.1.7-rc.1 实例实测；平铺 `{agentPreset}` 返回 content）。
+    'agentPresets/read',
     'goals/get',
     'goals/edit',
     'goals/pause',
     'goals/resume',
     'goals/clear',
+    // 【dsh 0.2.0 · 迟到回答】补答「限时提问」的调用：远端签名是**多个命名形参**
+    //（agent / callId / answer），必须平铺；包一层 request 会被网关拒（同 goals/* 的教训）。
+    'userQuestions/answer',
 ]);
 
 export function hasAuthCookie(port: number): boolean {

@@ -1,4 +1,4 @@
-// 对话相关的**类型契约**（适配上游 0.1.5-rc.2）。
+// 对话相关的**类型契约**（适配上游 0.1.7-rc.2）。
 //
 // ⚠️ 这里曾经还有一整套「本轮等待」实现（`waitTurn` / `askInSessionStreaming`）：它**每轮自己再开一条**
 // `session/follow`，从那条流里取增量、用法与终止原因。宿主改成常驻订阅（`follow.ts`）+ 单一构建器
@@ -33,7 +33,13 @@ export interface DshTurnCounts {
 }
 export interface DshApproval {
     approvalId?: string;
+    /** 上游 `request.reason`：**审计原文**（英文、会写进会话日志），语义不变 */
     description?: string;
+    /**
+     * 上游 `request.displayReason`（dsh 0.1.7-rc.2 新增）：给人看的本地化文案 `{ en, zh, … }`。
+     * 与 `description` 并行、互不覆盖；由 webview 决议用哪门语言（见 `core/approval-text.ts`）。
+     */
+    displayReason?: Record<string, string>;
     rpcId?: string;
     sessionId?: string;
     /** 待批准的真实工具名（上游 request.toolName），UI 直显 */
@@ -55,4 +61,6 @@ export interface DshQuestionRequest {
     rpcId?: string;
     sessionId?: string;
     questions?: DshQuestion[];
+    /** 限时提问（dsh 0.2.0）的调用标识：超时后投影里就是同一个 `callId`（用于关掉过期弹窗）。 */
+    callId?: string;
 }

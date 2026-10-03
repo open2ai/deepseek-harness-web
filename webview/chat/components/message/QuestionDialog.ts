@@ -1,18 +1,22 @@
-// 上游 waterfall 提问弹窗（适配上游 0.1.5-rc.2）：一题一屏 + 翻页，与上游 `QuestionComposer` 同口径。
+// 上游 waterfall 提问弹窗（适配上游 0.1.7-rc.2）：一题一屏 + 翻页，与上游 `QuestionComposer` 同口径。
 //
 // 数据来自 store.pendingQuestion（$events 的 `user-questions/request`）；提交→questionResponse，
 // 放弃整组→questionCancel（服务端以 UserQuestionError/ASK_CANCELLED 结算该 waterfall）。
 //
-// 与上游一致的四条**交互事实**（改前先看，它们不是随手定的）：
+// 与上游一致的五条**交互事实**（改前先看，它们不是随手定的）：
 //   1. 一次只显示一道题，底部 `1 / 3` 是**进度**不是装饰；单选的选项点一下就自动翻到下一题。
 //   2. 自由输入是**每题一个**（不是「其他」选项）：有选项时是内联一行，没选项时是一个输入框。
 //   3. 「提交」只在最后一题出现，其它题是「下一题」；它按**当前题**是否已答来决定可用性，
 //      「必须全部答完」是在点击时把关并跳到第一道未完成处（上游同）。
 //   4. 「跳过本题」是有效作答：该项以 `{ id, selected: [] }` 上报（记录卡显示「未回答」）。
+//   5. **推荐项预选**（0.2.0 起，本轮对齐）：推荐写在选项文案后缀里（`（推荐）`），显示时剥掉、
+//      但答案值仍是**原始 label**（含后缀）；草稿初始化时把第一个推荐项**预选**上（上游
+//      `QuestionComposer` 的 `selected: answer === undefined && recommended !== undefined ? [recommended] : []`）。
 import { html } from 'htm/preact'
 import { useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
 import type { QuestionSpec } from '../../core/protocol'
+import { initialQuestionDraft, splitRecommended } from '../../core/question-draft'
 
 interface Draft {
   selected: string[]
@@ -20,28 +24,22 @@ interface Draft {
   skipped: boolean
 }
 
-/** 上游把「推荐」做进**选项文案后缀**（没有独立字段）：显示时剥掉、另挂一个「推荐」角标。 */
-const RECOMMENDED_SUFFIX = /[（(]\s*(?:Recommended|推荐)\s*[)）]\s*$/
-
-function splitRecommended(label: string): { text: string; recommended: boolean } {
-  return RECOMMENDED_SUFFIX.test(label)
-    ? { text: label.replace(RECOMMENDED_SUFFIX, '').trim(), recommended: true }
-    : { text: label, recommended: false }
-}
-
 export function QuestionDialog({ store }: { store: ChatStore }) {
   const q = store.pendingQuestion.value
+  // **补答模式**（限时提问超时后，dsh 0.2.0）：数据来自会话投影而不是 $events 瀑布，
+  // 提交也走另一条通道（见 `submitDrafts`）。两种模式共用这套一题一屏的交互。
+  const late = store.lateDraft.value
   // 每次新提问（rpcId 变化）由父层 key 强制重挂，useState 随之重建
   const [index, setIndex] = useState(0)
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [minimized, setMinimized] = useState(false)
   const [feedback, setFeedback] = useState('')
-  if (q === null) return null
+  if (q === null && late === null) return null
 
-  const questions = q.questions
+  const questions: QuestionSpec[] = q?.questions ?? late?.questions ?? []
   const current = questions[index]
   if (current === undefined) return null
-  const draft: Draft = drafts[current.id] ?? { selected: [], custom: '', skipped: false }
+  const draft: Draft = drafts[current.id] ?? initialQuestionDraft(current)
   const answered = (d: Draft): boolean => d.selected.length > 0 || d.custom.trim() !== ''
   const complete = (d: Draft): boolean => d.skipped || answered(d)
 
@@ -92,7 +90,10 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
       const custom = d.custom.trim()
       return { id: question.id, selected: d.selected, ...(custom === '' ? {} : { custom }) }
     })
-    store.submitQuestion(0, q.rpcId, q.sessionId, answers)
+    // 两条通道分流：**补答**（限时提问超时后）走另一条远端调用，作答会作为新一轮用户消息被投递；
+    // 当前这一轮的阻塞式提问仍走 $events 瀑布。别把两者混起来（混了就有一边必然报「找不到」）。
+    if (late !== null) store.submitLateAnswer(late.callId, answers)
+    else if (q !== null) store.submitQuestion(0, q.rpcId, q.sessionId, answers)
   }
 
   /** 前进：本步是最后一题则提交（上游 `continueFlow`）。 */
@@ -115,7 +116,15 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
     else setIndex(index + 1)
   }
 
-  const close = (): void => store.cancelQuestion(0, q.rpcId, q.sessionId)
+  const close = (): void => {
+    // 补答模式是**本地收起**（与上游对「带调用标识的卡片」同口径：关掉面板不发任何请求，
+    // 那条提问仍然可回答，重新点提问卡上的「回答」即可回来）。
+    if (late !== null) {
+      store.closeLateDraft()
+      return
+    }
+    if (q !== null) store.cancelQuestion(0, q.rpcId, q.sessionId)
+  }
 
   const options = current.options ?? []
   return html`<div class="q-dialog${minimized ? ' is-minimized' : ''}" role="dialog" aria-label="提问">
@@ -130,7 +139,8 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
         onClick=${() => setMinimized((v) => !v)}>
         <span class=${'codicon ' + (minimized ? 'codicon-chevron-up' : 'codicon-chevron-down')}></span>
       </button>
-      <button type="button" class="q-dialog-icon" title="放弃整组问题" aria-label="放弃整组问题" onClick=${close}>
+      <button type="button" class="q-dialog-icon" title=${late === null ? '放弃整组问题' : '收起（提问仍可回答）'}
+        aria-label=${late === null ? '放弃整组问题' : '收起'} onClick=${close}>
         <span class="codicon codicon-close"></span>
       </button>
     </div>

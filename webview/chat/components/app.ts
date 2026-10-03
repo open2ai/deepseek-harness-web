@@ -139,15 +139,21 @@ function Popup({ store }: { store: ChatStore }) {
       }
       if (DANGEROUS_PERMS.has(o.value)) {
         store.closePopups()
-        const label = o.value === 'danger-full-access' ? 'Full access' : o.name || o.value
+        // 两个危险预设的确认文案不同（上游 `ui-permission-presets` 的 locales.ts 对
+        // auto 用 auto.confirm.*、对完全权限用 confirm.*）：auto 是**无沙箱 + 实验性审查**，
+        // 风险描述不能套用「减少确认步骤」那套。
+        const isAuto = o.value === 'auto'
+        const label = isAuto ? 'Auto review' : o.value === 'danger-full-access' ? 'Full access' : o.name || o.value
         void showDialog({
           icon: 'warn',
-          title: `确认启用 ${label}？`,
-          body:
-            `启用 ${label} 后，agent 将减少确认步骤，并且可以直接执行更多操作，` +
-            `包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。`,
-          ack: '我已了解风险，并愿意继续',
-          okText: '启用',
+          title: isAuto ? '确认启用 Auto review（实验）？' : `确认启用 ${label}？`,
+          body: isAuto
+            ? 'Auto review 不使用沙箱。每次原生工具调用和 PTC 内层调用前，都会由与当前 agent 相同的模型进行审查。' +
+              '此功能仍属实验性，可能误放行或误拒绝，并会消耗额外 token。'
+            : `启用 ${label} 后，agent 将减少确认步骤，并且可以直接执行更多操作，` +
+              `包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。`,
+          ack: isAuto ? '我已了解这些风险，并愿意继续' : '我已了解风险，并愿意继续',
+          okText: isAuto ? '启用 Auto review' : '启用',
           okStyle: 'danger',
           cancelText: '取消',
         }).then((ok) => {
@@ -198,8 +204,10 @@ function Popup({ store }: { store: ChatStore }) {
   }
 
   // 模式(固定位)：↑↓ 循环、Enter 选中、Esc 关闭；底色=光标位、✓=当前生效模式
+  // 【代码工作工具】关闭时**整个选择器不出现**（上游 `ui-agent-preset`：关闭后新会话选择器消失、卡片拒绝选择）。
+  // 判据「只有显式 false 才隐藏」：上游该项**默认开**，读不到也要能选模式。
   let modePopup = html`<div id="modePopup" class="popup hidden"></div>`
-  if (open === 'mode') {
+  if (open === 'mode' && store.developerTools?.value !== false) {
     // 关闭后把焦点交还输入框：弹窗卸载后焦点会掉到 body，接着打字/敲 "/" 都会失效
     const backToInput = (): void => {
       queueMicrotask(() => document.getElementById('input')?.focus())
@@ -218,7 +226,14 @@ function Popup({ store }: { store: ChatStore }) {
       } else if (e.key === 'Enter') {
         e.preventDefault()
         const m = sel.modeOptions[modeActive]
-        if (m) pickMode(m.id)
+        if (!m) return
+        // Ctrl/Cmd+Enter = 查看该模式的子插件组合（只读，不切模式）【v0.1.15 · dsh 0.1.7】
+        if (e.ctrlKey || e.metaKey) {
+          store.openModeConfig(m.id)
+          backToInput()
+          return
+        }
+        pickMode(m.id)
       } else if (e.key === 'Escape') {
         e.preventDefault()
         store.closePopups()
@@ -227,7 +242,7 @@ function Popup({ store }: { store: ChatStore }) {
     }
     modePopup = html`<div id="modePopup" class="popup" style=${style('modeBtn', true)} tabIndex=${-1}
       role="listbox" aria-label="会话模式" ref=${modeRef} onKeyDown=${onModeKeyDown}>
-      <div class="popup-title">会话模式</div>
+      <div class="popup-title">会话模式 · Ctrl+Enter 查看组合</div>
       ${modeCount === 0
         ? html`<div class="opt" style=${{ opacity: 0.6 }}>暂无可用模式</div>`
         : sel.modeOptions.map(
@@ -250,14 +265,14 @@ function Popup({ store }: { store: ChatStore }) {
 export function Composer({ store }: { store: ChatStore }) {
   const text = store.text.value
   const processing = store.processing.value
-  // 「空」= 草稿 + 附件 + 图片 + 引用**全都空**（上游 `InputBar.tsx:75` 的同一判据）
+  // 「空」= 草稿 + 附件 + 图片 + 引用**全都空**（与上游同一判据）
   const empty =
     text.trim() === '' &&
     store.attachments.value.length === 0 &&
     store.images.value.length === 0 &&
     store.refs.value.length === 0
   const running = store.turnRunning.value
-  // 主钮三态照上游 `InputBar.tsx:346-365`：`primaryStops = running && subagent===null && (empty || blocked)`
+  // 主钮三态与上游一致：`primaryStops = running && subagent===null && (empty || blocked)`
   //（后者本插件取「普通会话」那一支：拿不到 subagent/blocked）。
   // 于是：**只有输入区空着才是「停止生成」**；非空时主钮是发送（忙时=排队发送）。
   const stops = (running || processing) && empty
@@ -408,6 +423,7 @@ export function Composer({ store }: { store: ChatStore }) {
       claim: argCommand !== null ? 'command' : skillClaim !== null ? 'skill' : null,
       running: store.turnRunning.value,
       queued: store.queueItems.value.some((i) => i.placement === 'queued'),
+      busyEnter: store.busyEnter.value,
     })
     switch (decided.action) {
       case 'none':
@@ -529,13 +545,15 @@ export function Composer({ store }: { store: ChatStore }) {
           </button>
           <span id="modelLabel" class="sel-label">${modelName()}</span>
         </div>
-        <div class="sel-group">
+        ${store.developerTools?.value !== false
+          ? html`<div class="sel-group">
           <button id="modeBtn" title=${sel.modeLocked ? `${modeName()}（已固定）` : modeName()} class=${'mode' + (store.openPopup.value === 'mode' ? ' active' : '') + (sel.modeLocked ? ' readonly' : '')}
             onClick=${() => { if (!sel.modeLocked) store.togglePopup('mode') }}>
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></svg>
           </button>
           <span id="modeLabel" class="sel-label">${modeName()}</span>
-        </div>
+        </div>`
+          : null}
         <span class="send-group">
           <${ContextMeter} store=${store} />
           <button id="send" title=${sendLabel} class=${stops ? 'stop' : ''} disabled=${stops ? false : (!canSend || !!busy)}
@@ -604,10 +622,14 @@ function ChatApp({ store }: { store: ChatStore }) {
   return html`${TitlebarShell()}
     <${Welcome} store=${store} />
     <${MessageList} store=${store} />
-    <${QuestionDialog} key=${store.pendingQuestion.value?.rpcId ?? 'none'} store=${store} />
+    <${QuestionDialog} key=${store.pendingQuestion.value?.rpcId ?? (store.lateDraft.value === null ? 'none' : `late:${store.lateDraft.value.callId}`)} store=${store} />
     <${FeedbackDialog} store=${store} />
     <${FeedbackToast} store=${store} />
     <${Composer} store=${store} />
+    ${/* 【2026-10-01 修正】这里**不得**再按 `performanceUsage` 掐掉整块 ——
+         简洁档不是"什么都不显示"，而是"只显示两枚静态药丸（输出速度 / 缓存命中）"，
+         而那个分支就在 `StatsCards` 里。父层一掐，组件里的简洁分支就成了死代码，
+         真机表现正是「简洁档下输入框下面什么都没有」（网页端此时是显示两枚药丸的）。 */ ''}
     <${StatsCards} store=${store} />
     ${ModalShell()}`
 }

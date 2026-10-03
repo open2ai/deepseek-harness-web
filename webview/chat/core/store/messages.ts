@@ -26,8 +26,12 @@ export interface MessagesSlice {
     | 'answerApproval'
     | 'openFile'
   >
-  /** 追加一条审批行。 */
-  pushApproval(approvalId: string, description: string, toolName?: string): void
+  /**
+   * 追加一条审批行。
+   * `description` 是上游审计 `reason`；`displayReason` 是 dsh 0.1.7-rc.2 起并列给出的
+   * 本地化展示文案，二者都原样存下行、由 `core/approval-text.ts` 决议最终显示哪一条。
+   */
+  pushApproval(approvalId: string, description: string, toolName?: string, displayReason?: Record<string, string>): void
   /** 追加一条用户行（本地乐观行：发出即显示，等宿主行回显后由提交标识认领）。 */
   addUser(text: string, imgs?: ImageAttachment[], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void
   /** 开启（或复用）当前进行中的 assistant 行。 */
@@ -62,6 +66,25 @@ export interface MessagesSlice {
   turnFoldOpen: Signal<ReadonlyMap<number, boolean>>
   /** 记下某个回合的折叠展开态（回合号是**会话内**编号，换会话时整表清掉）。 */
   setTurnFoldOpen(turn: number, open: boolean): void
+  /**
+   * **片**级过程折叠的展开态（B′：按片渲染后各片独立），键 = `${turn}:${group.key}`。
+   * 与 `turnFoldOpen` 并存：哪条路径在用，由"有没有 `groups`"决定（见 `components/chain/Chain.ts`）。
+   */
+  groupFoldOpen: Signal<ReadonlyMap<string, boolean>>
+  /** 记下**某片**的折叠展开态。 */
+  setGroupFoldOpen(turn: number, groupKey: string, open: boolean): void
+  /**
+   * **外层折叠**（上游 `turnProcesses {turn, answerStep}`）：每回合记下"用户已唤出到哪个回答世代"。
+   *
+   * 语义（对齐上游）：**缺省 = 没记录** → 已关闭的回合只留**当前世代**那一片可见，更早的世代
+   * 用 `hidden="until-found"` 折起（可被网页查找命中、命中即唤出）。用户唤出后记下当前 `answerStep`，
+   * 该世代之后一直可见。**记录只在会话内有效**（键是会话内回合号，换会话整表清）。
+   */
+  outerAnswerStep: Signal<ReadonlyMap<number, number>>
+  /** 记下某回合"已唤出到的回答世代"（用户展开隐藏片 / 网页查找命中时调用）。 */
+  revealOuter: (turn: number, answerStep: number) => void
+  /** 反向：清掉该回合的"已唤出世代" → 回到"只留当前世代"的折起状态（完成态行上的 chevron 用它收起）。 */
+  foldOuter: (turn: number) => void
 }
 
 /** 本地时刻串（实时上送用；历史恢复走事件自带时刻）。 */
@@ -84,6 +107,39 @@ export function createMessages(host: ChatHost): MessagesSlice {
     const next = new Map(turnFoldOpen.value)
     next.set(turn, open)
     turnFoldOpen.value = next
+  }
+  /**
+   * **片**级展开态：键 = `${turn}:${group.key}`（各片独立；上游是每个 seat 自己的本地 disclosure）。
+   * 片消失（重折/翻页）后残留的键不会有人读，量也随回合数有界，故不额外做清理 —— 换会话时整表清掉。
+   */
+  const groupFoldOpen = signal<ReadonlyMap<string, boolean>>(new Map<string, boolean>())
+  const setGroupFoldOpen = (turn: number, groupKey: string, open: boolean): void => {
+    const next = new Map(groupFoldOpen.value)
+    next.set(`${String(turn)}:${groupKey}`, open)
+    groupFoldOpen.value = next
+  }
+  /**
+   * 外层折叠的"已唤出世代"（上游 `turnProcesses`）：键 = 会话内回合号，值 = 已唤出到的 `answerStep`。
+   * **缺省 = 没记录**（等价上游 `stored === undefined`）→ 已关闭回合只留当前世代可见。
+   */
+  const outerAnswerStep = signal<ReadonlyMap<number, number>>(new Map<number, number>())
+  const revealOuter = (turn: number, answerStep: number): void => {
+    if (outerAnswerStep.value.get(turn) === answerStep) {
+      // 已经是这个世代：不产生新 Map（避免每帧新建引用导致订阅者白重渲）
+      return
+    }
+    const next = new Map(outerAnswerStep.value)
+    next.set(turn, answerStep)
+    outerAnswerStep.value = next
+  }
+  /** 反向：把"已唤出世代"删掉 → 该回合回到"只留当前世代"的折起状态（完成态行上的 chevron 用它收起）。 */
+  const foldOuter = (turn: number): void => {
+    if (!outerAnswerStep.value.has(turn)) {
+      return
+    }
+    const next = new Map(outerAnswerStep.value)
+    next.delete(turn)
+    outerAnswerStep.value = next
   }
   let rowKey = 1
   /** 当前列表属于哪个会话：会话一变就丢弃本地乐观行（见 applyHostRows） */
@@ -162,6 +218,10 @@ export function createMessages(host: ChatHost): MessagesSlice {
         turnRunning.value = false
         // 回合号是**会话内**编号：换会话后同一个号会指到别的回合，折叠展开态必须一起清
         turnFoldOpen.value = new Map<number, boolean>()
+        // 片级键里也含回合号（`${turn}:${key}`），同样必须清
+        groupFoldOpen.value = new Map<string, boolean>()
+        // 外层折叠的"已唤出世代"按会话内回合号记 —— 同样必须清（否则新会话的同号回合会继承旧记录）
+        outerAnswerStep.value = new Map<number, number>()
         // **打开一个会话一律从底部开始**（对齐上游：没有存下的阅读位置时 `toBottom()`）。
         // 少了这一下，新会话的内容是在「保留原 scrollTop」的前提下长出来的 ——
         // 上一条会话若停在靠下的位置，打开新历史会话时视野就留在**最上面**（真机现象「光标跑到最上面去了」）。
@@ -296,13 +356,15 @@ export function createMessages(host: ChatHost): MessagesSlice {
           done: true,
           // 本地失败没有上游 reason.kind；角标沿用「错误」这一档，与 turn/end 的 error 同形
           status: 'error',
-          endMsg: msgText || row.endMsg,
           bodyStarted: true,
         })
         hit = true
+        // 原因**不进回答行**：本地失败在服务端没有这一回合 → 没有 `turn/end`，上游也不会出 `turn-error` 行；
+        // 走与「没有回答行可挂」时同一条通路（通知行），不伪造回合失败行
+        if (msgText !== '') showNotice(msgText)
       }
     }
-    if (!hit) showNotice(msgText)
+    if (!hit && msgText !== '') showNotice(msgText)
     processing.value = false
   }
 
@@ -315,8 +377,20 @@ export function createMessages(host: ChatHost): MessagesSlice {
     removeWhere((r) => r.kind === 'approval' && r.key === key)
     host.post({ type: 'approvalResponse', approvalId, allow })
   }
-  function pushApproval(approvalId: string, description: string, toolName?: string): void {
-    push({ kind: 'approval', key: rowKey++, approvalId, description, toolName })
+  function pushApproval(
+    approvalId: string,
+    description: string,
+    toolName?: string,
+    displayReason?: Record<string, string>
+  ): void {
+    push({
+      kind: 'approval',
+      key: rowKey++,
+      approvalId,
+      description,
+      ...(displayReason === undefined ? {} : { displayReason }),
+      toolName,
+    })
   }
 
   const nextKey = (): number => rowKey++
@@ -341,6 +415,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
     processing.value = false
     turnRunning.value = false
     turnFoldOpen.value = new Map<number, boolean>()
+    groupFoldOpen.value = new Map<string, boolean>()
+    outerAnswerStep.value = new Map<number, number>()
     // 窗口事实随会话一起换：新会话的窗口由它自己的 `rows` 帧重写
     historyHasMore.value = false
     historyLoading.value = false
@@ -380,5 +456,10 @@ export function createMessages(host: ChatHost): MessagesSlice {
     resetRows,
     turnFoldOpen,
     setTurnFoldOpen,
+    groupFoldOpen,
+    setGroupFoldOpen,
+    outerAnswerStep,
+    revealOuter,
+    foldOuter,
   }
 }

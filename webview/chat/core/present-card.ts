@@ -1,4 +1,4 @@
-// 交付文件（`present`）**专属行**的模型（适配上游 0.1.5-rc.2）。
+// 交付文件（`present`）**专属行**的模型（适配上游 0.1.7-rc.2）。
 //
 // 为什么单独一条行、而不是并进通用「输入 / 输出」卡：上游这一行有自己的口径 ——
 //   1) 行首标记按**四态**给（进行中 / 完成 / 中断 / 失败），不显工具图标；
@@ -24,8 +24,9 @@ export interface PresentCardModel {
   details: string
 }
 
-/** 四个状态词（行状态 → 文案）。 */
+/** 四个状态词（行状态 → 文案）。准备中（参数还没到）按运行中显示。 */
 const LABELS: Record<Tool['status'], string> = {
+  preparing: '正在交付',
   running: '正在交付',
   ok: '已交付',
   error: '交付失败',
@@ -34,6 +35,7 @@ const LABELS: Record<Tool['status'], string> = {
 
 /** 行状态 → 行首标记态。 */
 const MARKS: Record<Tool['status'], PresentMark> = {
+  preparing: 'ongoing',
   running: 'ongoing',
   ok: 'done',
   error: 'error',

@@ -16,7 +16,7 @@ export interface ChatHost {
    * 目标条的动作请求（edit/pause/resume/clear），等宿主回 `goalActionResult`。
    *
    * 为什么需要"等回执"：这个动作**不是**乐观更新 —— 上游 `GoalBar` 也是 `await` 动作结果，
-   * 失败时把 `message (code)` 内联显示在条上（`GoalBar.tsx:69`）。没有回执就没法区分
+   * 失败时把 `message (code)` 内联显示在条上（与网页端同位）。没有回执就没法区分
    * 「改了但投影还没到」与「被 CAS 拒了」。
    * @param action - 动作名
    * @param objective - 仅 edit 用

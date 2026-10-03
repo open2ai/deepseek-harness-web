@@ -1,4 +1,4 @@
-// dsh 文件上送（原始字节上传）。适配上游 dsh 0.1.5-rc.2 的 `POST /api/session/uploadFileBinary`：
+// dsh 文件上送（原始字节上传）。适配上游 dsh 0.1.7+ 的 `POST /api/session/uploadFileBinary`：
 //   - 它不是 RPC 信封：body 是**原始字节流**，`content-type` 必须 `application/octet-stream`；
 //   - query 带 `sessionId`（必填）与 `name`（可选显示名）；
 //   - 通过校验后一律 **HTTP 200**：成功 `{ok:true,value:{receiptId,file}}`；

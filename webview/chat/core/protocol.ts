@@ -118,14 +118,27 @@ export interface AtSessionRef {
 export type FeedbackRating = 'positive' | 'negative'
 
 export type HostToViewMessage =
-  | { type: 'chatApproval'; approvalId?: string; description?: string; toolName?: string }
+  | {
+      type: 'chatApproval'
+      approvalId?: string
+      /** 上游 `request.reason`：审计原文（英文），`displayReason` 缺失时的回退文案 */
+      description?: string
+      /** 上游 `request.displayReason`（dsh 0.1.7-rc.2 新增）：本地化展示文案 `{ en, zh, … }` */
+      displayReason?: Record<string, string>
+      toolName?: string
+    }
   | {
       type: 'chatQuestion'
       rpcId?: string
       sessionId?: string
       questions?: QuestionSpec[]
+      /** 限时提问（dsh 0.2.0）的调用标识：超时后投影里就是同一个 `callId`。 */
+      callId?: string
     }
   | { type: 'questionClosed'; rpcId?: string }
+  // 账号类提示（宿主 `$events` 的 emit → 对话区一行）：文案由宿主按上游 locale 给全，
+  // 页面不翻译、不拼接（与 notice 行同形，见 core/store/messages.ts 的 showNotice）
+  | { type: 'notice'; text?: string; tone?: 'error' | 'ok' }
   // 提交失败（宿主侧本地失败：没有工作区 / 服务不可用 / RPC 报错）——**不是渲染指令**：
   // 它属于与审批、提问同一类的「交互事实」。为什么必须单开一条：这类失败发生在服务端**没有回合**的情况下，
   // 事件流里既不会有 turn/end、也没有对应的行，错误无处承载（行模型的 endMsg 只来自 turn/end）。
@@ -165,8 +178,26 @@ export type HostToViewMessage =
       agentPreset?: string
       agentPresetLocked?: boolean
     }
-  // 显示偏好（全局，与会话无关）：单独一条轻消息，实时跟随只推它，不重拉 chatInfo 那串 RPC
-  | { type: 'chatPrefs'; transcriptView?: 'normal' | 'compact' }
+  // 显示偏好（全局，与会话无关）：单独一条轻消息，实时跟随只推它，不重拉 chatInfo 那串 RPC。
+  // 四项都来自上游「设置 → 通用设置」（宿主 `dsh/settings.ts` 读 + `settings/document-updated` 跟随）；
+  // 缺哪个字段 = 那个字段不改（宿主读不到设置时一个字段都不推）。
+  | {
+      type: 'chatPrefs'
+      /** 工作步骤展示（上游四档 → 插件折叠两档：只有 `verbose` 是平铺） */
+      transcriptView?: 'normal' | 'compact'
+      /** 性能与用量：`compact` 时不显示会话统计与每轮用量 */
+      performanceUsage?: 'compact' | 'detailed'
+      /** 代码工作工具（上游 `ui-settings.enabled`，默认开）：关掉时不显示会话模式选择器与交付卡片 */
+      developerTools?: boolean
+      /** 繁忙时的发送行为：空闲 Enter 的投递方式；加速键取相反值 */
+      busyEnter?: 'queue' | 'steer'
+      /** 上游四档策略门：已定稿思考行是否预览首行（`compact` 关，其余三档开） */
+      settledReasoningPreview?: boolean
+      /** 上游四档策略门：进行中是否显示过程细节（`compact`/`verbose` 关，`standard`/`detailed` 开） */
+      liveProcessDetail?: boolean
+      /** 上游四档策略门：过程分组头的覆盖范围（`collapsed` 所有回合 / `history` 仅已关闭回合 / `none` 不分组） */
+      stepGrouping?: 'collapsed' | 'history' | 'none'
+    }
   // 宿主下发的「行」（阶段 4 切渲染源后页面据此渲染；开关关闭时不下发，见 docs/design/08 §11）。
   // 形状为宿主侧的行模型（`src/dsh/rows/types.ts`），页面消费时做一次映射。
   | {
@@ -250,10 +281,17 @@ export type ViewToHostMessage =
     }
   | { type: 'questionResponse'; rpcId?: string; sessionId?: string; answers: Array<{ id: string; selected: string[]; custom?: string }> }
   | { type: 'questionCancel'; rpcId?: string; sessionId?: string }
+  /**
+   * 补答一道**限时提问**（超时后转入「已继续」态的那些）：
+   * 走宿主侧另一条远端调用，补答会作为新一轮用户消息被投递（与上面的 `questionResponse` 不是同一条路）。
+   */
+  | { type: 'questionLateAnswer'; sessionId?: string; callId: string; answers: Array<{ id: string; selected: string[]; custom?: string }> }
   | { type: 'chatSelectPermission'; preset: string }
   | { type: 'goalAction'; key: string; action: 'edit' | 'pause' | 'resume' | 'clear'; objective?: string }
   | { type: 'chatSelectModel'; provider: string; model: string; reasoningEffort?: string }
   | { type: 'chatSelectMode'; agentPreset: string }
+  // 查看某个会话模式声明的子插件组合（宿主 agentPresets/read → 打开只读 YAML）【v0.1.15 · dsh 0.1.7】
+  | { type: 'chatModeConfig'; agentPreset: string }
   | { type: 'pickFile' }
   | { type: 'attachmentReq'; attachmentId: string }
   // 在编辑器区打开一个文件（相对路径由宿主按 cwd 解析）；line 为 1 起的行号

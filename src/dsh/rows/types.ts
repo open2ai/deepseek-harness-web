@@ -1,4 +1,4 @@
-// 行模型的形状（适配上游 0.1.5-rc.2）——**只类型、零运行时代码**。
+// 行模型的形状（适配上游 0.1.7-rc.2）——**只类型、零运行时代码**。
 //
 // 独立成文件是为了让页面侧能 `import type` 取用而不把实现打进包（见 docs/design/08 §9）。
 import type { FileRef, ImageRef } from '../official/result-text';
@@ -14,7 +14,12 @@ export type DshRowItem =
         callId?: string;
         name: string;
         argsRaw?: string;
-        status: 'running' | 'ok' | 'error' | 'stopped';
+        /**
+         * `preparing` = **已声明、参数还没到**（上游 `RunningToolCall.phase === 'preparing'`）：
+         * 只有一条「带名字的工具增量」到达时才会出现，`tool/call` 一到就**原地升级**成 `running`。
+         * 它算一次调用、不解析参数、渲染成**一条不可展开的行**；历史通路直接从 `tool/call` 开始。
+         */
+        status: 'preparing' | 'running' | 'ok' | 'error' | 'stopped';
         error?: string;
         /** 错误名（`tool/result.data.error.name`）；交付文件行拿它和错误码拼兜底正文 */
         errorName?: string;
@@ -62,6 +67,14 @@ export interface DshTurnProcess {
     processStartSeq: number;
     /** 回答步自身是否含可见推理 */
     inlineReasoning: boolean;
+    /**
+     * 载入的窗口里**有没有本回合的 `turn/start`**（上游 `ChatTurnProcessPresentation.turnStarted`）。
+     *
+     * 用处：过程窗口是否就绪由 `turnStarted || turnClosed` 决定（0.2.0 起的 per-Turn 判据）——
+     * 「拿到了回合结尾但没拿到它的开头」照样可以折叠；而**历史被分页截断本身不是禁止折叠的理由**
+     * （旧版上游那道 `historyIncomplete` 已被删除）。
+     */
+    turnStarted: boolean;
     /** 过程区间内除回答步外是否还有别的过程成员 */
     hasExternalProcess: boolean;
     /**
@@ -72,6 +85,45 @@ export interface DshTurnProcess {
      * 与上游同：这里 user 与 steering 一视同仁（分类只影响行的种类，不影响这条判据）。
      */
     compactAnswer: boolean;
+    /**
+     * **过程分组**（上游的 step-group）：在「带回答内容的步」处收口，一片一段。
+     *
+     * 用途：对齐上游「每个过程段一条折叠头」的呈现 —— 页面按片出头、按片判折叠、
+     * 按片存展开态；没有它时插件只能整回合一条头（`docs/design/12` §1.1 的结构性差异）。
+     *
+     * 缺省 = 没有分组信息（旧宿主 / 单步回合）：消费方退回「整回合一条头」的既有形态。
+     */
+    groups?: DshRowGroup[];
+}
+
+/** 一片（上游 step-group）的过程事实：与回合级**同一套判据**，只是区间不同。 */
+export interface DshRowGroupFacts {
+    /** 该片的回答锚点 = 收口那一步的定稿（或首条可见）证据序号 */
+    answerAnchorSeq: number | null;
+    /** 收口那一步的步号 */
+    answerStep: number | null;
+    /** 该片的收口步自身是否含可见推理 */
+    inlineReasoning: boolean;
+    /** 与回合级同（窗口里有本回合的 `turn/start`） */
+    turnStarted: boolean;
+    /** 该片的控制锚（片区间内最早的可见证据） */
+    controlAnchorSeq: number;
+    /** 该片的过程区间起点 */
+    processStartSeq: number;
+    /** 片区间内除收口步外是否还有别的过程成员 */
+    hasExternalProcess: boolean;
+    /** 片区间内是否有人插话（上游 `compactAnswer` 的片级形态） */
+    compactAnswer: boolean;
+}
+
+/** 一片过程：稳定身份 + 它覆盖的步区间 + 它自己的过程事实。 */
+export interface DshRowGroup {
+    /** 稳定身份（上游按 `['process', 首成员 key, groupPart]`）：这里用 `步区间 + 回答锚点` 派生 */
+    key: string;
+    /** 该片覆盖的步区间（含端点）；`null` = 该端无步号 */
+    fromStep: number | null;
+    toStep: number | null;
+    facts: DshRowGroupFacts;
 }
 
 /**
@@ -121,6 +173,29 @@ export type DshStreamRow =
       }
     /** 系统提示词行：位置在该回合用户提问**之前**（构建时即按序插入，页面不再自己找位）。 */
     | { kind: 'sysprompt'; key: number; text: string }
+    /**
+     * 回合**终局通知**行（**独立行**，镜像上游两个节点：`turn-error` 与 `turn-max-tokens`）。
+     *
+     * 两者上游都是独立节点、都在 `conversation-nodes/process-groups.ts:13` 的 `INDEPENDENT` 集合里
+     * （结束前面的过程组、作为独立根保留、**不被折进过程组**），渲染也共用同一套布局
+     * （两个独立终局节点）→ 插件用一个行 + `tone` 表达：
+     * · `error`（`turn-error`）：由 `turn/start` + `turn/end` 建，**与本回合有没有内容无关**；带 `message`/`code`；
+     * · `warning`（`turn-max-tokens`）：`turn/end` 的 `reason.kind === 'max-tokens'`；文案固定，无 `message`/`code`。
+     * 位置 = 该回合末尾（回答行之后）。文案由页面决议（`webview/chat/core/turn-copy.ts`）。
+     */
+    | {
+        kind: 'turnNotice';
+        key: number;
+        tone: 'error' | 'warning';
+        /** 通知所属回合 */
+        turn?: number;
+        /** 该回合的最后一步（上游两个节点的 `lastStep`，同口径） */
+        step?: number;
+        /** 失败原文（**仅 `tone==='error'` 有**；`AUTH` 下不带 —— 可能回显被掩码的凭据） */
+        message?: string;
+        /** 失败标识（上游 `turn/end.reason` 的 code）：页面据此取上游固定中文 */
+        code?: string;
+      }
     | {
         kind: 'assistant';
         key: number;
@@ -142,8 +217,9 @@ export type DshStreamRow =
         timeMs?: number;
         /** 折叠判定的事实（回合关闭时写入；进行中的回合没有它 → 与控制条「回合已关」门控一致） */
         process?: DshTurnProcess;
-        /** 终止原因为 error 时的**原始错误消息**（服务端原文，不翻译） */
-        endMsg?: string;
+        /** **消息级**「这条回答被中断」（上游 `assistant/message.data.interrupted`，见 `conversation-nodes/assistant.ts:207`）：
+         *  正文末尾据此出「已停止」（与上游同位）。 */
+        interrupted?: true;
         /** 回答锚点的事件序号（本回合最后一条**带文本**的 append 结算消息）：
          *  作「从此处分叉」传给 `session/fork` 的 `atSeq`。没有回答的回合不带。 */
         seq?: number;

@@ -2,6 +2,7 @@
 // 唯一跨域点是「/」菜单发起选择后要把结果追加到对话区——由装配层注入消息切片的 showNotice，
 // 本切片不直接依赖消息行（保持切片之间无 import 边）。
 import { signal } from '@preact/signals'
+import { orderModelProviders } from '../model-order'
 import type { ChatHost } from '../host'
 import type { PermissionOption, ChatModelInfo, ChatAgentPreset } from '../protocol'
 import type { ChatStore, SelectorState } from './types'
@@ -22,6 +23,7 @@ export interface SelectorsSlice {
     | 'selectPerm'
     | 'selectModel'
     | 'selectMode'
+    | 'openModeConfig'
   >
   /** chatInfo 帧：写权限选项与当前值。 */
   setPermOptions(options: PermissionOption[] | undefined, currentValue: string | undefined): void
@@ -33,8 +35,13 @@ export interface SelectorsSlice {
 }
 
 export function createSelectors(host: ChatHost, emitNotice: EmitNotice): SelectorsSlice {
-  // 由「/」菜单打开的选择(permission/model)：选中后把操作结果追加到对话区；按钮入口不设此标记
-  let slashPickKind: 'permission' | 'model' | null = null
+  /**
+   * 「/model」菜单发起的选择：选中后把结果追加到对话区；按钮入口不设此标记。
+   *
+   * **只有 model 一种**：切权限在对话区本就不显示任何行（上游 `isVisibleChatNode()` 排除权限命令），
+   * 所以权限没有需要标记的场景。
+   */
+  let slashPickKind: 'model' | null = null
   const permNameOf = new Map<string, string>()
   const openPopup = signal<'perm' | 'model' | 'mode' | 'modelSearch' | null>(null)
   const sel = signal<SelectorState>({
@@ -54,8 +61,8 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
     openPopup.value = null
     slashPickKind = null
   }
-  /** 标记下一次 selectPerm/selectModel 是「/」菜单发起(用于把操作结果追加到对话区)。 */
-  function markSlashPick(kind: 'permission' | 'model'): void {
+  /** 标记下一次 selectModel 是「/」菜单发起(用于把操作结果追加到对话区)。 */
+  function markSlashPick(kind: 'model'): void {
     slashPickKind = kind
   }
   function togglePopup(w: 'perm' | 'model' | 'mode'): void {
@@ -78,11 +85,13 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
     if (found) rememberPermName(found)
     sel.value = { ...sel.value, currentPerm: value }
     host.post({ type: 'chatSelectPermission', preset: value })
-    // 由「/permission」发起：把切到的预设名追加到对话区(按钮入口不设标记，不进对话)
-    if (slashPickKind === 'permission') {
-      const label = found ? found.name || found.value : value
-      emitNotice(label, 'permission', 'ok')
-    }
+    // **这里不补任何结果行**（原 `slashPickKind === 'permission'` 那条已删）。
+    // 与上游一致：切权限在对话区**完全不显示**。依据节点可见性契约
+    // 的 `isVisibleChatNode()` —— 它显式排除三类节点：`system-prompt`、`context`，
+    // 以及 `command` 且 `name === 'permission'`。上游仍把 `command/run`/`command/done` 写日志
+    //（轨迹可见），只是渲染进 chat 时过滤掉。
+    // 反馈走 VS Code 通知（宿主侧，见 `extension` 的 chatSelectPermission）。
+    // （`/model` 不同：上游模型选择是客户端 RPC、不产生命令生命周期，所以它保留本地那一行。）
     closePopups()
   }
   function setModels(models: ChatModelInfo | undefined): void {
@@ -90,7 +99,7 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
     const cur = models.current
     sel.value = {
       ...sel.value,
-      modelGroups: models.groups ?? [],
+      modelGroups: orderModelProviders(models.groups ?? []),
       modelFailures: models.failures ?? [],
       curProvider: cur?.provider ?? '',
       curModel: cur?.model ?? '',
@@ -154,6 +163,16 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
     host.post({ type: 'chatSelectMode', agentPreset: id })
     closePopups()
   }
+  /**
+   * 查看某个模式的子插件组合（F9「查看配置」）。
+   *
+   * 纯只读：只把 id 交给宿主去拉 `agentPresets/read` 并打开一份 YAML，**不动当前模式、不产生对话行**
+   *（与 `selectMode` 的区别就在这里：这是查看，不是切换）。
+   */
+  function openModeConfig(agentPreset: string): void {
+    closePopups()
+    host.post({ type: 'chatModeConfig', agentPreset })
+  }
 
   /** 新会话清空：只清弹窗与「/」发起标记，不动 sel 与 permNameOf（权限名回退表跨会话仍有效）。 */
   function reset(): void {
@@ -162,7 +181,7 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
   }
 
   return {
-    store: { sel, permNameOf, openPopup, togglePopup, openModelSearch, markSlashPick, closePopups, selectPerm, selectModel, selectMode },
+    store: { sel, permNameOf, openPopup, togglePopup, openModelSearch, markSlashPick, closePopups, selectPerm, selectModel, selectMode, openModeConfig },
     setPermOptions,
     setModels,
     setModes,

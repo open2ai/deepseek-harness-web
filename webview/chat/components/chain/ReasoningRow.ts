@@ -1,4 +1,4 @@
-// 思考行（Disclosure 形态），与上游 `ui-chat/ReasoningRow.tsx` 逐项对齐：
+// 思考行（Disclosure 形态），与网页端的同一个组件逐项对齐：
 //   收起 = 一行摘要 —— 定稿/历史取**首行**，流式(live)取**最新一行**并右对齐跟随思考尾部（`data-follow-end`）；
 //   展开 = **纯文本**全文（`white-space: pre-wrap`，`**加粗**` 这类标记原样显示、不解析成 markdown）
 //          —— 上游 `thinkBody` 就是 `<div>{text}</div>` + pre-wrap，本插件此前误走 markdown 渲染；
@@ -31,9 +31,14 @@ const latestLine = (text: string): string => {
 interface ReasoningProps {
   item: Reasoning
   live?: boolean
+  /**
+   * 是否在标题旁预览首行（上游四档策略门：`settledReasoningPreview` / `liveProcessDetail`）。
+   * 缺省 true = 显示（读不到偏好时维持接入前形态）。
+   */
+  showPreview?: boolean
 }
 
-function ReasoningRowView({ item, live }: ReasoningProps) {
+function ReasoningRowView({ item, live, showPreview = true }: ReasoningProps) {
   const [open, setOpen] = useState(false) // 默认收起(一行摘要)；点开看全文
   // 收起摘要剥掉 markdown 加粗符号 `**`（如 `**重点**`→`重点`）；**展开全文不动**（上游同：summary 才剥）
   const preview = (live ? latestLine(item.text) : firstLine(item.text)).replaceAll('**', '')
@@ -42,7 +47,7 @@ function ReasoningRowView({ item, live }: ReasoningProps) {
       <span class=${'codicon chain-chev ' + (open ? 'codicon-chevron-down' : 'codicon-chevron-right')}></span>
       <span class="codicon codicon-lightbulb chain-kind-ico"></span>
       <span class="chain-row-title">思考</span>
-      ${open || !preview ? null : html`<span class="chain-sep" aria-hidden></span>
+      ${open || !showPreview || !preview ? null : html`<span class="chain-sep" aria-hidden></span>
         <span class="chain-row-preview" data-follow-end=${live ? '' : undefined}><span class="chain-row-preview-text">${preview}</span></span>`}
     </button>
     ${open

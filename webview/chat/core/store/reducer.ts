@@ -2,6 +2,7 @@
 // 只做「消息类型 → 切片方法」的路由与少量极短的载荷兜底；形状解析一律下沉到对应切片
 // （投影解析在 status，输入区拼装在 composer）。
 import type { HostToViewMessage, PermissionOption, QueueItemView } from '../protocol'
+import { APPROVAL_FALLBACK_TEXT } from '../approval-text'
 import type { ChatStore } from './types'
 import type { MessagesSlice } from './messages'
 import type { ComposerSlice } from './composer'
@@ -62,14 +63,18 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
   function onHostMessage(m: HostToViewMessage): void {
     switch (m.type) {
       case 'chatApproval':
-        messages.pushApproval(m.approvalId ?? '', m.description ?? '需要授权操作', m.toolName)
+        messages.pushApproval(m.approvalId ?? '', m.description ?? APPROVAL_FALLBACK_TEXT, m.toolName, m.displayReason)
         break
       case 'chatQuestion':
         // 上游 waterfall 提问弹窗（输入框上方）：pending 时置弹窗数据，用户选择/提交/取消/关闭。
-        question.openQuestionDialog(m.rpcId, m.sessionId, m.questions ?? [])
+        question.openQuestionDialog(m.rpcId, m.sessionId, m.questions ?? [], m.callId)
         break
       case 'questionClosed':
         question.closeQuestion(m.rpcId)
+        break
+      // 账号类提示（宿主按上游 locale 给全文案）：直接落成对话区一行，页面不翻译
+      case 'notice':
+        if (m.text) messages.store.showNotice(m.text, undefined, m.tone ?? 'error')
         break
       case 'chatError':
         // 本地提交失败（没有回合、没有行）：标掉那条乐观行并给错误，避免输入区一直卡在「处理中」。
@@ -96,6 +101,8 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       // 因为它一变就要重推整个整表、而环只要那两个字段。**整表语义**：直接替换。
       case 'projections':
         status.applyProjections(m.values ?? {})
+        // 迟到回答：投影里的 `userQuestions` 决定「哪些限时提问还能补答」（拿不到就是没有）
+        question.applyLateQuestions(m.values ?? {})
         break
       case 'attachmentBytes':
         attachments.receiveAttachment(
@@ -119,6 +126,7 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
           const perms = proj['permissions'] as { options?: PermissionOption[]; currentValue?: string } | undefined
           selectors.setPermOptions(perms?.options, perms?.currentValue)
           status.applyProjections(proj)
+          question.applyLateQuestions(proj)
         }
         selectors.setModels(m.models)
         selectors.setModes(m.agentPresets, m.agentPreset, m.agentPresetLocked)
@@ -129,8 +137,8 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         break
       }
       case 'chatPrefs':
-        // 全局偏好（显示形态）：只改展示，不动会话数据
-        prefs.apply(m.transcriptView)
+        // 全局偏好（四项）：只改展示/键位，不动会话数据
+        prefs.apply(m)
         break
       case 'rows':
         // 宿主下发的行（阶段 4，见 docs/design/08 §11）：渲染源切到宿主侧

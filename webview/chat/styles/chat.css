@@ -1,6 +1,7 @@
 @import './chain.css';
 @import './state.css';
 @import './errors.css';
+@import './shimmer.css';
 
   /*
    * 主题感知的细线色（**所有卡内细线**用它，与 dsh 网页端同口径）。
@@ -727,10 +728,42 @@
     font-size: 11px; color: var(--vscode-descriptionForeground, #888);
     opacity: 0.8; margin-top: 2px;
   }
-  /* 回合非正常终止提示（turn/end 原因） */
-  .end-note {
-    font-size: 11px; color: var(--vscode-errorForeground, #f14c4c);
-    margin-top: 2px; word-break: break-word;
+  /* 回合终局通知行（独立行，镜像上游 `turn-error` / `turn-max-tokens` 两个节点共用布局）：
+     grid = [状态点 10px] [文案块] [code 小标签]；标题加粗，`error` 档错误色、`warning` 档警告色 */
+  .turn-notice {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+    gap: 8px; align-items: start;
+    padding: 2px 0; font-size: 13px;
+  }
+  .turn-notice-dot {
+    width: 8px; height: 8px; margin-top: 5px; border-radius: 50%;
+    background: var(--vscode-errorForeground, #f14c4c);
+  }
+  .turn-notice.is-warning .turn-notice-dot {
+    background: var(--vscode-editorWarning-foreground, #cca700);
+  }
+  .turn-notice-copy { min-width: 0; overflow-wrap: anywhere; }
+  .turn-notice-title {
+    margin-right: 6px; font-weight: 600;
+    color: var(--vscode-errorForeground, #f14c4c);
+  }
+  .turn-notice.is-warning .turn-notice-title {
+    color: var(--vscode-editorWarning-foreground, #cca700);
+  }
+  .turn-notice-message { color: var(--vscode-descriptionForeground, #999); }
+  .turn-notice-code {
+    color: var(--vscode-descriptionForeground, #999);
+    font-family: var(--vscode-editor-font-family, monospace); font-size: 11px;
+  }
+  /* 正文末尾的「已停止」药丸（**消息级**中断标记，镜像上游 `AssistantMarkdown` 的 `.stopped`）：
+     自占一行、贴左；11px、三级色、浅底 */
+  .answer-stopped {
+    display: block; width: fit-content; margin-top: 4px;
+    padding: 0 6px; border-radius: 4px;
+    background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+    color: var(--vscode-descriptionForeground, #999);
+    font-size: 11px; line-height: 18px;
   }
   /* 状态小药丸：包裹文字、常驻背景（随主题变量深浅适配，无需 hover） */
   .status-badge {
@@ -1013,6 +1046,15 @@
     color: var(--vscode-foreground, #ddd);
     background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground, rgba(128,128,128,0.22)));
   }
+  /* 不可用但仍可悬停/聚焦：原生 disabled 不派发 hover/focus，提示就出不来
+     （等价上游 `[data-unavailable]` 那条注释），所以只压暗、不给悬停高亮，点击由不挂 onClick 兜住 */
+  .msg-actions button[data-unavailable] { opacity: 0.45; cursor: default; }
+  .msg-actions button[data-unavailable]:hover { color: var(--vscode-descriptionForeground, #888); background: none; }
+  /* 无障碍隐藏（只读给读屏，不占视觉位置）：上游把「为什么不可用」放这种 span 里给 aria-describedby */
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
   /* 用量/用时图标并入动作区(排在最末：复制/反馈/分叉之后)，覆盖 msg-actions button 默认外观 */
   .msg-actions .turn-meta { margin: 0; }
   .msg-actions .tm-btn {
@@ -1042,6 +1084,9 @@
     color: var(--vscode-foreground, #ccc);
   }
   .sp-ico { flex: none; font-size: 13px; line-height: 1; }
+  /* 【性能与用量 = 简洁】档的药丸是**静态读数**（不是按钮、没有明细卡）：去掉指针与 hover 反馈 */
+  .sp-pill.is-static { cursor: default; }
+  .sp-pill.is-static:hover { background: transparent; }
   .sp-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   /* 图标、分隔点与两段读数之间只留 2~3px：一行里三样东西，间距一大就散成三块 */
   .sp-sep { flex: none; margin: 0 1px; color: var(--dsh-hairline-strong); }

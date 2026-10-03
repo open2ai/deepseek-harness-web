@@ -1,4 +1,4 @@
-// dsh 0.1.5-rc.2 的 Remote Event（$events）监听器。
+// dsh 0.1.7+ 的 Remote Event（$events）监听器（自 v0.1.15 起只支持 0.1.7+）。
 //
 // rc.1 移除旧 /api/respond 后，审批与提问改为：
 //   - 通过 /api/remote.mux 打开逻辑流 `$events`（payload { args: {} }）；
@@ -18,6 +18,15 @@ export interface DshRemoteApprovalRequest {
     readonly toolName?: string;
     readonly callId?: string;
     readonly reason?: string;
+    /**
+     * 上游 `request.displayReason`（**dsh 0.1.7-rc.2 新增**）：**给人看的本地化文案**
+     * （形状 `{ en, zh, … }`），与 `reason`（审计原文、会写进会话日志）**并行存在、互不覆盖**。
+     * 产地：沙箱提权 `sandbox/src/escalation.ts`（`允许本次操作使用 … 权限：…`）、
+     * Auto review 拒绝转人工、`PreToolDecision.ask`。
+     * 本层只**原样搬运**：决议用哪门语言是展示层的事 —— 宿主代选会让 `description`
+     * 出现第二套语义（既可能是 reason 也可能是 displayReason），复查时无法区分。
+     */
+    readonly displayReason?: Readonly<Record<string, string>>;
 }
 
 export interface DshRemoteQuestionRequest {
@@ -32,6 +41,13 @@ export interface DshRemoteQuestionRequest {
         options?: Array<{ label: string; description?: string }>;
         multiSelect?: boolean;
     }>;
+    /**
+     * 限时提问（dsh 0.2.0）的等待标识：**只有**限时形态的请求带它。
+     *
+     * 它与投影 `userQuestions` 里的 `callId` 是同一个键 —— 界面据此把「这条提问」与
+     * 「它超时后转入的『已继续』态」对上（超时后弹窗必须关掉，改由提问卡提供补答入口）。
+     */
+    readonly callId?: string;
 }
 
 /** 某个会话等待期间感兴趣的 $events 回调。 */
@@ -39,6 +55,26 @@ export interface DshSessionEventHandlers {
     onApproval?: (request: DshRemoteApprovalRequest) => void;
     onQuestion?: (request: DshRemoteQuestionRequest) => void;
     onCancel?: (eventId: string) => void;
+}
+
+/**
+ * 取上游的本地化文案字段（`displayReason`，形状 `{ en, zh, … }`）。
+ *
+ * 只认「值是字符串的普通对象」：畸形载荷（`null` / 数组 / 数字 / 嵌套对象）一律当没有 ——
+ * 上游把该字段定义为**仅用于展示、不进审计**，所以宁可退回英文审计原文，
+ * 也不把任意 payload 灌进 UI。一个可用字符串都没有时同样返回 `undefined`（等同上游没给）。
+ */
+function localeText(value: unknown): Readonly<Record<string, string>> | undefined {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        return undefined;
+    }
+    const out: Record<string, string> = {};
+    for (const [key, text] of Object.entries(value as Record<string, unknown>)) {
+        if (typeof text === 'string') {
+            out[key] = text;
+        }
+    }
+    return Object.keys(out).length === 0 ? undefined : out;
 }
 
 /** 非会话作用域（emit 帧）的 $events 回调。 */
@@ -363,6 +399,8 @@ class RemoteEventHub {
             const toolName = typeof request['toolName'] === 'string' ? request['toolName'] : undefined;
             const callId = typeof request['callId'] === 'string' ? request['callId'] : undefined;
             const reason = typeof request['reason'] === 'string' ? request['reason'] : undefined;
+            // dsh 0.1.7-rc.2 起上游并列给出本地化展示文案；本层只校验形状 + 原样搬运。
+            const displayReason = localeText(request['displayReason']);
             for (const handler of target) {
                 handler.onApproval?.({
                     clientId: invocation.clientId,
@@ -371,18 +409,25 @@ class RemoteEventHub {
                     toolName,
                     ...(callId === undefined ? {} : { callId }),
                     ...(reason === undefined ? {} : { reason }),
+                    ...(displayReason === undefined ? {} : { displayReason }),
                 });
             }
             return;
         }
         if (frame.event === 'user-questions/request') {
             const rawQuestions = Array.isArray(request['questions']) ? request['questions'] : [];
+            // 限时形态的请求多一个 `wait`（只读它需要的字段；没有就是阻塞式提问）
+            const wait = request['wait'] !== null && typeof request['wait'] === 'object'
+                ? (request['wait'] as Record<string, unknown>)
+                : undefined;
+            const callId = typeof wait?.['callId'] === 'string' && wait['callId'] !== '' ? wait['callId'] : undefined;
             for (const handler of target) {
                 handler.onQuestion?.({
                     clientId: invocation.clientId,
                     eventId: frame.eventId,
                     agentId: frame.agentId,
                     questions: rawQuestions as DshRemoteQuestionRequest['questions'],
+                    ...(callId === undefined ? {} : { callId }),
                 });
             }
         }

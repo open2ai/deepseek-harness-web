@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { DshService, DshNoWorkspaceError } from './api/dshService';
 import { ChatInputService } from './chatInputService';
-import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, toQueueViews } from './dsh';
+import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
 import { traceTool } from './dsh/trace';
 import {
@@ -70,12 +70,28 @@ dsh.onProjections = (sessionId, values) => {
 };
 // 审批/提问：宿主侧常驻（见 dshService.ensureAskSubscription）。缓存最后一帧，新 webview ready 时重放。
 dsh.onApproval = (a) => {
-    const frame = { type: 'chatApproval', approvalId: a.approvalId, description: a.description, toolName: a.toolName };
+    const frame = {
+        type: 'chatApproval',
+        approvalId: a.approvalId,
+        description: a.description,
+        // 上游 request.displayReason（dsh 0.1.7-rc.2 新增）：本地化展示文案，原样转给页面；
+        // 用哪门语言由页面决议（webview/chat/core/approval-text.ts）
+        ...(a.displayReason === undefined ? {} : { displayReason: a.displayReason }),
+        toolName: a.toolName,
+    };
     pendingAsk = frame;
     postToChats(frame);
 };
 dsh.onQuestion = (q) => {
-    const frame = { type: 'chatQuestion', rpcId: q.rpcId, sessionId: q.sessionId, questions: q.questions };
+    // `callId` 只在**限时提问**（dsh 0.2.0）上出现：它是投影里那条 `continued` 记录的同一个键，
+    // 页面据此在超时后关掉过期弹窗、改由提问卡提供补答入口。
+    const frame = {
+        type: 'chatQuestion',
+        rpcId: q.rpcId,
+        sessionId: q.sessionId,
+        questions: q.questions,
+        ...(q.callId === undefined ? {} : { callId: q.callId }),
+    };
     pendingAsk = frame;
     pendingAskRpcId = q.rpcId;
     postToChats(frame);
@@ -85,6 +101,20 @@ dsh.onQuestionClosed = (rpcId) => {
     pendingAskRpcId = undefined;
     postToChats({ type: 'questionClosed', rpcId });
 };
+// 账号类提示（dsh 0.1.7-rc.2 的 emit：登录失效 / 模型需登录）：转成对话区一行。
+// **懒建立**：`$events` 流不该在 dsh 起来之前就连上 —— 连不上会每 1.5s 重试并打一条 warn
+// （见 events.ts 的 run()），而那时候用户还没打开任何面板。首个聊天 webview 就绪时建立
+// （与 ensureSettingsFollow 同一处、同一理由）。
+// 不做「面板就绪时重放」—— 它是**当前账号态**的提示，用户重开面板后由下一次模型请求或目录错误再暴露。
+let disposeAccountNotices: (() => void) | undefined;
+function ensureAccountNotices(): void {
+    if (disposeAccountNotices !== undefined) {
+        return;
+    }
+    disposeAccountNotices = subscribeAccountNotices((notice) => {
+        postToChats({ type: 'notice', text: notice.text, tone: notice.tone });
+    });
+}
 // 输入框功能宿主侧服务：承载 "/" 斜杠命令/技能，后续输入触发类功能都挂这里（复用 dsh 的会话/就绪）
 const chatInput = new ChatInputService(dsh);
 const panel = new DshPanel({
@@ -496,26 +526,40 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
             agentPresetLocked,
         });
         // 设置偏好兜底对齐：emit 万一收不到，会话/工作区切换时也重读一次（值变了才广播）
-        void dsh.readTranscriptView();
+        void dsh.readChatPrefs();
     } catch {
         // 服务未就绪时静默
     }
 }
 
-/** 推偏好（全局，与会话无关）：上游「设置 → 对话显示」的显示形态。
- *  显示形态读不到就不推那一个字段：webview 侧默认 compact = 接入前的形态 */
+/** 推偏好（全局，与会话无关）：上游「设置 → 通用设置」的四项
+ *  （工作步骤展示 / 性能与用量 / 代码工作工具 / 繁忙时的发送行为）。
+ *  整体读到才推：读不到就一个字段都不推，webview 侧维持默认（= 四项的上游默认值）。 */
 async function postChatPrefs(): Promise<void> {
-    const transcriptView = (await dsh.readTranscriptView()) ?? dsh.getCachedTranscriptView();
-    if (transcriptView === undefined) {
+    const prefs = (await dsh.readChatPrefs()) ?? dsh.getCachedChatPrefs();
+    if (prefs === undefined) {
         return;
     }
-    postToChats({ type: 'chatPrefs', transcriptView });
+    // 诊断留痕（真机排查「设置改了但界面没跟随」时看这一行）：输出通道 `DSH 事件窗口`
+    logRows(
+        `偏好 → 工作步骤展示=${prefs.transcriptView}（分组头=${prefs.stepGrouping}） · 性能与用量=${prefs.performanceUsage}` +
+            ` · 代码工作工具=${prefs.developerTools ? '开' : '关'} · 繁忙时的发送行为=${prefs.busyEnter}`
+    );
+    postToChats({
+        type: 'chatPrefs',
+        transcriptView: prefs.transcriptView,
+        performanceUsage: prefs.performanceUsage,
+        developerTools: prefs.developerTools,
+        busyEnter: prefs.busyEnter,
+        settledReasoningPreview: prefs.settledReasoningPreview,
+        liveProcessDetail: prefs.liveProcessDetail,
+        stepGrouping: prefs.stepGrouping,
+    });
 }
 
 /**
  * 偏好变更跟随：进程内只订阅一次，广播给所有存活聊天页。
- * 来源是上游设置（`settings/document-updated` 经 `subscribeTranscriptView`）。
- * 输入框键位是固定值（与宿主页面同口径），没有本插件的配置项，所以不在这里跟。
+ * 来源是上游设置（`settings/document-updated` 经 `subscribeChatPrefs`；命名空间过滤在 `dsh/settings.ts`）。
  */
 let settingsFollowed = false;
 function ensureSettingsFollow(): void {
@@ -537,7 +581,7 @@ function ensureSettingsFollow(): void {
             '────────────────────────',
         ].join('\n')
     );
-    dsh.subscribeTranscriptView(() => {
+    dsh.subscribeChatPrefs(() => {
         void postChatPrefs();
     });
 }
@@ -757,7 +801,12 @@ function setupChatWebview(
                 }
                 await postChatInfo(webview);
                 await postChatPrefs();
+                // 诊断留痕：输入框下方那两块读数（会话统计 / 模型用量）**全部来自投影**。
+                // 真机排查「统计/用量不显示」先看这一行：键不在 → 宿主没拿到（服务端组合/时序）；
+                // 键在但界面空 → 页面的显示门（`steps===0 && !hasTokens` 或简洁档两枚药丸都算不出）。
+                logRows(`投影键 = ${dsh.projectionKeys().join(',') || '(空)'}`);
                 ensureSettingsFollow();
+                ensureAccountNotices();
                 // 待答交互（审批/提问）不在日志里、也只发给发起那一轮的 webview：新建的面板补原帧
                 if (pendingAsk !== undefined) {
                     post(pendingAsk);
@@ -864,10 +913,9 @@ function setupChatWebview(
                         void promptWorkspaceFirst('当前没有工作区，请先选择工作区再发送消息');
                         return;
                     }
-                    // 错误以“回合终止原因”呈现(end-note)，不把 '⚠ …' 塞进正文当内容。
-                    // 走 `chatError` 而非 `chatDone`：这类失败发生在服务端**没有回合**的情况下，
-                    // 事件流里没有 turn/end、也没有对应的行，只能由这条交互帧把它们收尾
-                    // （旧通路退役后继续发 chatDone 会被页面静默丢弃 —— 既没有错误提示，输入区还卡在处理中）。
+                    // 不再把 '⚠ …' 塞进正文；回合内的失败与 token 上限由**独立终局行**承载（镜像上游 `turn-error` / `turn-max-tokens`，见 `TurnNoticeRow.ts`），
+                    // 而这里走 `chatError` 的是**服务端还没有回合**的失败（没有 turn/end → 也没有失败行可挂）。
+                    // 不用 `chatDone`：旧通路退役后继续发会被页面静默丢弃（既没有错误提示，输入区还卡在处理中）。
                     const message = e instanceof Error ? e.message : String(e);
                     post({ type: 'chatError', message, rpcId: typeof msg.rpcId === 'string' ? msg.rpcId : undefined });
                 }
@@ -1039,6 +1087,33 @@ function setupChatWebview(
                     stopTurn();
                 }
             })();
+        } else if (msg.type === 'questionLateAnswer') {
+            // **补答**一道限时提问（走了另一条远端调用，不是上面的 $events 瀑布）：
+            //   · 该题已不是可补答态（false）= 已有结论 → **静默收敛**，与「取消提问」同口径，不是错误；
+            //   · 已在队列里（REPLY_QUEUED）→ 也不是失败，提示一句即可；
+            //   · 其余错误码才按错误提示。
+            void (async () => {
+                try {
+                    const stillContinued = await dsh.answerLateQuestion(
+                        String(msg.callId ?? ''),
+                        Array.isArray(msg.answers) ? msg.answers : [],
+                        typeof msg.sessionId === 'string' ? msg.sessionId : undefined
+                    );
+                    const verdict = lateAnswerVerdict(
+                        stillContinued === undefined ? {} : { returned: stillContinued }
+                    );
+                    if (verdict === 'queued') {
+                        vscode.window.showInformationMessage('补答已提交，会作为新一轮消息继续这项工作');
+                    }
+                } catch (e) {
+                    const code = e instanceof DshRpcError ? e.code : undefined;
+                    if (lateAnswerVerdict(code === undefined ? {} : { code }) === 'failed') {
+                        vscode.window.showErrorMessage((e as Error).message);
+                    } else {
+                        vscode.window.showInformationMessage('这道提问已经有回复在队列里了');
+                    }
+                }
+            })();
         } else if (msg.type === 'openFile') {
             void openFileInEditor(msg.path, msg.line, msg.cwd);
         } else if (msg.type === 'attachmentReq') {
@@ -1079,6 +1154,21 @@ function setupChatWebview(
                     vscode.window.showErrorMessage((e as Error).message);
                 }
             })();
+        } else if (msg.type === 'chatModeConfig') {
+            // F9「查看配置」：读该模式声明的子插件组合，用只读 YAML 打开【v0.1.15 · dsh 0.1.7】
+            void (async () => {
+                try {
+                    const doc = await dsh.readAgentPreset(msg.agentPreset);
+                    const header =
+                        `# dsh agent preset: ${doc.agentPreset}${doc.name === undefined ? '' : ` (${doc.name})`}\n` +
+                        '# 来源：dsh agentPresets/read（上游标注 for viewing only）\n' +
+                        '# 仅供查看：编辑不会生效，改动模式声明请去 dsh 侧。\n\n';
+                    const text = await vscode.workspace.openTextDocument({ content: header + doc.content, language: 'yaml' });
+                    await vscode.window.showTextDocument(text, { preview: true });
+                } catch (e) {
+                    vscode.window.showErrorMessage(`读取模式配置失败：${(e as Error).message}`);
+                }
+            })();
         } else if (msg.type === 'chatSelectPermission') {
             void (async () => {
                 try {
@@ -1087,6 +1177,14 @@ function setupChatWebview(
                     // 等权限投影落定后再刷新（commands.execute 返回后事件已入账，稍等一拍更稳）
                     await new Promise((r) => setTimeout(r, 300));
                     await postChatInfo(webview);
+                    // **切权限在对话区不显示任何行** —— 与上游一致。
+                    // 依据（dsh 0.1.7-alpha.2 的节点可见性契约）：
+                    //   isVisibleChatNode() 显式排除三条：system-prompt、context，
+                    //   以及 `node.kind === 'command' && node.data.name === 'permission'`。
+                    // 上游仍然把 `command/run` + `command/done` 写进会话日志（轨迹/检查能看到），
+                    // 只是**渲染进 chat 时过滤掉权限命令** —— 所以对话区没有任何回显。
+                    // 插件不走本地上游 transcript，因此这里**不下发**结果行（下发就成了多余的第三处）。
+                    // 反馈由下方 VS Code 通知承担（面板切走时也可见）。
                     vscode.window.showInformationMessage(`切换至: ${msg.preset}`);
                 } catch (e) {
                     if (isNoWorkspace(e)) {
@@ -2034,6 +2132,7 @@ export function activate(context: vscode.ExtensionContext) {
 // 扩展停用/被卸载前收尾：先关掉自己开的 Webview（避免宿主在卸载时解析已移除扩展的
 // extensionId 报错），再回收后台进程
 export function deactivate() {
+    disposeAccountNotices?.();
     chatPanel?.dispose();
     chatPanel = undefined;
     panel.dispose();

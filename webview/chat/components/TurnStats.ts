@@ -1,4 +1,4 @@
-// 用量 / 用时 弹窗组件：喂入 chatDone.stats 原始值(usageRaw)，有值才显示（适配上游 0.1.5-rc.2）。
+// 用量 / 用时 弹窗组件：喂入 chatDone.stats 原始值(usageRaw)，有值才显示（适配上游 0.1.7-rc.2）。
 // 独立成组件，后续要改字段文案/布局/触发方式只动这里。
 import { html } from 'htm/preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'

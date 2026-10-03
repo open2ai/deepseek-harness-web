@@ -34,6 +34,18 @@ function toChatRow(r: DshStreamRow): ChatRow {
   if (r.kind === 'sysprompt') {
     return { kind: 'sysprompt', key: r.key, text: r.text }
   }
+  if (r.kind === 'turnNotice') {
+    // 终局通知行：宿主只给事实（tone/message/code/turn/step），文案由页面决议
+    return {
+      kind: 'turnNotice',
+      key: r.key,
+      tone: r.tone,
+      ...(r.turn === undefined ? {} : { turn: r.turn }),
+      ...(r.step === undefined ? {} : { step: r.step }),
+      ...(r.message === undefined ? {} : { message: r.message }),
+      ...(r.code === undefined ? {} : { code: r.code }),
+    }
+  }
   return {
     kind: 'assistant',
     key: r.key,
@@ -49,7 +61,9 @@ function toChatRow(r: DshStreamRow): ChatRow {
     ...(r.turn !== undefined ? { turn: r.turn } : {}),
     ...(r.status !== undefined ? { status: r.status } : {}),
     ...(r.process !== undefined ? { process: r.process } : {}),
-    ...(r.endMsg !== undefined ? { endMsg: r.endMsg } : {}),
+    // 过程分组（上游 step-group）：宿主只给分界与每片自己的事实，怎么渲染由页面决定
+    ...(r.process?.groups === undefined ? {} : { groups: r.process.groups }),
+    ...(r.interrupted === true ? { interrupted: true } : {}),
     ...(r.seq !== undefined ? { seq: r.seq } : {}),
     ...(r.messageId !== undefined ? { messageId: r.messageId } : {}),
     // 交付文件（模型声明）：回合尾部那一区读它，缺省即本回合没有声明

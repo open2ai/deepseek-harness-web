@@ -1,4 +1,4 @@
-// 提问卡纯函数模型：从工具项派生问答记录与状态裁决（适配上游 0.1.5-rc.2）。
+// 提问卡纯函数模型：从工具项派生问答记录与状态裁决（适配上游 0.1.7-rc.2）。
 // 从 tool item（name/argsRaw/output/status/error）派生 AskQuestionCard 需要的卡数据：
 //   待答(运行中) → 等待回答；已回答(ok) → {answered}/{total} 已回答 + 问题→答案记录；
 //   ASK_CANCELLED → 已取消 + 未答问题；ASK_ABORTED → 已中断 + 未答问题。
@@ -6,6 +6,7 @@
 // 校验从严：形状不符即退让；含 best-effort 计数兜底，不猜、不编造。
 
 import { askLabels, type AskLabels } from './ask-labels'
+import { asRecord, parseJson, pendingQuestionOf } from './ask-pending'
 
 export interface QuestionEntry {
   id: string
@@ -43,21 +44,13 @@ export interface AskCard {
    * 其余情况为 undefined，用宿主给的 `item.status`。
    */
   state?: 'ok' | 'stopped'
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null
-}
-
-function parseJson(text: unknown): unknown {
-  if (typeof text !== 'string') return undefined
-  try {
-    return JSON.parse(text)
-  } catch {
-    return undefined
-  }
+  /**
+   * 可补答的调用标识（只在**限时提问超时**那一态上有）。
+   *
+   * 带上它，提问卡才能在「这条仍在投影的可补答清单里」时给出「回答」入口 —— 那条提问
+   * 已经不能从弹窗回答了（超时后只有补答通道接受作答），卡片是唯一的入口。
+   */
+  lateCallId?: string
 }
 
 function questionEntries(argsRaw: unknown): QuestionEntry[] | null {
@@ -178,6 +171,21 @@ export function askCardModel(item: {
       transcript: questions === null
         ? null
         : { mode: 'unanswered', questions: questions.map((q) => ({ id: q.id, question: q.question })), verdict: labels.interruptedDetail },
+    }
+  }
+  // 上游 0.2.0（timed 等待）：倒计时结束后结果被替换为 `{ pending: true, callId }`，
+  // 问题转入「已继续」态，行状态改写为**中性**（不是失败），文案取「已继续工作，仍可回答」/
+  // 「这道问题当时被跳过。」。此处只认结果里的 pending 标记（判据见 ask-pending.ts）。
+  const pending = pendingQuestionOf(item.output)
+  if (pending !== null) {
+    const questions = questionEntries(item.argsRaw)
+    return {
+      summary: labels.continued,
+      state: 'ok', // 工作已继续，不是失败；上游同口径
+      ...(pending.callId === undefined ? {} : { lateCallId: pending.callId }),
+      transcript: questions === null
+        ? null
+        : { mode: 'unanswered', questions: questions.map((q) => ({ id: q.id, question: q.question })), verdict: labels.continuedDetail },
     }
   }
   if (item.status === 'ok') {

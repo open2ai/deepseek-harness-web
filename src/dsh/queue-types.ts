@@ -4,9 +4,15 @@
 // 页面自己的类型工程里没有 node 类型，若经 control.ts（它 import 了带 node:crypto/node:http 的 mux）
 // 绕一圈取类型，会把整条宿主依赖链一起拉进来。与行模型拆出 `rows/types.ts` 同一个理由。
 
-/** 队列里的一条（只取本插件用得到的字段；形状随上游，不透明字段一律不解析）。 */
+/**
+ * 队列里的一条（只取本插件用得到的字段；形状随上游，不透明字段一律不解析）。
+ *
+ * **这是本插件自己的契约，不是上游形状**：上游 0.1.7 删掉了队列条目类型与 `placement` 字段，
+ * 改由 inbox 投影（两条数组：`next-turn` / `next-step`）承载。`placement` 与 `rpcId` 现由
+ * `control.ts` 从数组名与 `source` 推出来，**对外接口保持不变**，故页面与 `queue-view` 零感知。
+ */
 export interface DshQueueItem {
-    /** 条目标识：队列的增删改都以它为键。 */
+    /** 条目标识（上游 inbox 里的 `message.id`）：队列的增删改都以它为键。 */
     id: string;
     /** queued = 排到下一轮；steering = 插话（投到下一步）；context = 注入的上下文，不是用户消息。 */
     placement: 'queued' | 'steering' | 'context';

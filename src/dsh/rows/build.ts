@@ -1,4 +1,4 @@
-// 事件流的行构建（适配上游 0.1.5-rc.2）：把事件序列归约成**行模型**。
+// 事件流的行构建（适配上游 0.1.7-rc.2）：把事件序列归约成**行模型**。
 //
 // 为什么放在宿主（见 docs/design/08 §9）：
 //   - 解包（三层嵌套 / 结果文本展平 / 退出码 / 上下文投影）只此一份，就在本层（`official/`）；
@@ -11,7 +11,8 @@ import { parseExitStatus } from '../official/exit-status';
 import { fileRefsOf, hasImageBlock, imageRefsOf, readToolResult, resultText, textOnly } from '../official/result-text';
 import { readSystemPrompt } from '../official/system-prompt';
 import { toolStatusOf } from '../official/tool-status';
-import { createTurnProcessInput, deriveTurnProcess } from './turn-process';
+import { turnEndFailure, type DshTurnFailure } from '../official/turn-end';
+import { createTurnProcessInput, deriveTurnProcess, filterGroupsForChain } from './turn-process';
 import { createInboxClaimFold } from './inbox-claims';
 import type { DshPresentedFile, DshRowItem, DshStreamEvent, DshStreamRow } from './types';
 
@@ -32,6 +33,26 @@ function contentText(content: unknown): string {
             ? String((b as { text?: unknown }).text ?? '')
             : ''))
         .join('');
+}
+
+/**
+ * 这条**上下文注入**在聊天区里会不会显示出来（内容里有工具增删块才留一行）。
+ *
+ * 与页面侧 `webview/chat/core/chat-visibility.ts` 的 `hasToolChangeBlock()` **同一判据**
+ * （刻意的两处实现：宿主构建时不依赖 webview 模块图 —— 那是另一套 bundle）。
+ * 两处必须同改；上游依据：`isVisibleChatNode` 把普通 `context` 节点排除
+ * （`node.kind !== 'context'`），只有带工具增删块的那条在本插件里会渲染成"工具变更通知行"。
+ *
+ * @param content - 内容块数组（坏形认不出 → 不算）。
+ */
+function hasToolChangeBlocks(content: readonly unknown[]): boolean {
+    return content.some((block) => {
+        if (block === null || typeof block !== 'object' || Array.isArray(block)) {
+            return false;
+        }
+        const type = (block as { type?: unknown }).type;
+        return type === 'tool-addition' || type === 'tool-removal';
+    });
 }
 
 /**
@@ -247,6 +268,16 @@ export function buildRowsIncremental(
     let attemptBase: { text: string; chainLen: number; sealed: boolean; liveTextStep: number | undefined } | undefined;
 
     const activeRow = (): AssistantRow | undefined => (active >= 0 ? (rows[active] as AssistantRow) : undefined);
+    /** 一条链上出现过的步号（按行过滤 `groups` 用；见 `filterGroupsForChain`）。 */
+    const stepsOfChain = (chain: readonly DshRowItem[]): number[] => {
+        const out: number[] = [];
+        for (const item of chain) {
+            if (typeof item.step === 'number') {
+                out.push(item.step);
+            }
+        }
+        return out;
+    };
     const replaceActive = (next: AssistantRow): void => {
         rows[active] = next;
     };
@@ -292,6 +323,24 @@ export function buildRowsIncremental(
             openAssistant();
         }
         return activeRow();
+    };
+
+    /**
+     * 回合**终局通知**行（**独立行**，镜像上游 `turn-error` 与 `turn-max-tokens` 两个节点）：
+     * 只搬运事实，文案由页面决议。上游两节点都由 `turn/end`（失败那个还要 `turn/start`）建、
+     * 与本回合有无内容无关，且在 `INDEPENDENT` 集合里（不被折进过程组）；
+     * 位置 = 该回合末尾，所以调用点都在回答行收完之后。
+     */
+    const pushTurnNotice = (rowKey: number, tone: 'error' | 'warning', failure?: DshTurnFailure): void => {
+        rows.push({
+            kind: 'turnNotice',
+            key: rowKey,
+            tone,
+            ...(currentTurn === undefined ? {} : { turn: currentTurn }),
+            ...(currentStep === undefined ? {} : { step: currentStep }),
+            ...(failure?.message === undefined ? {} : { message: failure.message }),
+            ...(failure?.code === undefined ? {} : { code: failure.code }),
+        });
     };
 
     /** 思考增量：同 step+index 续接成一段，否则新起一段。 */
@@ -534,9 +583,73 @@ export function buildRowsIncremental(
         if (row === undefined) {
             return;
         }
+        // 已经有一条**准备中**的同 callId 调用（来自带名字的工具增量）→ **原地升级**它，不新增第二条：
+        // 否则「准备中 + 运行中」会变成两条行，调用数也多算一次（上游是一个节点两个阶段）。
+        if (callId !== undefined) {
+            const at = row.chain.findIndex(
+                (c) => c.kind === 'tool' && c.callId === callId && c.status === 'preparing'
+            );
+            if (at >= 0) {
+                const tool = row.chain[at] as Extract<DshRowItem, { kind: 'tool' }>;
+                const chain = [...row.chain];
+                chain[at] = { ...tool, status: 'running', argsRaw, step };
+                replaceActive({ ...row, chain });
+                flushSettledStepText();
+                return;
+            }
+        }
+        // 计数只在**新调用**上做（准备中那条已经计过；升级不算新调用）
+        if (name === 'subagent' || name.startsWith('subagent_')) {
+            subagentCount += 1;
+        } else {
+            toolCallCount += 1;
+        }
         noteChainStep(step, row.chain.length);
         replaceActive({ ...row, chain: [...row.chain, { kind: 'tool', key: key++, step, callId, name, argsRaw, status: 'running' }] });
         // 该步的工具落链了：先前「等过程成员出现再定稿」的步骤文本此刻可以补插（位置才准）
+        flushSettledStepText();
+    };
+
+    /**
+     * **准备中**的调用（带名字的工具增量，见 `applyChunk`）：算一次调用、不解析参数、不落 `argsRaw`。
+     *
+     * 同一 `callId` 只落一条；没有 `callId` 时按「同名且已在准备中」去重。
+     */
+    const notePreparingTool = (
+        name: string,
+        id: string | number | undefined,
+        step: number | undefined,
+        seq: number | undefined
+    ): void => {
+        const row = ensureActive();
+        if (row === undefined) {
+            return;
+        }
+        const callId = id === undefined ? undefined : String(id);
+        const known = row.chain.some(
+            (c) =>
+                c.kind === 'tool' &&
+                (callId === undefined ? c.name === name && c.status === 'preparing' : c.callId === callId)
+        );
+        if (known) {
+            return;
+        }
+        if (name === 'subagent' || name.startsWith('subagent_')) {
+            subagentCount += 1;
+        } else {
+            toolCallCount += 1;
+        }
+        // 准备中的调用**也是过程节点**（上游那个 tool-call 节点从此刻就存在），故照常登记过程证据。
+        // 提问工具（`ask_user_question` / `request_user_input`）**标记 `ask`**：它不参与"过程外置"
+        // （web 的可见节点里没有提问），否则"只有提问"的回合折起后会多出一行 `向用户提出了问题`。
+        processInput.entries.push({
+            kind: 'tool-call',
+            seq,
+            step,
+            ...(name === 'ask_user_question' || name === 'request_user_input' ? { ask: true } : {}),
+        });
+        noteChainStep(step, row.chain.length);
+        replaceActive({ ...row, chain: [...row.chain, { kind: 'tool', key: key++, step, callId, name, status: 'preparing' }] });
         flushSettledStepText();
     };
 
@@ -586,7 +699,7 @@ export function buildRowsIncremental(
      * （实时是 `assistant-stream` 帧的 `frame.chunk`；历史是内部标签 `assistant/chunk` 的 `data.chunk`）。
      */
     const applyChunk = (
-        chunk: { type?: string; text?: string; index?: number } | undefined,
+        chunk: { type?: string; text?: string; index?: number; name?: string; id?: string | number } | undefined,
         step: number | undefined,
         seq: number | undefined,
     ): void => {
@@ -609,6 +722,16 @@ export function buildRowsIncremental(
         const index = typeof chunk.index === 'number' ? chunk.index : undefined;
         // 推理也是「新的一步开始了」的证据：这一步的推理落链之前，先把上一步的文本固定好
         beginStep(step);
+        if (chunk.type === 'tool-call-delta') {
+            // **带名字的工具增量** = 「这个工具已经声明、参数还没到」→ 先落一条**准备中**的调用
+            //（上游 `phase: 'preparing'` 的唯一来源）。`tool/call` 一到就把它**原地升级**成运行中，
+            // 不新增第二条；历史通路没有这一步（直接从 `tool/call` 开始，上游 README 同口径）。
+            const name = typeof chunk.name === 'string' ? chunk.name : '';
+            if (name !== '') {
+                notePreparingTool(name, chunk.id, step, seq);
+            }
+            return;
+        }
         if (chunk.type === 'reasoning-delta') {
             appendReasoning(step, index, typeof chunk.text === 'string' ? chunk.text : '');
             return;
@@ -659,7 +782,9 @@ export function buildRowsIncremental(
                 if (matched || c.kind !== 'tool') {
                     return c;
                 }
-                const hit = payload.callId !== undefined ? c.callId === payload.callId : c.status === 'running';
+                const hit = payload.callId !== undefined
+                    ? c.callId === payload.callId
+                    : c.status === 'running' || c.status === 'preparing';
                 if (!hit) {
                     return c;
                 }
@@ -690,8 +815,15 @@ export function buildRowsIncremental(
     const timeOf = (event: DshStreamEvent): number | undefined =>
         typeof event.time === 'number' ? event.time : undefined;
 
-    /** 组装用量 / 用时（**计算**一律交给 official/turn-stats，这里只按页面要的形状组一份）。 */
-    const buildStats = (seq: readonly TurnLikeEvent[]): Record<string, unknown> | undefined => {
+    /**
+     * 组装用量 / 用时（**计算**一律交给 official/turn-stats，这里只按页面要的形状组一份）。
+     *
+     * @param seq - 本回合的统计序列（`turnEvents`）。
+     * @param withUsage - 要不要给**用量**（上游 `closing`：没有定稿回答就不给）。
+     *   **用时不受它影响**：`runMs` 只取 turn 起止时刻，被停止/收在工具调用上的回合照样有总用时
+     *   （2026-10-02 修：此前两者被同一个门吞掉，287 条历史行里 43 条因此既没用量也没用时）。
+     */
+    const buildStats = (seq: readonly TurnLikeEvent[], withUsage = true): Record<string, unknown> | undefined => {
         const usage = deriveTurnTokenUsage(seq);
         const facts = deriveTurnFacts(seq);
         // 本轮是哪个 turn：用时那边的 runMs 只要有 turn 起止时刻就有，
@@ -701,7 +833,7 @@ export function buildRowsIncremental(
             return undefined;
         }
         const out: Record<string, unknown> = {};
-        const u = usage.get(turnKey);
+        const u = withUsage ? usage.get(turnKey) : undefined;
         if (u !== undefined) {
             out.inputTokens = u.uncachedInputTokens;
             out.outputTokens = u.outputTokens;
@@ -845,6 +977,19 @@ export function buildRowsIncremental(
             stepLastChainIdx.clear();
             stepOrder.length = 0;
             settledStepText.clear();
+            // ⚠️ **换回合就要把上一回合还活跃的行收口**（2026-10-03 修 · `14` §24）——**必须放在**
+            // 上面那行 `segmentClosed = false` **之后**，否则会被它覆盖（第一版就踩了这个空。
+            // 现象：上一回合**没有 `turn/end`**（被插话/转向切开，真机 `36d0` 的 turn=21 正是如此）
+            // 而它的行仍被 `ensureActive()` 视作活跃 → **新回合的工具继续往旧回合的行里追加**
+            // （实测：`turn=22` 的 5 次工具全落在 `turn=21` 的行上，`turn=22` 自己一条行都没有）。
+            // 只在"确实换了回合且旧行有内容"时收口：空行不造新行（页面也会跳渲空行）。
+            {
+                const stale = activeRow();
+                if (stale !== undefined && currentTurn !== undefined && stale.turn !== currentTurn
+                    && (stale.chain.length > 0 || stale.text !== '')) {
+                    segmentClosed = true;
+                }
+            }
         }
         // 回合号以**事件自带**为准：快照窗口可能从回合中间开始（缺 `turn/start`），那之后的行
         // 还得认得出自己属于哪个回合（页面按回合归组做外层折叠，见 `turn` 字段）。
@@ -883,6 +1028,38 @@ export function buildRowsIncremental(
             continue;
         }
 
+        // `developer/message`：上游 `developerMessageDefinition` 复用**上下文行的呈现**，
+        // 故这里也入链成一条 context 项。内容全是工具增删块时，页面按上游 `ContextInjectionRow`
+        // 的规则改走「工具已更新」形态（`webview/chat/core/context-body.ts`）。
+        if (type === 'developer/message') {
+            const raw = d['message'];
+            const message = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+                ? (raw as Record<string, unknown>)
+                : undefined;
+            const content = message === undefined ? undefined : message['content'];
+            const blocks = Array.isArray(content) ? (content as unknown[]) : [];
+            const row = ensureActive();
+            if (row === undefined || blocks.length === 0) {
+                continue;
+            }
+            const source = message === undefined ? undefined : message['source'];
+            const item: DshRowItem = {
+                kind: 'context',
+                key: key++,
+                content: blocks,
+                source,
+                provenance: contextProvenance(source),
+                form: contextForm(source),
+                // 与上下文注入同因：不带步号会被 `reorderChainByStep` 恒定排到链尾
+                step: typeof d['step'] === 'number' ? (d['step'] as number) : currentStep,
+            };
+            replaceActive({ ...row, chain: [...row.chain, item] });
+            if (typeof event.seq === 'number') {
+                processInput.entries.push({ kind: 'context', seq: event.seq });
+            }
+            continue;
+        }
+
         if (type === 'user/message') {
             if (isContextMessage({ type: 'user/message', data: d })) {
                 // 系统提示词形态（instructions）不入链：它由 system/message 那条单独承载
@@ -908,13 +1085,27 @@ export function buildRowsIncremental(
                     step: typeof d['step'] === 'number' ? (d['step'] as number) : currentStep,
                 };
                 replaceActive({ ...row, chain: [...row.chain, item] });
-                // 上下文注入也是一个过程节点（上游的独立节点类型里不含它 → 落在区间内即算「过程外置」）
+                // 上下文注入也是一个过程节点（上游的独立节点类型里不含它 → 落在区间内即算「过程外置」）。
+                // ⚠️ **只有会显示出来的注入才算**（`visible`）：上游 `isVisibleChatNode` 明确把
+                // **普通 `context` 节点排除**（`node.kind !== 'context'`），只有带工具增删块的那一条
+                // 在插件里会渲染成"工具变更通知行"。把看不见的注入算进过程外置，会让"只有提问"的回合
+                // 折起后多出一行（真机取证 + 上游源码见 `14` §17）。
                 if (typeof event.seq === 'number') {
-                    processInput.entries.push({ kind: 'context', seq: event.seq });
+                    processInput.entries.push({
+                        kind: 'context',
+                        seq: event.seq,
+                        visible: hasToolChangeBlocks(Array.isArray(d['content']) ? (d['content'] as unknown[]) : []),
+                    });
                 }
                 continue;
             }
             const source = d['source'] as { kind?: string; rpcId?: string } | undefined;
+            // 只认 `kind === 'user'`。dsh 0.2.0 新增的 `'user-question-reply'`（timed 等待的迟到回答）
+            // 会落到下面的 continue（被判成上下文注入）。当前**不可达**：它的唯一生产者
+            // `userQuestions.answer` 只对 `continued` 问题生效，而 `continued` 只能由 `askTimed` 产生，
+            // `tool-ask-user` 的 `mode` 默认仍是 `legacy`（三个出厂 preset 都不带 config）。
+            // 若上游把默认改成 `timed`，本处与 `session.ts:eventIsSurfaceHuman`、`official/context-projection.ts`、
+            // `control.ts` 的人类锚点要**一起收口**（否则迟到回答会被渲染成上下文行且不写人类锚点）。
             if (source?.kind !== 'user') {
                 continue;
             }
@@ -1133,6 +1324,12 @@ export function buildRowsIncremental(
                     replaceActive({ ...row, text });
                 }
             }
+            // 消息级「这条回答被中断」：上游读的就是 `event.data.interrupted`（见 `conversation-nodes/assistant.ts:207`），
+            // 正文末尾据此出「已停止」（与上游同位）。放在最后写入，
+            // 免得被上面的正文写入用旧 row 覆盖掉。
+            if (d['interrupted'] === true) {
+                replaceActive({ ...(activeRow() ?? row), interrupted: true });
+            }
             continue;
         }
 
@@ -1142,17 +1339,18 @@ export function buildRowsIncremental(
             if (name === '') {
                 continue;
             }
-            // subagent 委派单独计数、不进工具数（与上游同口径）
-            if (name === 'subagent' || name.startsWith('subagent_')) {
-                subagentCount += 1;
-            } else {
-                toolCallCount += 1;
-            }
-            // 工具调用是过程节点，也是控制锚的「其它证据」之一
+            // subagent 委派单独计数、不进工具数（与上游同口径）。
+            // 计数落在 `appendTool` 里：那里才知道这次是**新调用**还是把「准备中」那条原地升级
+            //（升级不能重复计数 —— 准备中的调用已经算过一次）。
+            // 工具调用是过程节点，也是控制锚的「其它证据」之一。
+            // ⚠️ **提问工具要标记 `ask`** —— 这是**历史/durable 那条**登记路径（实时那条在
+            // `appendTool` 附近，两处必须一致）。漏了它，"只有提问"的回合在历史会话里仍会被判成
+            // "有过程外置" → 折起后多出一行 `向用户提出了问题`（真机现象，只发生在历史侧）。
             processInput.entries.push({
                 kind: 'tool-call',
                 seq: typeof event.seq === 'number' ? event.seq : undefined,
                 step: typeof d['step'] === 'number' ? (d['step'] as number) : undefined,
+                ...(name === 'ask_user_question' || name === 'request_user_input' ? { ask: true } : {}),
             });
             // 「一句话说完就直接调工具」是最常见的形状：上一步的文本要在**这一步的工具落链之前**归位
             // （少了它，那句说明会一直挂在正文，工具行之间永远看不到 —— 见 `beginStep`）
@@ -1218,34 +1416,40 @@ export function buildRowsIncremental(
         }
 
         if (type === 'turn/end') {
+            const reason = d['reason'] as { kind?: string } | undefined;
+            const kind = reason?.kind;
+            // 失败事实（code/message）照上游两处口径，收在 `official/turn-end.ts`：
+            // AUTH 只留 code 不留 message、`aborted` + hook(signed-out) 合成 ACCOUNT_SIGNED_OUT。
+            // 中文按 code 决议在页面（`webview/chat/core/turn-copy.ts`）。
+            const failure = turnEndFailure(reason);
+            // 终局通知（独立行）：失败（`turn-error`）或输出 token 上限（`turn-max-tokens`）——两者互斥。
+            // 先占 key，等回答行收完再 push —— 顺序 = 该回合末尾。
+            const noticeTone = failure !== undefined ? 'error' : kind === 'max-tokens' ? 'warning' : undefined;
+            const noticeKey = noticeTone === undefined ? undefined : key++;
             const row = activeRow();
             if (row === undefined) {
+                // 这一轮**没产出过内容**（请求期就失败之类）：上游只出那条独立通知行，
+                // **不造空白回答行**（原先「补一行空回答」的兜底随独立行一起作废）。
+                if (noticeTone !== undefined && noticeKey !== undefined) {
+                    pushTurnNotice(noticeKey, noticeTone, failure);
+                }
                 continue;
             }
-            const reason = d['reason'] as { kind?: string; error?: { message?: unknown; code?: unknown } } | undefined;
-            const kind = reason?.kind;
-            // 错误详情照上游的规范化口径：只取 `reason.error.message`（**不回退 `reason.message`** ——
-            // 它不是 error 分支的上游字段），缺 message 时退化为该对象的文本；
-            // 且 **`code === 'AUTH'` 时置空** —— 原始失败可能含凭据，不进 UI。
-            const errObj = reason?.error;
-            const errCode = typeof errObj?.code === 'string' ? errObj.code : undefined;
-            const endMsg =
-                kind !== 'error' || errObj === undefined
-                    ? undefined
-                    : errCode === 'AUTH'
-                      ? undefined
-                      : (stringOf(errObj.message) ?? JSON.stringify(errObj));
             // 折叠事实：口径全在 `turn-process.ts`（上游 `latestAnswer` / `processSpec` 的镜像），
             // 这里只把回合边界补进输入再取结果。
             processInput.turnEndSeq = typeof event.seq === 'number' ? event.seq : undefined;
             const processFacts = deriveTurnProcess(processInput);
             const answerStep = processFacts?.answerStep ?? undefined;
-            // 统计（用量 + 用时）的门控照上游的 `closing`：**任一已定稿步里、最后一条带非空文本的回答**
-            // —— 没有它就**整个尾部动作区都不渲染**（用量与用时一起没有），不是分别判字段有没有值。
+            // 统计（用量 + 用时）：**用时与用量各自独立**（上游同口径）——
+            //   · **用时**只看本回合的 `turn/start`/`turn/end` 时刻，**与有没有定稿回答无关**：
+            //     被停止 / 收在工具调用上的回合照样有总用时（真机实测：287 条历史行里 43 条缺用时，
+            //     根因就是这里被下面的 `closingRow` 门一起吞掉了，见 `14` §10）；
+            //   · **用量**要求「任一已定稿步里、最后一条带非空文本的回答」（上游 `closing`）：
+            //     没有它就没有用量。两者缺一即各自不显示，不互相牵连。
             // ⚠️ **与折叠判据不是同一条**：折叠要求「最后一步 + 有回答内容 + 不含工具调用」；
             // 这里**两者都不要求**（末步含工具调用、或回答不在末步，都照样给统计）。
             const closingRow = [...turnMessages].reverse().find((m) => m.hasReply);
-            const stats = closingRow === undefined ? undefined : buildStats(turnEvents);
+            const stats = buildStats(turnEvents, closingRow !== undefined);
             // 非回答步的文本进过程链：上游每步一个文本节点，而插件一回合只开一条行 ——
             // 不把它们放进链，中间步的正文就会被后来那条**整条覆盖**、整段消失（真机现象）。
             // 位置规则集中在 `appendStepText`（该步有工具时插在首个工具之前）。
@@ -1351,13 +1555,16 @@ export function buildRowsIncremental(
                 },
                 ...(stats !== undefined ? { stats } : {}),
                 ...(lastTimeMs !== undefined ? { timeMs: lastTimeMs } : {}),
-                ...(endMsg !== undefined ? { endMsg } : {}),
                 // 回答锚点：没有回答（报错/中断/末步在调工具）时不带，消费方据此隐藏「分叉」「反馈」
                 ...(replySeq === undefined ? {} : { seq: replySeq }),
                 ...(replyMessageId === undefined ? {} : { messageId: replyMessageId }),
                 // 没有过程证据时不带该字段（上游此时连控制条节点都没有）——消费方据此退回不折叠
                 ...(processFacts === null ? {} : { process: processFacts }),
             });
+            // 终局通知行排在回答行**之后**（该回合末尾）——上游 `turn-error` 的排序键就是 `turn/end` 的 seq
+            if (noticeTone !== undefined && noticeKey !== undefined) {
+                pushTurnNotice(noticeKey, noticeTone, failure);
+            }
             active = -1;
             liveStep = undefined;
             // 本回合在此收官：下一个 `turn/start` 处即可封存断点（见循环开头）。
@@ -1365,11 +1572,27 @@ export function buildRowsIncremental(
             // 过程事实与折叠计数是**回合级**的（上游一份 `turn-process` 规格，所有节点同看）：本回合若被插话
             // 切成多段行，剩下的段也要拿到同一份 —— 否则那些行没有 `process`，判据链第一道门就不过，
             // 页面按回合归组时它们不跟随折叠头的展开态（真机现象：插话过的回合「折叠又没了」）。
+            //
+            // ⚠️ **`groups` 要按行过滤**（2026-10-02 · `14` §6.3 的 (a)）：组的步号区间是**整回合**的，
+            // 而每条行只持有自己那截链 —— 直接把整份组发给短链行，那些"别的段"的组在页面侧一个项都收不到，
+            // 切片因此对不上、整条退回整回合单头（实测 30 会话 199 条带 `groups` 的行里 13 条这样）。
+            // 过滤后一个组都不剩时**不带这个键**，该行走既有的"整回合一条头"路径。
             if (processFacts !== null && currentTurn !== undefined) {
+                const turnGroups = processFacts.groups;
                 for (let i = 0; i < rows.length; i += 1) {
                     const r = rows[i];
                     if (r.kind === 'assistant' && r.turn === currentTurn && r.key !== row.key) {
-                        rows[i] = { ...r, process: processFacts, counts: { toolCallCount, messageCount, subagentCount } };
+                        const ownGroups = turnGroups === undefined
+                            ? undefined
+                            : filterGroupsForChain(turnGroups, stepsOfChain(r.chain), processFacts.answerStep);
+                        const facts = ownGroups === undefined
+                            ? (() => {
+                                  // 不带 `groups` 键（而不是给它一个空数组）：消费方据此判定"没有分组事实"
+                                  const { groups: _dropped, ...rest } = processFacts;
+                                  return rest;
+                              })()
+                            : { ...processFacts, groups: ownGroups };
+                        rows[i] = { ...r, process: facts, counts: { toolCallCount, messageCount, subagentCount } };
                     }
                 }
             }

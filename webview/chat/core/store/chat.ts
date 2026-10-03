@@ -1,4 +1,4 @@
-﻿// 聊天页核心状态(信号 store)的装配层：只做切片创建与接线，不含行为逻辑。
+// 聊天页核心状态(信号 store)的装配层：只做切片创建与接线，不含行为逻辑。
 // 行模型在 messages，输入区在 composer，目录在 catalogs，选择器在 selectors，提问弹窗在 question，
 // 会话状态在 status，全局显示偏好在 prefs，发送动作在 outbox，宿主消息归约器在 reducer；
 // 跨切片依赖全部由本层注入（切片之间不互相 import）。
@@ -90,6 +90,13 @@ export function createChatStore(host: ChatHost): ChatStore {
     // 回合级过程折叠的展开态（同回合多段行共享）
     turnFoldOpen: messages.turnFoldOpen,
     setTurnFoldOpen: messages.setTurnFoldOpen,
+    // **片**级过程折叠的展开态（B′：按片渲染时各片独立；键 `${turn}:${group.key}`）
+    groupFoldOpen: messages.groupFoldOpen,
+    setGroupFoldOpen: messages.setGroupFoldOpen,
+    // **外层折叠**（上游 `turnProcesses {turn, answerStep}`）：每回合"已唤出到哪个回答世代"
+    outerAnswerStep: messages.outerAnswerStep,
+    revealOuter: messages.revealOuter,
+    foldOuter: messages.foldOuter,
     // 发送动作
     send: outbox.store.send,
     suggestion: outbox.store.suggestion,
@@ -141,8 +148,15 @@ export function createChatStore(host: ChatHost): ChatStore {
     selectPerm: selectors.store.selectPerm,
     selectModel: selectors.store.selectModel,
     selectMode: selectors.store.selectMode,
+    openModeConfig: selectors.store.openModeConfig,
     // 提问切片
     pendingQuestion: question.store.pendingQuestion,
+    lateCalls: question.store.lateCalls,
+    lateDraft: question.store.lateDraft,
+    canAnswerLate: question.store.canAnswerLate,
+    openLateDraft: question.store.openLateDraft,
+    closeLateDraft: question.store.closeLateDraft,
+    submitLateAnswer: question.store.submitLateAnswer,
     submitQuestion: question.store.submitQuestion,
     cancelQuestion: question.store.cancelQuestion,
     // 会话状态切片
@@ -174,8 +188,14 @@ export function createChatStore(host: ChatHost): ChatStore {
     removeQueueItem: queue.store.removeQueueItem,
     steerQueueItem: queue.store.steerQueueItem,
     steerWholeQueue: queue.store.steerWholeQueue,
-    // 全局偏好（显示形态）
+    // 全局偏好（上游「设置 → 通用设置」四项）
     transcriptView: prefs.store.transcriptView,
+    performanceUsage: prefs.store.performanceUsage,
+    developerTools: prefs.store.developerTools,
+    busyEnter: prefs.store.busyEnter,
+    settledReasoningPreview: prefs.store.settledReasoningPreview,
+    liveProcessDetail: prefs.store.liveProcessDetail,
+    stepGrouping: prefs.store.stepGrouping,
     // 渲染源开关（阶段 4：宿主下发，见 docs/design/08 §11）
   }
 }

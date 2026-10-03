@@ -1,14 +1,14 @@
-// dsh 0.1.5-rc.2 会话域：follow 事件模型/快照、session/model 操作、workspace 枚举。
+// dsh 0.1.7+ 会话域：follow 事件模型/快照、session/model 操作、workspace 枚举（自 v0.1.15 起只支持 0.1.7+）。
 import * as crypto from "node:crypto";
 import { openMuxStream, rpcCall } from "./api";
 import { deriveTurnTokenUsage, deriveTurnFacts, type TurnLikeEvent } from "./official/turn-stats";
-import { expandChunkRows } from "./official/chunk-rows";
 import { expandAssistantStream } from "./official/assistant-stream";
 import { parseExitStatus } from "./official/exit-status";
 import { fileRefsOf, hasImageBlock, imageRefsOf, readToolResult, resultText, textOnly, type FileRef, type ImageRef } from "./official/result-text";
 import { toolStatusOf } from "./official/tool-status";
 import { contextForm, contextProvenance, isContextMessage } from "./official/context-projection";
 import { readSystemPrompt } from "./official/system-prompt";
+import { isEmptyProjections, projectionValuesOf } from "./projections";
 // ---------- 会话事件模型（dsh v0.1.5-rc.2 follow 载荷形状） ----------
 export type DshContentPart =
     | { type: 'text'; text: string }
@@ -57,7 +57,11 @@ export function eventText(event: RawEvent): string {
     const d = event.data ?? {};
     return textOfBlocks((d['message'] as { content?: unknown } | undefined)?.content ?? d['content']);
 }
-/** 是否为“表层人类消息”（user/message 且 source.kind === 'user'；系统注入的 plugin 消息不算）。 */
+/**
+ * 是否为“表层人类消息”（user/message 且 source.kind === 'user'；系统注入的 plugin 消息不算）。
+ * 0.2.0 新增的 `'user-question-reply'`（timed 等待的迟到回答）同样不算人类消息：它当前**不可达**
+ * （`tool-ask-user` 的 `mode` 默认 `legacy`），收口条件见 `rows/build.ts` 同处注释。
+ */
 function eventIsSurfaceHuman(event: RawEvent): boolean {
     if (event.type !== 'user/message') {
         return false;
@@ -72,6 +76,24 @@ interface FollowSnapshot {
     cursor: number;
     hasMore: boolean;
 }
+let legacyPackingReported = false;
+/**
+ * 旧代的历史 packing 行只报一次。
+ *
+ * 本插件自 v0.1.15 起只支持 dsh 0.1.7+：`{type:'chunks'}` 打包行是 0.1.5-rc.x 之前的上游存储形状
+ * （上游 0.1.5 起就改内嵌 `data.stream`，本版连同展开器一并删除）。报告而不是静默跳过，
+ * 是因为这条路的失效方式是「历史里少几行文本」——不说出来就查不到。
+ */
+function reportLegacyPackingRow(): void {
+    if (legacyPackingReported) {
+        return;
+    }
+    legacyPackingReported = true;
+    console.warn(
+        "[dsh-session] 收到 0.1.5 之前的历史 packing 行（`{type:'chunks'}`）：本插件自 v0.1.15 起只支持 dsh 0.1.7+，该行已跳过"
+    );
+}
+
 /**
  * 快照记录 → 事件（按 `seq` 排序）。
  *
@@ -83,9 +105,9 @@ export function snapshotRecordsToEvents(records: readonly unknown[]): RawEvent[]
     for (const r of records) {
         const rr = r as { type?: unknown } | undefined;
         if (rr && rr.type === 'chunks') {
-            for (const e of expandChunkRows(r)) {
-                events.push(e as RawEvent);
-            }
+            // 旧代（0.1.5-rc.x 之前）的 storage packing 行：上游 0.1.5 起已移除（增量改内嵌
+            // `data.stream`，见下）。本插件自 v0.1.15 起只支持 0.1.7+，不再展开，只报告。
+            reportLegacyPackingRow();
             continue;
         }
         const e = toRawEvent(r);
@@ -122,7 +144,7 @@ export function snapshotRecordsToEvents(records: readonly unknown[]): RawEvent[]
 }
 
 /**
- * 打开一次 session/follow 并读到 snapshot 后即取消（适配上游 0.1.5-rc.2）。
+ * 打开一次 session/follow 并读到 snapshot 后即取消（适配上游 0.1.7-rc.2）。
  * 上游：session-controller 的流式远程 `session/follow`，首帧 snapshot 形如
  *   { header, cursor, records: SessionHistoryRecord[], hasMore, projections:{ asOfSeq, values } }，
  *   之后是实时事件帧。请求必须带 assistantStream: true：该开关是 0.1.5 新增的 opt-in，
@@ -201,7 +223,7 @@ export async function readFollowSnapshot(sessionId: string, maxMessages = 5000, 
     });
 }
 /**
- * 恢复用消息历史（适配 dsh v0.1.5-rc.2）。
+ * 恢复用消息历史（适配 dsh v0.1.7-rc.2）。
  * 上游：该版本无 `session.history` RPC；本方法经 `session/follow` 快照的 records 提取
  * “消息对齐”事件（SessionHistoryRecord），仅保留表层 human user/message 与 assistant/message，
  * 供恢复会话 UI 渲染（不含系统 plugin 注入消息与增量帧）。
@@ -579,17 +601,42 @@ export async function getSessionMessages(sessionId: string): Promise<SessionMess
 }
 
 /**
- * 会话核心投影（适配 dsh v0.1.5-rc.2）。
- * 上游：无 `session.history` 投影；经 `session/follow` 快照的 projections.values 返回。
+ * 会话核心投影（适配 dsh v0.1.7-rc.2）。
+ *
+ * **两个来路，缺一不可**：
+ *   ① `session/follow` 快照里的 `projections.values` —— 快，但**不保证带**（旧会话、控制流还没基线时就是缺的）；
+ *   ② 专用 remote `session/projections` → `{ asOfSeq, values } | null` —— 任何时刻都是权威整表，
+ *      上游客户端也单独调它（`remote.session.projections({ sessionId })`）。
+ * 先问 ①，**表是空的就问 ②**：只认 ① 会让"输入框下方那两块读数"在旧会话上永远不出现
+ *（调用方 `refreshProjections` 拿到空表会直接返回，等于什么都没做）。
+ *
  * 实测键：title / goal / sessionStats / tokenUsage / permissions / modelSelection /
- * sessionListMetadata / todos / plan / contextPressure 等（rc1 web 组合注册的投影）。
+ * sessionListMetadata / todos / plan / contextPressure 等（web 组合注册的投影）。
  * 权限 / 统计 / 用量 / 标题等 UI 数据均来自这里。
  */
 export async function getSessionProjections(sessionId: string): Promise<Record<string, unknown>> {
     const snap = await readFollowSnapshot(sessionId);
-    return snap.projections;
+    if (!isEmptyProjections(snap.projections)) {
+        return snap.projections;
+    }
+    // 快照没带（或带了个空表）→ 换专用 remote 再读一次；再失败就返回空表（调用方保留已有缓存）
+    try {
+        return (await readSessionProjections(sessionId)) ?? snap.projections;
+    } catch {
+        return snap.projections;
+    }
 }
-// ---------- 会话操作（适配 dsh v0.1.5-rc.2；对应 session-controller 远程方法，载荷统一
+
+/**
+ * 读**会话投影基线**（专用 remote；会话不存在时服务端返回 null）。
+ * @param sessionId - 会话 id。
+ * @returns 投影整表；形状不符 / 服务端返回 null 时 undefined。
+ */
+export async function readSessionProjections(sessionId: string): Promise<Record<string, unknown> | undefined> {
+    const value = await rpcCall<unknown>('session.projections', { sessionId });
+    return projectionValuesOf(value);
+}
+// ---------- 会话操作（适配 dsh 0.1.7+；对应 session-controller 远程方法，载荷统一
 //   args{ request: Session*Request }，契约见 docs/design/04） ----------
 /**
  * 新建 / **收养**会话（上游 `session/create`；`workspaceId` 与 `cwd` 二选一）→ sessionId。
@@ -615,7 +662,7 @@ export interface DshImageAttachment {
 }
 
 /**
- * 往前翻**一页**历史（适配上游 0.1.5-rc.2 的 `session.page`，见 `SessionPageRequest`）。
+ * 往前翻**一页**历史（适配上游 0.1.7-rc.2 的 `session.page`，见 `SessionPageRequest`）。
  *
  * 上游客户端 `ISession.loadOlder()` 走的就是这条路：`events.prepend({ beforeSeq, maxMessages })`
  * —— 以**当前窗口的第一条事件序号**为 `beforeSeq`，取它之前的一页；返回的 `hasMore` 说明再往前还有没有。
@@ -741,10 +788,15 @@ export async function selectModel(sessionId: string, provider: string, model: st
     });
 }
 /**
- * 模型目录（适配 dsh v0.1.5-rc.2）。
+ * 模型目录（适配 dsh v0.1.7-rc.2）。
  * 上游接口：session-controller 远程方法 `session/modelCatalog`（无参，payload { args:{} }），
  * 返回 ModelCatalog { default, routableProviders, groups[{ id,name,models[{id,name,description,
  * reasoning:{efforts[]}}] }], failures }（契约见 docs/design/04）。
+ * ⚠️ 口径变化（rc.2）：`routableProviders` 由「**已注册**的 provider」（含空目录）
+ * 改为「**至少有一个可用模型**的 provider」——所以它不再能用来判断「某 provider 是否已配置」。
+ * 本插件未消费该字段（只透传），这里只是留痕，避免以后按旧语义拿它做门控。
+ * 另：rc.2 起 base 组合把 DeepSeek 拆成 `deepseek-official`(API key) 与 `deepseek-account`(账号)
+ * 两条 provider，故 `groups` 可能比 rc.1 多一组 —— UI 按 `groups[]` 动态渲染，无需硬编码。
  * “当前会话选择的模型”不在这里：由 modelSelection 投影给出（见 dshService.listModels）。
  */
 export async function modelCatalog(): Promise<{
@@ -775,7 +827,7 @@ export interface WorkspaceItem {
     updatedAt?: string;
 }
 /**
- * 工作区列表（适配 dsh v0.1.5-rc.2）。
+ * 工作区列表（适配 dsh v0.1.7-rc.2）。
  * 该版本的 workspace-controller 不再提供独立的 `workspace.list` 远程方法；
  * 枚举改由流式 remote `workspace/follow`（斜杠端点，走 /api/remote.mux）提供：
  * 打开流后服务端首帧 value 形如

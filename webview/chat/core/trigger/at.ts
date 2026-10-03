@@ -1,4 +1,4 @@
-// "@" 引用触发器：与 "/" 指令同套 trigger 框架的另一个 source（适配上游 0.1.5-rc.2）。
+// "@" 引用触发器：与 "/" 指令同套 trigger 框架的另一个 source（适配上游 0.1.7-rc.2）。
 // 行首或空白(含换行)后输入 @（或 @"…"）唤起「文件与文件夹 / 对话」候选，数据源与上游同名：
 //   fileReferences/list（返回 {path,kind}）、sessionReferenceResolver/candidates（返回含 mention）。
 // 选中后在光标处插入上游 mention 文本（发送时只是正文文本，dsh 宿主 pre-step 会解析会话/文件引用）：

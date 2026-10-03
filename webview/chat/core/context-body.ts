@@ -1,4 +1,4 @@
-// 上下文注入行的展开体：按展示形态解析注入内容，供注入行渲染（适配上游 0.1.5-rc.2）。
+// 上下文注入行的展开体：按展示形态解析注入内容，供注入行渲染（适配上游 0.1.7-rc.2）。
 // 只做「数据提取 + 结构描述」，把模型读到的 content/source 解析成可渲染的分支；
 // 具体 htm 渲染在 ContextInjectionRow 组件里；解析规则不自行发明。
 
@@ -200,10 +200,62 @@ export type ContextBodySpec =
   | { kind: 'notice'; runs: ContentRun[] }
   | { kind: 'relay'; sender: string; runs: ContentRun[] }
   | { kind: 'recall'; sessions: RecalledSession[]; runs: ContentRun[] }
+  | { kind: 'toolChanges'; added: string[]; removed: string[] }
+
+/** 工具增删（rc.2 的 `developer/message` 内容块）。 */
+export interface ToolChange {
+  added: string[]
+  removed: string[]
+}
+
+/**
+ * 读一条上下文内容里的工具增删 —— 与上游 `ContextInjectionRow` 同口径：
+ * **内容非空且每一块都是** `tool-addition`/`tool-removal`（且带 `toolName`）才算工具变更行，
+ * 否则它只是一条普通上下文注入（不能因为"含一块工具变更"就把整行改形态）。
+ *
+ * 注意这是**形态**判据；"这一行显不显示"是另一条（只要求含工具增删块），在 `core/chat-visibility.ts`。
+ */
+export function toolChange(content: readonly unknown[]): ToolChange | null {
+  if (content.length === 0) return null
+  const added: string[] = []
+  const removed: string[] = []
+  for (const block of content) {
+    const record = asRecord(block)
+    const name = record === null ? undefined : record['toolName']
+    if (record === null || typeof name !== 'string') return null
+    if (record['type'] === 'tool-addition') added.push(name)
+    else if (record['type'] === 'tool-removal') removed.push(name)
+    else return null
+  }
+  return { added, removed }
+}
+
+/** 工具变更行的标题：单块点名（`已添加工具：X`），多块 `工具已更新`；非工具变更行返回 null（走角色标题）。 */
+export function toolChangeTitle(content: readonly unknown[], labels: ContextLabels): string | null {
+  const change = toolChange(content)
+  if (change === null) return null
+  if (change.added.length + change.removed.length === 1) {
+    return change.added.length === 1 ? labels.toolAdded(change.added[0]) : labels.toolRemoved(change.removed[0])
+  }
+  return labels.toolsUpdated
+}
+
+/** 收起行的摘要：单块时标题已点名，不再重复；多块按上游给数量。 */
+function toolChangeSummary(change: ToolChange): string | null {
+  const labels = contextLabels()
+  const total = change.added.length + change.removed.length
+  if (total <= 1) return null
+  if (change.added.length > 0 && change.removed.length > 0) {
+    return labels.toolsChanged(change.added.length, change.removed.length)
+  }
+  return change.added.length > 0
+    ? labels.toolsAddedCount(change.added.length)
+    : labels.toolsRemovedCount(change.removed.length)
+}
 
 export interface ContextBodyResult {
-  /** 实际渲染成的 form（null = opaque 兜底） */
-  rendered: KnownContextForm | null
+  /** 实际渲染成的 form（null = opaque 兜底）；`'tool-changes'` 是**内容决定**的形态，非生产者声明 */
+  rendered: KnownContextForm | 'tool-changes' | null
   /** 收起行的一句话说明；仅 notice 记录时有值 */
   summary: string | null
   body: ContextBodySpec
@@ -279,6 +331,15 @@ export function contextBody(
 
 /** 便捷：把一条 context 行（content/source/form）解析成 UI 渲染所需的全部结构。 */
 export function contextView(form: string | null, content: readonly unknown[], source: unknown): ContextBodyResult {
+  // 工具变更形态**由内容决定**（与 form 无关）—— 上游 `ContextInjectionRow` 同口径，先于 form 判定。
+  const change = toolChange(content)
+  if (change !== null) {
+    return {
+      rendered: 'tool-changes',
+      summary: toolChangeSummary(change),
+      body: { kind: 'toolChanges', added: change.added, removed: change.removed },
+    }
+  }
   const known: KnownContextForm | null =
     form === 'instructions' || form === 'catalog' || form === 'snapshot' || form === 'notice' || form === 'relay' || form === 'recall'
       ? form

@@ -31,6 +31,8 @@ import {
     type DshApproval,
     type DshContentPart,
     type DshQuestionRequest,
+    lateAnswerArgs,
+    type DshLateAnswerItem,
     type SessionMessageItem,
     rpcCall,
     runSessionCommand,
@@ -50,6 +52,10 @@ import {
     followControl,
     type DshQueueItem,
     type DshControlHandle,
+    // 0.1.7 起 permissions 投影只剩 currentValue，选项目录在进程级 remote —— 见 currentProjections
+    withPermissionOptions,
+    readPermissionPresetCatalog,
+    type DshPermissionPresetOption,
     updateQueue as updateQueueRpc,
     type DshPromptMode,
     type DshQueueAction,
@@ -61,11 +67,13 @@ import {
     type DshContextFacts,
     listAgentPresets as listAgentPresetsRpc,
     selectAgentPreset as selectAgentPresetRpc,
-    readTranscriptView as readTranscriptViewRpc,
-    getCachedTranscriptView as getCachedTranscriptViewRpc,
-    subscribeTranscriptView as subscribeTranscriptViewRpc,
+    readAgentPreset as readAgentPresetRpc,
+    readChatPrefs as readChatPrefsRpc,
+    getCachedChatPrefs as getCachedChatPrefsRpc,
+    subscribeChatPrefs as subscribeChatPrefsRpc,
     type DshAgentPresetRoster,
-    type DshTranscriptView,
+    type DshAgentPresetDocument,
+    type DshChatPrefs,
     DshRpcError,
 } from '../dsh';
 import { sessionDisplayTitle } from '../dsh/official/session-title';
@@ -273,6 +281,19 @@ export class DshService {
      * 会跟着变（从前它们只在 `chatInfo` 快照时刷一次，所以整轮都不动）。
      */
     private projectionsBySession = new Map<string, Record<string, unknown>>();
+    /**
+     * 进程级权限预设目录（dsh 0.1.7 起由 `permissionPresets/catalog` 提供）。
+     *
+     * 为什么这里也留一份：`permissions` 投影在 0.1.7 只剩 `currentValue`，选项目录在**进程级**；
+     * 而本类还有第二条投影来路 —— `session/follow` 快照（`refreshProjections` / `seedProjections`），
+     * 它绕过 `control.ts` 的拼接。两条来路都要拼同一份目录，否则「换会话」时权限选择器又变回空。
+     *
+     * `undefined` = 还没读到（或该 dsh 版本没有这条 remote，如 0.1.5-rc.2）：
+     * 此时原样透传，走该代投影自带的 options。
+     */
+    private permissionCatalog: DshPermissionPresetOption[] | undefined;
+    /** 进程级权限目录是否已尝试读取（失败也不反复重试，避免每次投影推送都打一次 RPC）。 */
+    private permissionCatalogRequested = false;
     /** 本会话收到的事件（保结构）：**行构建的唯一输入**；换会话时清空。 */
     private streamEvents: DshStreamEvent[] = [];
     /** 事件窗口的当前实例（不按条数裁剪；见 `history-window.ts` 的类注释）。 */
@@ -1115,6 +1136,9 @@ export class DshService {
                     sessionId: request.agentId,
                     toolName: request.toolName,
                     description: request.reason, // reason 为真实原因；无则 UI 用 toolName 拼提示
+                    // 本地化展示文案（dsh 0.1.7-rc.2 新增）：与 description 并行透传，
+                    // 由 webview 决定用哪门语言（宿主不代选，见 stream.ts 的 DshApproval 注释）
+                    ...(request.displayReason === undefined ? {} : { displayReason: { ...request.displayReason } }),
                 });
             },
             onQuestion: (request) => {
@@ -1126,6 +1150,7 @@ export class DshService {
                     rpcId: request.eventId,
                     sessionId: request.agentId,
                     questions: request.questions,
+                    ...(request.callId === undefined ? {} : { callId: request.callId }),
                 });
             },
             // 断流：这些提问此刻已无法应答，让 UI 关掉弹窗
@@ -1179,7 +1204,32 @@ export class DshService {
             onProjection: (sessionId, key, value) => {
                 this.noteProjection(sessionId, key, value);
             },
+            onLegacyHost: (detail) => {
+                this.reportLegacyHost(detail);
+            },
         });
+    }
+
+    /** 旧代主机只告警一次（这条流每帧都可能带旧承载，逐帧报会把用户刷屏）。 */
+    private legacyHostReported = false;
+    /**
+     * 连到的 dsh 是旧代（`dsh-0.1.5-rc.x` 那一代的队列承载）时的**一次性**告警。
+     *
+     * 本插件自 v0.1.15 起只支持 dsh 0.1.7+、不再双形状嗅探：必须让用户知道"为什么队列不动"，
+     * 而不是让他面对一个永远空着的队列卡（历史上这一层的失效方式就是静默的）。
+     *
+     * 两份输出各归其位：`console.warn` 打 `control.ts` 给的那行原文（**只有开发者看得到**，
+     * 要开扩展宿主的开发者工具 —— 见 `extension.ts` 顶部同样的说明）；给用户的 `showWarningMessage`
+     * 是**写死的固定文案**，不带帧名/字段名，也**不猜对端版本**（判定只看"帧里带着旧承载"，
+     * 对端到底是哪版推不出来）。
+     */
+    private reportLegacyHost(detail: string): void {
+        if (this.legacyHostReported) {
+            return;
+        }
+        this.legacyHostReported = true;
+        console.warn(`[dsh] 当前 dsh 版本过旧：${detail}`);
+        void vscode.window.showWarningMessage('dsh 版本过低，请升级至 dsh-0.1.7-rc.2 及以上后重启服务。');
     }
 
     /** 当前会话的队列整表（页面就绪、动作回帧后补发）。 */
@@ -1193,10 +1243,54 @@ export class DshService {
         this.onQueue?.(this.currentSessionId ?? '', this.currentQueue());
     }
 
-    /** 当前会话的投影整表（页面就绪、会话切换、任意投影变化时）。 */
+    /**
+     * 当前会话的投影整表（页面就绪、会话切换、任意投影变化时）。
+     *
+     * `permissions` 在这里**补一次**进程级目录的拼接：`session/follow` 快照那条来路
+     * （`seedProjections`）不走 `control.ts`，而 0.1.7 起的投影只有 `currentValue` ——
+     * 不在这里拼，换一次会话权限选择器就又变回空。`control.ts` 那条来路已拼过，
+     * 重复拼是幂等的（同样的目录 + 同样的 currentValue）。
+     */
     currentProjections(): Record<string, unknown> {
         const sid = this.currentSessionId;
-        return sid === undefined ? {} : this.projectionsBySession.get(sid) ?? {};
+        if (sid === undefined) {
+            return {};
+        }
+        const values = this.projectionsBySession.get(sid);
+        if (values === undefined) {
+            return {};
+        }
+        const permissions = values['permissions'];
+        if (permissions === undefined) {
+            return values;
+        }
+        this.ensurePermissionCatalog();
+        return { ...values, permissions: withPermissionOptions(permissions, this.permissionCatalog) };
+    }
+
+    /**
+     * 懒读一次进程级权限目录（dsh 0.1.7 的 `permissionPresets/catalog`）。
+     *
+     * 只读一次、失败不重试：0.1.5-rc.2 上这条 remote 不存在，重试只会反复打 404 噪音；
+     * 目录随贡献变化时由 `control.ts` 的 emit 订阅负责重读并补发。
+     */
+    private ensurePermissionCatalog(): void {
+        if (this.permissionCatalogRequested) {
+            return;
+        }
+        this.permissionCatalogRequested = true;
+        void readPermissionPresetCatalog()
+            .then((catalog) => {
+                if (catalog === undefined) {
+                    return;
+                }
+                this.permissionCatalog = catalog.options;
+                // 目录晚于首次推送到达：补推一次，让已经打开的页面拿到选项。
+                this.pushProjections();
+            })
+            .catch(() => {
+                // 老版本无此前端：保持 undefined，走投影自带的 options。
+            });
     }
 
     /** 把当前会话的投影整表下发给页面（整表语义，见 onProjections）。 */
@@ -1209,6 +1303,19 @@ export class DshService {
             return;
         }
         this.onProjections(sid, this.currentProjections());
+    }
+
+    /**
+     * 当前会话投影表里**有哪些键**（诊断用：输入框下方那两块读数全来自投影，
+     * 真机排查「统计/用量不显示」时先看这几个键到没到）。
+     * @returns 键名（按字典序）；没有会话时为空数组。
+     */
+    projectionKeys(): string[] {
+        const sid = this.currentSessionId;
+        if (sid === undefined) {
+            return [];
+        }
+        return Object.keys(this.projectionsBySession.get(sid) ?? {}).sort();
     }
 
     /**
@@ -2491,13 +2598,25 @@ export class DshService {
 
     // ---------- 上游投影 / 模型 / 权限 ----------
 
-    /** 读取当前会话的上游投影（sessionStats / tokenUsage / permissions / title 等） */
+    /**
+     * 读取当前会话的上游投影（sessionStats / tokenUsage / permissions / title 等）。
+     *
+     * `permissions` 这里必须拼上进程级目录再返回 —— **页面看到的 chatInfo.projections 就是本方法的返回值**
+     * （`extension.postChatInfo` 直接把它塞进 chatInfo），而 0.1.7 起的投影只有 `currentValue`。
+     * 只改 `currentProjections()` 是不够的：那条只喂「会话统计 / 上下文环」的整表推送，与 chatInfo 各走一条路。
+     */
     async getProjections(): Promise<Record<string, unknown>> {
         const sid = this.currentSessionId;
         if (!sid) {
             return {};
         }
-        return getSessionProjections(sid);
+        const projections = await getSessionProjections(sid);
+        const permissions = projections['permissions'];
+        if (permissions === undefined) {
+            return projections;
+        }
+        this.ensurePermissionCatalog();
+        return { ...projections, permissions: withPermissionOptions(permissions, this.permissionCatalog) };
     }
 
     /**
@@ -2611,21 +2730,29 @@ export class DshService {
     }
 
     /**
-     * 读上游「设置 → 对话显示」（紧凑/标准）。
+     * 读某个模式声明的**子插件组合**（F9 的「查看配置」，上游 `agentPresets/read`，dsh 0.1.7 新增）。
+     * 仅供查看：上游标注 for viewing only，插件不据此做生效判断、也不写回。
+     */
+    async readAgentPreset(agentPreset: string): Promise<DshAgentPresetDocument> {
+        return readAgentPresetRpc(agentPreset);
+    }
+
+    /**
+     * 读上游「设置 → 通用设置」四项偏好（工作步骤展示 / 性能与用量 / 代码工作工具 / 繁忙时的发送行为）。
      * 只读透传：读不到返回 undefined，调用方应保留上次值，别拿它当默认值（那会把读失败伪装成用户选择）。
      */
-    async readTranscriptView(): Promise<DshTranscriptView | undefined> {
-        return readTranscriptViewRpc();
+    async readChatPrefs(): Promise<DshChatPrefs | undefined> {
+        return readChatPrefsRpc();
     }
 
-    /** 最近一次读到的对话显示形态（新面板回填用，省一次 RPC） */
-    getCachedTranscriptView(): DshTranscriptView | undefined {
-        return getCachedTranscriptViewRpc();
+    /** 最近一次读到的四项偏好（新面板回填用，省一次 RPC） */
+    getCachedChatPrefs(): DshChatPrefs | undefined {
+        return getCachedChatPrefsRpc();
     }
 
-    /** 订阅上游「设置 → 对话显示」变更（emit 实时跟随 + 重连后重读对齐）；返回退订函数 */
-    subscribeTranscriptView(cb: (value: DshTranscriptView) => void): () => void {
-        return subscribeTranscriptViewRpc(cb);
+    /** 订阅上游「设置 → 通用设置」四项偏好变更（emit 实时跟随 + 重连后重读对齐）；返回退订函数 */
+    subscribeChatPrefs(cb: (prefs: DshChatPrefs) => void): () => void {
+        return subscribeChatPrefsRpc(cb);
     }
 
     /** 切换当前会话的 agent 模式（仅空白会话可切，后端会拒绝已开始的会话） */
@@ -2647,16 +2774,25 @@ export class DshService {
         return readSessionAttachment(sid, attachmentId);
     }
 
-    /** 切换权限预设：执行 /permission 斜杠命令（走 commands/execute 斜杠端点，勿用 session.prompt 文本） */
-    async setPermissionPreset(preset: string): Promise<void> {
+    /**
+     * 切换权限预设：执行 `/permission` 斜杠命令（走 commands/execute 斜杠端点，勿用 session.prompt 文本）。
+     *
+     * 返回值是上游的**结算文案**（成功为 `preset <name>`）。当前调用方不用它 —— 上游
+     * `chat-visibility.ts` 的 `isVisibleChatNode()` **显式把权限命令排除在 chat 行之外**，
+     * 所以切权限在对话区本就不该有任何回显。保留返回值是为了把上游契约写在这里，
+     * 免得后人再拿 `result.text` 去拼一行。
+     */
+    async setPermissionPreset(preset: string): Promise<string> {
         if (!(await this.ensureRunning())) {
             throw new Error('DSH 服务不可用，无法切换权限');
         }
         const sid = await this.getSession();
         const exec = await runSessionCommand(sid, `/permission ${preset}`);
+        const text = exec?.result?.text;
         if (!exec || exec.result?.kind === 'error') {
-            throw new Error(exec?.result?.text || `未知权限预设：${preset}`);
+            throw new Error(text || `未知权限预设：${preset}`);
         }
+        return text ?? `preset ${preset}`;
     }
 
     /** 对话：发消息到共享会话并等回复（正文从构建出的行里取，见 askStreaming）。 */
@@ -2713,9 +2849,9 @@ export class DshService {
             text: row?.text ?? '',
             stats: (row?.stats ?? {}) as DshReplyStats,
             ...(row?.timeMs === undefined ? {} : { time: row.timeMs }),
-            ...(row?.status === undefined
-                ? {}
-                : { end: { kind: row.status, ...(row.endMsg === undefined ? {} : { message: row.endMsg }) } }),
+            // 失败原因不再挂在回答行上（它是**独立行**，镜像上游 `turn-error`），所以这里只带终止档位；
+            // 本条 payload 属**已退役**的旧 `chatDone` 通路（`extension.ts` 的调用点不接返回值），保留形状即可
+            ...(row?.status === undefined ? {} : { end: { kind: row.status } }),
             ...(row === undefined ? {} : { counts: row.counts }),
         };
     }
@@ -2730,6 +2866,30 @@ export class DshService {
         if (!handled) {
             throw new Error('未找到对应的提问（可能已过期或已在网页端处理），请到 dsh 网页面板确认');
         }
+    }
+
+    /**
+     * **补答**一道限时提问（timed 提问超时后转入的「已继续」态）。
+     *
+     * 与 `answerQuestion` 是**两条通道**，别混：那条走 `$events` 瀑布（当前这一轮的阻塞式提问应答），
+     * 这条走平铺 args 的远端调用，补答会被投递成**新一轮用户消息**。
+     * @param callId - 该次提问的调用标识（来自会话投影 `userQuestions` 的 `active`）。
+     * @param answers - 每条作答，上游要求恰好覆盖该次提问的每道题一次。
+     * @param sessionId - 会话 id；缺省用当前会话（页面不单独持有会话 id）。
+     * @returns `true` = 已被受理（回复排队等待投递）；`false` = 该题已不是可补答态（**不是错误**）；
+     *          `undefined` = 远端没有给出布尔（保守按已受理处理）。
+     */
+    async answerLateQuestion(
+        callId: string,
+        answers: readonly DshLateAnswerItem[],
+        sessionId?: string
+    ): Promise<boolean | undefined> {
+        const target = sessionId === undefined || sessionId === '' ? this.currentSessionId : sessionId;
+        if (target === undefined || target === '') {
+            throw new Error('当前没有打开的会话，无法补答这道提问');
+        }
+        const value = await rpcCall<boolean | undefined>('userQuestions/answer', lateAnswerArgs(target, callId, answers));
+        return typeof value === 'boolean' ? value : undefined;
     }
 
     /** 取消 ask_user_question（rc.1 以 UserQuestionError/ASK_CANCELLED 拒绝该 waterfall） */

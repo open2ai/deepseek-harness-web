@@ -2,7 +2,7 @@
   "name": "deepseek-harness-web",
   "displayName": "DeepSeek Harness Web",
   "description": "DeepSeek Harness 插件",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "sparks-dev",
   "icon": "assets/icon.png",
   "engines": {
@@ -194,7 +194,7 @@
   },
   "scripts": {
     "vscode:prepublish": "pnpm run package",
-    "compile": "pnpm run check-types && pnpm run lint && pnpm run build:chat && node esbuild.js",
+    "compile": "pnpm run check-types && pnpm run lint && pnpm run verify:contracts && pnpm run build:chat && node esbuild.js",
     "build:chat": "node scripts/build-chat.mjs",
     "vsix": "pnpm run package && node scripts/vsix.mjs",
     "watch": "npm-run-all -p watch:*",
@@ -206,6 +206,9 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
     "check-types": "tsc --noEmit && tsc --noEmit -p webview/chat",
+    "verify:control": "node scripts/verify-control-frames.mjs",
+    "verify:permission": "node scripts/verify-permission-merge.mjs",
+    "verify:contracts": "pnpm run verify:control && pnpm run verify:permission",
     "lint": "eslint src",
     "test": "vscode-test"
   },

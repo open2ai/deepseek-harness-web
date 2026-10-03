@@ -1,4 +1,4 @@
-// web 卡纯函数模型：从 tool item 派生 fetch / search 两种卡（适配上游 0.1.5-rc.2）。
+// web 卡纯函数模型：从 tool item 派生 fetch / search 两种卡（适配上游 0.1.7-rc.2）。
 // 从 tool item（name/argsRaw/meta/status）派生 WebBlock 需要的卡数据：
 //   web_fetch → {kind:'fetch', url, statusCode, truncated}（HTTP 状态码来自 tool/result.data.meta.statusCode）
 //   web_search → {kind:'search', answer?, sources[], truncated}

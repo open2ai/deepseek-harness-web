@@ -1,6 +1,6 @@
 // ⚠️ CORE-COUPLED（核心耦合；目录名 official，本仓库注释里称“核心”）——只映射上游核心规则，勿混入插件自有逻辑；核心变化只改本目录。
 // 上游 0.1.5 起，流式增量不再是独立事件，而是内嵌进结算事件（assistant/message、
-// assistant/attempt）的 data.stream。本文件是该载体的展开镜像（适配上游 0.1.5-rc.2）
+// assistant/attempt）的 data.stream。本文件是该载体的展开镜像（适配上游 0.1.7-rc.2）
 // 的 expandAssistantStream，把内嵌记录还原成带时刻的增量（第 k 个成员的时刻 = time0 加上前 k 项 dt 之和）。
 // 与上游的差异只有一处：上游对不合形状的记录抛错，这里跳过——宿主不能因一条脏记录中断整段历史。
 

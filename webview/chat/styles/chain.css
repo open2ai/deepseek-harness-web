@@ -9,12 +9,79 @@
     border-radius: 6px; cursor: pointer; font: inherit; font-size: 11.5px; text-align: left;
   }
   .chain-summary:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
-  .chain-summary-ico { font-size: 12px; flex: none; color: var(--vscode-charts-blue, #4daafc); }
+  /* 头部左侧那 16px 位：**活动图标与箭头叠在同一处**（上游同款）——
+     默认显示活动图标；悬停或键盘聚焦时图标淡出、箭头淡入；**展开态常显箭头**（并加 8px 底部留白）。
+     两枚 glyph 都绝对定位在同一格，所以行宽不会因为切换而跳动。 */
+  .chain-summary-lead {
+    position: relative; flex: none; width: 16px; height: 16px;
+    display: inline-flex; align-items: center; justify-content: center; color: inherit;
+  }
+  .chain-summary-lead svg { width: 14px; height: 14px; display: block; }
+  /* 尺寸档位与上游一致：属性写 16 的图标画 16px（其余 14px），所以图标不会被统一压成一种大小 */
+  .chain-summary-lead svg[width='16'] { width: 16px; height: 16px; }
+  /* 思考那枚是灯泡 codicon（有意保留），按同一档位给字号 */
+  .chain-summary-lead .codicon { font-size: 14px; line-height: 1; }
+  .chain-summary-act, .chain-summary-chev {
+    position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center;
+    transition: opacity 100ms ease;
+  }
+  .chain-summary-act { opacity: 1; }
+  .chain-summary-chev { opacity: 0; }
+  .chain-summary:is(:hover, :focus-visible) .chain-summary-act { opacity: 0; }
+  .chain-summary:is(:hover, :focus-visible) .chain-summary-chev { opacity: 1; }
+  .chain-summary[aria-expanded='true'] .chain-summary-act { opacity: 0; }
+  .chain-summary[aria-expanded='true'] .chain-summary-chev { opacity: 1; }
+  .chain-summary[aria-expanded='true'] { padding-bottom: 8px; }
+  @media (prefers-reduced-motion: reduce) {
+    .chain-summary-act, .chain-summary-chev { transition: none; }
+  }
   .chain-summary-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .chain-summary-chev { font-size: 12px; flex: none; opacity: 0.7; transition: transform 0.12s ease; }
   /* 明细容器：行距只由各行自身的上下 margin 决定（不设 gap），
      过程行之间 = 2 + 2 = 4px，折叠头到首行 = margin-top 2 + 2 = 4px，链内统一 4px。 */
   .chain-detail { margin-top: 2px; display: flex; flex-direction: column; }
+  /* 分组体（上游 `.body`）：封顶 `min(400px, 50vh)` 后**自己滚**，两端用 24px 渐隐提示还有内容。
+     渐隐只在**该端确实还有内容**时挂（判据 `core/scroll-edges.ts`）；不分组（verbose）时不加
+     `data-group-body`，于是不封顶、不渐隐 —— 与上游 `expandedBody` 同。 */
+  .chain-detail[data-group-body] {
+    max-height: min(400px, 50vh);
+    overflow-y: auto;
+    overscroll-behavior-y: auto;
+    scrollbar-gutter: stable;
+  }
+  .chain-detail[data-scroll-up] {
+    mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%);
+  }
+  .chain-detail[data-scroll-down] {
+    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%);
+  }
+  .chain-detail[data-scroll-up][data-scroll-down] {
+    mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+  }
+  /* 过程链里的一**片**（B′：上游一个 step-group = 一个 seat）。片本身只是分组容器（头 + 明细），
+     不画自己的框；片内明细的行距仍由各行自身的上下 margin 决定（与整回合路径同一份节奏）。
+     片之间不加 gap/margin —— 紧邻两片自己的 margin（明细首尾各 2px）就够，加了会双倍。 */
+  .chain-group { min-width: 0; }
+  /* **完成态摘要行**（上游回合级过程控制节点：`已完成，用时 {d}` + 行尾 chevron + 下面一条细线）：
+     形状按真机截图 —— 文案在左、chevron **紧贴文案之后**（不是贴右边缘）、下面一条贯穿内容宽度的细线。
+     它不是折叠头：不参与"片数 = 头数"，但它是**回合级**的展开/收起开关（与片内的头互不干扰）。
+     细线走 `--dsh-hairline`（主题契约，见 docs/design/07 §0）—— 用 `--vscode-panel-border` 在浅色主题会消失。 */
+  .chain-done { margin: 2px 0 4px; }
+  .chain-done-btn {
+    display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+    border: none; background: none; padding: 2px 0; cursor: pointer; font: inherit;
+    color: var(--vscode-descriptionForeground, #999); font-size: 11.5px; text-align: left;
+  }
+  /* 上游 `TurnProcessNodeView.module.css`：`disabled` 只把光标改回默认（**不压暗**），
+     折不动时按钮仍在、只是没有 chevron 也不可点。 */
+  .chain-done-btn:disabled { cursor: default; }
+  .chain-done-btn:hover:not(:disabled) .chain-done-text { color: var(--vscode-foreground, #ddd); }
+  .chain-done-text { white-space: nowrap; }
+  .chain-done-chev { flex: none; display: inline-flex; align-items: center; }
+  .chain-done-chev svg { width: 12px; height: 12px; display: block; }
+  .chain-done-rule { height: 0.5px; margin-top: 2px; background: var(--dsh-hairline); }
   /* 非回答步的输出文本（过程文本）：上游是独立的回答节点，插件一回合只开一条行 → 放进过程链显示。
      用正文色与正常行高，避免它被当成「次要信息」而看不出那是模型当时说的话。 */
   .chain-proc-text {
@@ -584,6 +651,10 @@
   .ask-answer-line { display: block; }
   .ask-skipped { color: var(--vscode-descriptionForeground, #888); }
   .ask-verdict { color: var(--vscode-foreground, #ddd); }
+  /* 补答入口（限时提问超时后）：卡片是唯一作答入口，做成低调的文字按钮，不抢问答记录的主位 */
+  .ask-late { display: flex; flex-direction: row; }
+  .ask-late-answer { font: inherit; font-size: 12px; color: var(--vscode-textLink-foreground, #4daafc); background: none; border: 0.5px solid var(--dsh-hairline); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  .ask-late-answer:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
   .ask-question-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding-left: 20px; }
   /* 待答交互（官方问答对话卡观感） */
   .ask-pending { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 4px 4px; padding: 16px 20px; border: 0.5px solid var(--dsh-hairline); border-radius: 12px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.2)); }

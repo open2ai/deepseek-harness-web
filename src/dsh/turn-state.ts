@@ -1,11 +1,11 @@
-// 「这一轮还在跑吗」这件事的**事件级**判据（纯函数，适配上游 0.1.5-rc.2）。
+// 「这一轮还在跑吗」这件事的**事件级**判据（纯函数，适配上游 0.1.7-rc.2）。
 //
 // 为什么单列：状态行（「深度求索中…」）与停止按钮都挂在这个布尔值上，而它的两个输入端
 // （`session/follow` 的事件、`session/control` 的 `turnBoundary` 投影）各来自一条流 ——
 // 任何一端说错了，用户看到的就是「状态字忽然消失」或「停止按钮不复位」。判据能被脚本
 // 直接喂事件驱动（`tmp/_turn.state.test.mjs`），比在真机上试快得多。
 //
-// 上游的形状（`packages/core/agent-loop/src/index.ts` 的 `turnBoundaryProjectionDefinition`）：
+// 上游投影的形状（`turnBoundaryProjectionDefinition`）：
 //   · `turn/start` → `openTurnStartSeq = seq`（在跑）
 //   · `turn/end`   → `openTurnStartSeq = null`（跑完了）
 // 于是「投影说的」就是权威。事件侧只用它做一件事：**挡掉迟到的 `turn/end`**。

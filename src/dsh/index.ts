@@ -2,6 +2,10 @@
 export * from './api';
 export * from './agentPresets';
 export * from './settings';
+export * from './chat-prefs';
+export * from './userQuestions';
+export * from './projections';
+export * from './account-notices';
 export * from './events';
 export * from './follow';
 export * from './control';
@@ -14,6 +18,5 @@ export * from './rows';
 export * from './webProxy';
 export * from './session';
 export * from './stream';
-export * from './legacy';
 export * from './sessionExport';
 export * from './sessionUpload';

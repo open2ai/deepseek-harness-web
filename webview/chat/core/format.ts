@@ -392,5 +392,18 @@ export const MODE_NAMES: Record<string, string> = {
   ptc: 'PTC 模式',
 }
 
-/** 危险权限预设(切换需先经确认弹窗;与 src/extension.ts 保持一致来源) */
-export const DANGEROUS_PERMS = new Set<string>(['danger-full-access'])
+/**
+ * 危险权限预设：切换前必须过确认弹窗。
+ *
+ * **两个都要**（对齐上游 `ui-permission-presets`：确认条件是
+ * `option.value === FULL_ACCESS_PRESET || option.value === AUTO_REVIEW_PRESET`，
+ * 见其预设目录的实现）：
+ *   · `danger-full-access`（FULL_ACCESS_PRESET='danger-full-access'）—— 减少确认步骤
+ *   · `auto`（AUTO_REVIEW_PRESET='auto'）—— **无沙箱运行**，仅由同模型做实验性审查，
+ *     可能误放行/误拒绝并消耗额外 token
+ *
+ * `auto` 很容易被漏掉：它由上游 `registerAuto()` **动态注册**，只有 `permissionPresets/catalog`
+ * 会带上它（0.1.7 的进程级目录）。只列 `danger-full-access` 时，用户在目录里选 `auto`
+ * 会**不经确认直接进入无沙箱模式** —— 这是安全缺口，不是外观问题。
+ */
+export const DANGEROUS_PERMS = new Set<string>(['danger-full-access', 'auto'])

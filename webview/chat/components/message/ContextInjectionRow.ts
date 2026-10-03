@@ -7,7 +7,7 @@ import { memo } from 'preact/compat'
 import { useMemo, useState } from 'preact/hooks'
 import type { DshTurnProcessItem } from '../../core/store/chat'
 import { contextLabels } from '../../core/context-labels'
-import { contextView, type ContextBodySpec, type ContentRun } from '../../core/context-body'
+import { contextView, toolChangeTitle, type ContextBodySpec, type ContentRun } from '../../core/context-body'
 
 type ContextItem = Extract<DshTurnProcessItem, { kind: 'context' }>
 
@@ -90,6 +90,12 @@ function Body({ spec }: { spec: ContextBodySpec }) {
           ${s.truncated ? html`<span class="ctx-recall-counts">${labels.recallTruncated}</span>` : null}
         </li>`)}
       </ul><${ModelFacing} runs=${spec.runs} />`
+    // 工具变更（rc.2 的 `developer/message`）：与上游同结构 —— 新增/移除各一行、逗号连接
+    case 'toolChanges':
+      return html`<div class="ctx-tool-changes">
+        ${spec.added.length > 0 ? html`<div>${labels.toolsAdded(spec.added.join(', '))}</div>` : null}
+        ${spec.removed.length > 0 ? html`<div>${labels.toolsRemoved(spec.removed.join(', '))}</div>` : null}
+      </div>`
   }
 }
 
@@ -101,9 +107,12 @@ function ContextInjectionRowView({ item }: { item: ContextItem }) {
     [item.form, item.content, item.source]
   )
   const isRecall = item.provenance.role === 'recall'
-  const icon = isRecall ? 'codicon-history' : 'codicon-file-text'
-  const title = isRecall ? labels.contextRecall : labels.contextInjection
-  const label = item.provenance.label
+  // 工具变更行（rc.2 的 `developer/message`）：标题按内容点名、图标换工具类，**来源标签让位**
+  // （上游 `ContextInjectionRow` 同口径：工具变更时不显示 producer 标签、改显示数量摘要）。
+  const toolTitle = toolChangeTitle(item.content, labels)
+  const icon = toolTitle !== null ? 'codicon-tools' : isRecall ? 'codicon-history' : 'codicon-file-text'
+  const title = toolTitle ?? (isRecall ? labels.contextRecall : labels.contextInjection)
+  const label = toolTitle !== null ? null : item.provenance.label
   return html`<div class="ctx${open ? ' is-open' : ''}">
     <button class="ctx-head" onClick=${() => setOpen((o) => !o)} aria-expanded=${open}>
       <span class=${'codicon ctx-chev ' + (open ? 'codicon-chevron-down' : 'codicon-chevron-right')}></span>
@@ -111,7 +120,10 @@ function ContextInjectionRowView({ item }: { item: ContextItem }) {
       <span class="ctx-title">${title}</span>
       ${label !== null ? html`<span class="ctx-sep" aria-hidden></span>
         <span class="ctx-source">${label}</span>` : null}
-      ${!open && view.summary !== null ? html`<span class="ctx-sep" aria-hidden></span>
+      ${/* 摘要**展开时也保留**：上游 `DisclosureRow` 传了 `keepContentWhenOpen`
+           （`(keepContentWhenOpen || !open) && collapsedContent`），工具变更行尤其需要 ——
+           展开体给名单，摘要给数量，两条信息都要在。 */ ''}
+      ${view.summary !== null ? html`<span class="ctx-sep" aria-hidden></span>
         <span class="ctx-summary">${view.summary}</span>` : null}
     </button>
     ${open

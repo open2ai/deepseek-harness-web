@@ -16,6 +16,16 @@ export interface ContextLabels {
   recallTruncated: string
   unknownBlock: string
   jsonTruncated: (total: number) => string
+  // 工具变更行（rc.2 起上游会发 `developer/message` + `tool-addition`/`tool-removal` 块）：
+  // 文案逐字取自网页端字典的 `message.tool*`。
+  toolAdded: (name: string) => string
+  toolRemoved: (name: string) => string
+  toolsUpdated: string
+  toolsAdded: (names: string) => string
+  toolsRemoved: (names: string) => string
+  toolsAddedCount: (count: number) => string
+  toolsRemovedCount: (count: number) => string
+  toolsChanged: (added: number, removed: number) => string
 }
 export function contextLabels(): ContextLabels {
   return {
@@ -33,5 +43,13 @@ export function contextLabels(): ContextLabels {
     recallTruncated: '已截断',
     unknownBlock: '未知内容块',
     jsonTruncated: (total: number) => `… 已截断，共 ${total} 字符`,
+    toolAdded: (name: string) => `已添加工具：${name}`,
+    toolRemoved: (name: string) => `已移除工具：${name}`,
+    toolsUpdated: '工具已更新',
+    toolsAdded: (names: string) => `新增：${names}`,
+    toolsRemoved: (names: string) => `移除：${names}`,
+    toolsAddedCount: (count: number) => `新增 ${count} 个`,
+    toolsRemovedCount: (count: number) => `移除 ${count} 个`,
+    toolsChanged: (added: number, removed: number) => `新增 ${added} 个，移除 ${removed} 个`,
   }
 }

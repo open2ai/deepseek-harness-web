@@ -42,10 +42,11 @@ export function slashTrigger(store: ChatStore): TriggerDef {
     pick(row, helpers) {
       if (row.kind === 'command' && row.name === 'permission') {
         // 权限预设是可选项而非自由文本：打开插件权限弹窗选预设，
-        // 选中后由 chatSelectPermission → dsh setPermissionPreset → 刷新，权限标签/状态随之更新
+        // 选中后由 chatSelectPermission → dsh setPermissionPreset → 刷新，权限标签/状态随之更新。
+        // **不设 markSlashPick，也不产生任何对话区行**：上游 chat 显式过滤权限命令
+        //（`isVisibleChatNode()`），切权限在对话区什么都不显示；反馈走 VS Code 通知。
         helpers.clear()
         store.closePopups()
-        store.markSlashPick('permission')
         if (store.openPopup.value !== 'perm') store.togglePopup('perm')
         return
       }
