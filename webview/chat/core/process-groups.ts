@@ -1,6 +1,6 @@
 // 过程**分组**（上游 step-group）的切片计划 —— 独立纯函数（判据只写这一处，渲染只按结果画）。
 //
-// 上游的走查次序（`conversation-nodes/process-groups.ts`）决定了两件事：
+// 上游分组时的走查次序决定了两件事：
 //   ① **带回答内容的步**是收口：那一刻先 `flush` 收掉当前组，该步自己成为一个**独立可见节点**；
 //   ② **该步自己的工具**在收口之后才进组 → 「step k 的工具」属于**下一片**（step k 的过程成员 →
 //      `(group[k-1].toStep, group[k].toStep]` 那个区间）。
@@ -148,13 +148,6 @@ function planByStep<T extends { kind: string }>(
     }
 
     const buckets: T[][] = scoped.map(() => [])
-    const entries = (): Array<ProcessGroupEntry<T>> =>
-        scoped.map((group, index) => ({
-            kind: 'group' as const,
-            key: group.key,
-            facts: group.facts,
-            items: buckets[index] ?? [],
-        }))
 
     let pending: T[] = []
     const push = (index: number, item: T): void => {
@@ -209,16 +202,23 @@ function planByStep<T extends { kind: string }>(
         buckets[cursor]?.push(...pending)
     }
     /**
-     * **跳过后缀空片**：同回合多行时宿主把整回合的 `groups` 给了每一段行，于是"这一段链里一个项都
-     * 落不到"的组是**常态**（别的段那些组）。留着它们只会让计划整体作废（`ok:false`）→ 按片出头
-     * 在这类回合里完全不生效；丢掉它们则**一个项都不丢**（空片本来就没有内容），只是头少一个。
-     * 它之后（`cursor` 之后）的片一律没有项，所以整支跳过；`cursor` 之前的片若为空，说明链与 groups
-     * 真的不同源 → 仍按下面的兜底退回整回合形态。
+     * **丢掉空片**（不只是后缀那些）：同回合多行时宿主把整回合的 `groups` 给了每一段行，于是
+     * "这一段链里一个项都落不到"的组是**常态**（属于别的段那些组）。先前只跳过后缀空片、中间留一个
+     * 空片就整支作废（`ok:false`）→ 按片出头在这类回合里**完全不生效**（真机：网页端两片、插件一片）。
+     *
+     * 空片本来就没有内容 —— 丢掉它**一个项都不丢**，只是那个头不出（它那段过程在别的行上）。
+     * 一片都不剩时才是真的不同源，仍按兜底退回整回合形态。
      */
-    if (buckets.slice(0, cursor + 1).some((bucket) => bucket.length === 0)) {
+    const kept = scoped
+        .map((group, index) => ({ group, items: buckets[index] ?? [] }))
+        .filter((pair) => pair.items.length > 0)
+    if (kept.length === 0) {
         return { entries: [], ok: false }
     }
-    return { entries: entries().slice(0, cursor + 1), ok: true }
+    return {
+        entries: kept.map((pair) => ({ kind: 'group' as const, key: pair.group.key, facts: pair.group.facts, items: pair.items })),
+        ok: true,
+    }
 }
 
 /** B 路：按链上位置切（每个 `text` 项是边界、边界不属任何片）。 */

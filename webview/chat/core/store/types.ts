@@ -7,6 +7,8 @@ import type {
   DshTurnProcess as DshRowProcess,
   DshPresentedFile,
   DshRowGroup,
+  DshTodoItem,
+  DshChangesSummary,
 } from '../../../../src/dsh/rows/types'
 import type {
   HostToViewMessage,
@@ -55,6 +57,11 @@ export type DshTurnProcessItem =
       blocks?: unknown
       /** ask_user_question 的 RPC 交互数据（chatQuestion 配对挂到该工具行：rpcId/sessionId/带选项的 questions） */
       question?: { rpcId?: string; sessionId?: string; questions?: QuestionSpec[] }
+      /**
+       * **本次 `todo_write` 之前**已落盘的清单（宿主从 `todo/write` 事件折出；仅 todo 工具带）。
+       * `null` = 窗口里没有更早的写入；缺省 = 非 todo 工具。todo 卡据此渲染「与上次清单相比」的 diff。
+       */
+      todoBaseline?: DshTodoItem[] | null
     }
   | {
       kind: 'context'
@@ -132,6 +139,58 @@ export type ChatRow =
       /** 失败标识（上游 `turn/end.reason` 的 code）：页面据此取上游固定中文 */
       code?: string
     }
+  /**
+   * **模型重试链**（独立行，镜像上游 `model-retry` 节点）：按 `retryId` 聚成一行，只渲染**最后一次尝试**。
+   * 文案与倒计时见 `core/retry-copy.ts`（纯函数、有守卫）。
+   */
+  /**
+   * **自动压缩标记**（独立行，镜像上游 `compaction` 节点）：只在**检查点落地**时出现的那一行，
+   * 摘要与计数取自它引用的 `compaction/summary`。文案见 `core/compaction-copy.ts`。
+   */
+  /**
+   * **手动命令行**（独立行，镜像上游 `command` 节点）：`command/run` + `command/done` 按 `commandId` 配成一行。
+   * 标题 = 裸命令名、摘要 = 结算 `text`（缺则按 kind 给固定文案）；文案见 `core/command-copy.ts`。
+   * ⚠️ `name === 'permission'` 的一律不显示（上游 `isVisibleChatNode` 剔除）。
+   */
+  | {
+      kind: 'command'
+      key: number
+      commandId: string
+      name: string | null
+      outcome?: { kind: 'success' | 'error'; text?: string }
+    }
+  | {
+      kind: 'compaction'
+      key: number
+      compactionId: string
+      /** 检查点事件序号（= 这一行的锚点） */
+      seq: number
+      summaryEventSeq?: number
+      /** 摘要正文；缺省 = 不可展开（上游同：`expandable = summary !== null`） */
+      summary?: string
+      shadowedItemCount?: number
+      shadowedTokenCount?: number
+      sourceCommandId?: string
+    }
+  | {
+      kind: 'retry'
+      key: number
+      retryId: string
+      /** 已排过的尝试次数（末条 `llm/retry` 的 `retry`） */
+      retry: number
+      turn?: number
+      step?: number
+      provider?: string
+      mode?: string
+      /** 上限（只 `mode === 'normal'` 有；`always` 上游显示 `∞`） */
+      maxRetries?: number
+      delayMs?: number
+      failure?: { message?: string; code?: string }
+      /** **哪一次**尝试已真正开始（收到过 `llm/retry-started` 的那个序号）；未开始 = 缺省 */
+      started?: number
+      /** 结算时仍停在 `scheduled` 且回合已关闭 → 上游派生的 `cancelled` */
+      cancelled?: boolean
+    }
   | {
       kind: 'context'
       key: number
@@ -183,6 +242,18 @@ export type ChatRow =
        * 过程区间里的节点。页面据此把同回合的行归成一组 —— 只让首行出折叠头，其余行跟随同一个展开态。
        */
       turn?: number
+      /**
+       * 本回合 `workspace/changes` 宣告的事件序号（宿主从事件折出，见 `rows/types.ts`）。
+       * 「改动文件卡」的取数钥匙：宿主拿它去读 Host 内存态的改动摘要。
+       */
+      changesSeq?: number
+      /**
+       * 宿主按 `changesSeq` 取回的**回合改动摘要**；缺省 = 还没取到 / Host 已经没有它。
+       *
+       * 上游 `ChangedFiles` 就是用这份摘要渲染的（相对路径 + `+x/-y` 行数）；**拿不到就不出那张卡**
+       * —— Host 重启或会话被释放后历史回合的摘要就没了，网页端同样不显示。
+       */
+      changesSummary?: DshChangesSummary
     }
   | {
       kind: 'approval'
@@ -319,8 +390,8 @@ export interface TokenUsageView {
  * 会话目标（目标条的数据源）。形状按上游 `GoalProjection.goal`（= `GoalSnapshot`）+ 前端补的两个展示字段。
  *
  * `phase` 是**durable** 阶段（`active|paused|blocked|complete`）；上游另有一个 process-local 的
- * `activation`（armed/disarmed，决定"进行中"还是"未运行"）—— 它**不在投影里**，本插件目前拿不到，
- * 所以那一档暂缺（登记在 `12` §2）。
+ * `activation`（armed/disarmed，决定"进行中"还是"未运行"）—— 它**不在投影里**（上游明说 never
+ * persisted、deliberately absent），另走一条路到达：见下面的 `GoalActivationView`。
  */
 export interface GoalView {
   objective: string
@@ -330,6 +401,21 @@ export interface GoalView {
   revision?: number
   /** 仅 `phase === 'blocked'` 时有：挂成条上的 title（上游同口径）。 */
   blockedReason?: string
+}
+
+/**
+ * 目标条的 activation（`{id?, revision?, activation?}`）。
+ *
+ * 来源是宿主的一次读 + 边沿订阅（宿主 `src/dsh/goal-activation.ts`），随 `projections` 帧到达。
+ * `{}` = 没有当前目标 / 还没读到（两种在 wire 上同形）。
+ *
+ * ⚠️ 用时**必须按 `(id, revision)` 与投影里的活跃目标对账**：它与投影是两条来路，
+ * 晚到的那一份可能已经过期 —— 对不上就当作"还不知道"（不要当成"没有激活"）。
+ */
+export interface GoalActivationView {
+  id?: string
+  revision?: number
+  activation?: 'armed' | 'disarmed'
 }
 
 export interface ChatStore {
@@ -367,6 +453,13 @@ export interface ChatStore {
   /** 会话目标(投影 goal)；null=无目标/能力缺失。目标条的数据源（形状按上游 GoalProjection.goal）。
    *  `id`/`revision` 是**动作的 CAS 引用**（上游 `GoalRef`）——缺任一个就只能只读展示，动不了。 */
   goalState: Signal<GoalView | null>
+  /**
+   * 目标条的 process-local activation（`armed`/`disarmed`；`{}` = 没有当前目标或还没读到）。
+   *
+   * 它是**另一条来路**（`goals/get` + `goal/activation-changed`，见 `GoalActivationView` 的注释），
+   * 与 `goalState` 同帧到达但**不保证同一个目标**：用时按 `(id, revision)` 对账。
+   */
+  goalActivation: Signal<GoalActivationView>
   /**
    * 目标条的动作（edit/pause/resume/clear）：交给宿主打上游 goal RPC 并等回执。
    * 不走 `/goal` 命令 —— 命令要下一轮才被 agent 处理，而这些按钮是即时操作（上游同口径）。
@@ -428,7 +521,15 @@ export interface ChatStore {
   /** 当前窗口里的事件条数（诊断与直观量，不参与判定）。 */
   historyEvents: Signal<number>
   /** 记下宿主给的窗口事实（随 `rows` 帧一起来）。 */
-  applyHistory(info: { hasMore?: boolean; loading?: boolean; events?: number }): void
+  applyHistory(info: {
+    hasMore?: boolean
+    loading?: boolean
+    events?: number
+    /** 整表语义：`null` = 没有失败（用来清掉横幅） */
+    openError?: { message: string; code?: string } | null
+  }): void
+  /** **打开历史失败**的事实（上游 `openState === 'error'` + `openError`）：列表顶端横幅读它。 */
+  sessionOpenError: Signal<{ message: string; code?: string } | undefined>
   /** 往前翻一页历史（宿主读更早一页并 prepend）；在飞时不重复发。 */
   loadOlder(): void
   /**

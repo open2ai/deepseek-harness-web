@@ -48,11 +48,17 @@
   position: absolute;
   inset: 0;
   overflow: hidden;
-  color: var(--vscode-foreground, #ddd);
+  /* 掠光带的颜色：上游取 `--dsw-alias-label-shimmer`（可被调用方就地覆盖，见 `--dsh-shimmer`，
+     例如运行状态行会换成 deep-diving 专用蓝）。没有覆盖时退到通用前景色。 */
+  color: var(--dsh-shimmer, var(--vscode-foreground, #ddd));
   mask-image: linear-gradient(105deg, transparent 0%, #000 40% 60%, transparent 100%);
   -webkit-mask-image: linear-gradient(105deg, transparent 0%, #000 40% 60%, transparent 100%);
   transform: translateX(-100%);
   animation: dsh-shimmer-sweep 1.5s 0.3s steps(48, end) infinite;
+}
+/* 装饰副本与真实文字**同字号**：字号若只写在 base 上，副本会按父级字号排，两层错位 */
+.shimmer-text {
+  font-size: inherit;
 }
 
 /* 副本文字：与真实文字同句（走属性，DOM 文本仍只有一份） */

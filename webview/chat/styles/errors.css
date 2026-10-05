@@ -33,6 +33,16 @@
   }
   .row-error-retry:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
 
+  /* 打开历史失败（上游 `ChatView` 的 `.openError`）：列表顶端一条，不抢焦点、不挡住内容 */
+  .open-error {
+    margin: 6px 0; padding: 6px 8px;
+    border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(241, 76, 76, 0.6));
+    border-radius: 6px;
+    background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.08));
+    color: var(--vscode-errorForeground, #f14c4c);
+    font-size: 12px;
+  }
+
   /* 账本计数条（只在有错误时出现）：贴在列表末尾，点「全部重试」重挂所有行 */
   .render-error-bar {
     display: flex; align-items: center; gap: 6px;

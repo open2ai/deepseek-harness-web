@@ -3,14 +3,16 @@
 // 为什么单独成模块：键位是「谁先 preventDefault、谁最终 send」的顺序问题 —— 夹在组件里只能靠真机
 // 一个个按键去试，抽出来后每种组合都能脚本级断言（`tmp/_keys.test.mjs`）。
 //
-// 语义（跟随「设置 → 通用设置 → 繁忙时的发送行为」）：
+// 语义（投递方式那条判据**只此一处**，主钮也调它）：
 //   · 发送键 = `Enter`；换行 = `Shift+Enter`（**无条件**，在仲裁之前判定）；
-//   · `Enter` 的投递方式 = `ctx.busyEnter`（上游默认 `queue` = 发送但不打断当前生成）；
-//   · `Ctrl/Cmd+Enter` = "加速"手势：**取相反值**（偏好 queue 时插话、偏好 steer 时排队）——
-//     与上游 `resolveSubmitMode` 同口径（`gesture !== 'enter'` 返回偏好的反面）；空闲时**换行**（这条是插件有意偏离，见 `12` §5）；
+//   · `Enter` 与 `Ctrl/Cmd+Enter` 都只是**投递手势**（`enter` / `accelerated`），投递方式一律由
+//     `resolveSubmitMode` 决定 —— **没有"换行手势"这一支**：
+//         空闲或不支持插话 → `queue`（此时按哪个键都只是普通发送）；
+//         在跑时 = `enter` 用手势偏好的值、`accelerated` 取它的反面。
 //   · 弹层打开时 `Enter`/`Tab` 归弹层（选中候选），不发送；
-//   · 已认领的命令行（`/命令 参数…`）：Enter 执行命令；已认领的技能行：Enter 按普通消息发出；
-//   · 空草稿 + 有排队项时按发送键/加速手势 = **整队插话**（不发空消息）。
+//   · 已认领的命令行（`/命令 参数…`）：提交换行 = **执行命令**（加速手势也只是另一种 submit 手势）；
+//     已认领的技能行与普通正文同路（它本来就是一封普通消息）；
+//   · 空草稿 + 在跑 + 有排队项 + 支持插话 = **整队插话**（上游 `canSteerQueue` 的四项；不发空消息）。
 
 /** 判定用的按键事实（只取用得到的字段，便于脚本造事件）。 */
 export interface InputKeyEvent {
@@ -35,6 +37,13 @@ export interface InputKeyContext {
   queued: boolean
   /** 上游「繁忙时的发送行为」：`Enter` 的投递方式（缺省 = 上游默认 `queue`）。 */
   busyEnter?: 'queue' | 'steer'
+  /**
+   * 这段会话的传输**支不支持插话**：不支持时投递方式一律退成 `queue`（判据见 `resolveSubmitMode`）。
+   *
+   * 本插件的 composer 只作用于**当前会话**、不寻址子代理，所以它恒为真；留成输入是为了让
+   * 那条判据有落点（将来真做子代理寻址时直接接上，无需再改别处）。
+   */
+  steeringAvailable?: boolean
 }
 
 /** 判定结果：调用点按 `action` 派发，`preventDefault` 由调用点统一执行。 */
@@ -73,50 +82,46 @@ export function decideInputKey(e: InputKeyEvent, ctx: InputKeyContext): InputKey
   }
 
   const accelerated = e.ctrlKey === true || e.metaKey === true
+  const steeringAvailable = ctx.steeringAvailable !== false
   const empty = ctx.text.trim() === ''
-  // ④ 已认领行优先于加速手势：命令要执行、技能要照常发出（加速手势则按相反投递方式发）
-  if (!accelerated) {
-    if (ctx.claim === 'command') {
-      return { action: 'run-command' }
-    }
-    if (ctx.claim === 'skill') {
-      return submit(ctx)
-    }
+  // ④ 已认领的命令行：**提交即执行**，与手势无关 —— 上游把加速手势也只当作一种 submit 手势
+  //   （`view-binding.ts` 的 `keyboard.submit(resolveSubmitMode(...))`），提交换行就是执行命令。
+  //   ⚠️ 不在这里放行技能行：技能行就是一封普通消息，投递方式照下面按手势解（上游同）。
+  if (ctx.claim === 'command') {
+    return { action: 'run-command' }
   }
-  // ⑤ "加速"手势（`Ctrl/Cmd+Enter`）：空闲时**换行**、回合在跑时按**偏好的反面**投递
-  //    —— 与上游 `resolveSubmitMode` 同口径（`enter` 用偏好本身，其它手势取反面）。
-  //    （上游没有"换行"这一支：它非忙时也返回 queue。这条是**有意偏离**，登记在 `12` §5；
-  //      空草稿时仍与上游同构 —— 转成整队插话。）
-  if (accelerated) {
-    if (ctx.running) {
-      if (empty) {
-        return ctx.queued ? { action: 'steer-whole-queue' } : { action: 'none' }
-      }
-      return { action: 'send', mode: opposite(ctx) }
-    }
-    return { action: 'newline' }
-  }
-  // ⑥ 发送键（`Enter`）：空草稿时退化为整队插话（仅当队列里真有排队项；否则什么也不做，避免发空消息）
+  // ⑤ 空草稿：退化为**整队插话**（上游 `canSteerQueue`：`!locked && !machineBusy && !commandMenuOpen
+  //   && empty && running && steeringAvailable`；本插件对应的四项是后三条 + 真有排队项）。
+  //   不满足时什么也不做 —— 避免发出空消息。
   if (empty) {
-    return ctx.running && ctx.queued ? { action: 'steer-whole-queue' } : { action: 'none' }
+    return ctx.running && steeringAvailable && ctx.queued ? { action: 'steer-whole-queue' } : { action: 'none' }
   }
-  return submit(ctx)
-}
-
-/** 偏好（缺省 = 上游默认 `queue`）。 */
-function preferred(ctx: InputKeyContext): 'queue' | 'steer' {
-  return ctx.busyEnter === 'steer' ? 'steer' : 'queue'
-}
-
-/** 加速手势的投递方式 = 偏好的反面（上游 `resolveSubmitMode`：非 `enter` 手势取反面）。 */
-function opposite(ctx: InputKeyContext): 'queue' | 'steer' {
-  return preferred(ctx) === 'queue' ? 'steer' : 'queue'
+  // ⑥ 交付方式：逐条镜像上游 `resolveSubmitMode`
+  return { action: 'send', mode: resolveSubmitMode(ctx, accelerated ? 'accelerated' : 'enter') }
 }
 
 /**
- * 发送手势（`Enter` / 技能行）的投递方式 = 上游「繁忙时的发送行为」的偏好值。
- * 偏好 `queue`（上游默认）时：空闲即普通发送、繁忙时保持「发送但不打断当前生成」。
+ * 一次提交手势的投递方式：**主钮与 `Enter` 共用这一条**（各写一遍必然走岔）。
+ *
+ * 规则三句：
+ * ```
+ * 没在跑、或这段会话不支持插话 → 'queue'（此时手势无关）
+ * 手势是 enter（含发送按钮）    → 偏好值 ctx.busyEnter
+ * 手势是 accelerated           → 偏好的反面
+ * ```
+ * @param ctx - 只用这三件事：在跑、偏好、是否支持插话
+ * @param gesture - 两种提交手势：`enter`（含发送按钮）或 `accelerated`（Cmd/Ctrl+Enter）
  */
-function submit(ctx: InputKeyContext): InputKeyDecision {
-  return { action: 'send', mode: preferred(ctx) }
+export function resolveSubmitMode(
+  ctx: Pick<InputKeyContext, 'running' | 'busyEnter' | 'steeringAvailable'>,
+  gesture: 'enter' | 'accelerated',
+): 'queue' | 'steer' {
+  const preferred: 'queue' | 'steer' = ctx.busyEnter === 'steer' ? 'steer' : 'queue'
+  if (!ctx.running || ctx.steeringAvailable === false) {
+    return 'queue'
+  }
+  if (gesture === 'enter') {
+    return preferred
+  }
+  return preferred === 'queue' ? 'steer' : 'queue'
 }

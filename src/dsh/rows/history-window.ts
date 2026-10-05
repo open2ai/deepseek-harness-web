@@ -54,10 +54,7 @@ export class HistoryWindow<E extends WindowEventLike> {
     private more = false;
     private loading = false;
 
-    /**
-     * @param onWarn - 诊断出口（宿主接 Output 面板；留着是为了不删掉调用点的形状）
-     */
-    constructor(private readonly onWarn?: (message: string) => void) {}
+    constructor() {}
 
     /** 当前窗口（只读视图；宿主与 `buildRows` 直接消费）。 */
     list(): readonly E[] {
@@ -144,6 +141,25 @@ export class HistoryWindow<E extends WindowEventLike> {
             oldest = oldest === undefined ? e.seq : Math.min(oldest, e.seq);
         }
         return oldest;
+    }
+
+    /**
+     * 窗口里最新事件的序号（`throughSeq` 的来源 = 服务端那边的**流游标**）。
+     *
+     * ⚠️ 这个值**必须**传：服务端按 `end = min(throughSeq + 1, beforeSeq)` 决定这一页读到哪儿，
+     * 传 `-1` 会让 `end` 变成 0 —— 返回**空页**、`hasMore` 恒为假，按钮点一次就再不出来
+     *（真机："加载更早怎么就一次"）。先前首屏一次要 5000 条、按钮几乎不出现，所以一直没暴露。
+     * @returns `undefined` = 窗口里没有带序号的事件（还没定基，不该发起翻页）
+     */
+    newestSeq(): number | undefined {
+        let newest: number | undefined;
+        for (const e of this.events) {
+            if (e.seq === undefined) {
+                continue;
+            }
+            newest = newest === undefined ? e.seq : Math.max(newest, e.seq);
+        }
+        return newest;
     }
 
     /**

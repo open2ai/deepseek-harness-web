@@ -21,10 +21,18 @@
     /* 把值也接到 `--vscode-panel-border`：历史样式里大量 `var(--vscode-panel-border, …)` 调用点
        因此一次性拿到正确颜色，不必逐个改（各调用点的兜底色只在**本变量也取不到**时才生效）。 */
     --vscode-panel-border: var(--dsh-hairline);
+    /* 运行状态行（深度求索中）的**专属蓝**：上游把 shimmer token 就地覆盖成 deep-diving 两档
+       （`ChatView.module.css` 的 `.running`），并用 `color-mix` 算出具体色 —— 这里把混好的值写死，
+       免得依赖 webview 的 `color-mix` 支持。深色档默认，浅色档见下。 */
+    --dsh-deep-diving: rgb(85, 129, 208);
+    --dsh-deep-diving-shimmer: rgb(139, 180, 251);
   }
   body.vscode-light {
     --dsh-hairline: rgba(0, 0, 0, 0.1);
     --dsh-hairline-strong: rgba(0, 0, 0, 0.2);
+    /* deepseek-500 70% 混 blue-950 / 30% 混 blue-950（上游浅色两档） */
+    --dsh-deep-diving: rgb(52, 94, 186);
+    --dsh-deep-diving-shimmer: rgb(36, 61, 128);
   }
   body.vscode-high-contrast,
   body.vscode-high-contrast-light {
@@ -170,7 +178,27 @@
      两者分开是必需的：#messages 的高度由布局定死（flex:1 + overflow:auto），内容再长它自己的盒也不变，
      所以 **ResizeObserver 观察 #messages 收不到「内容长高」** —— 流式回答时跟随就永远不动。
      观察对象必须是会随内容长高的那个元素（上游同款：观察 .column，不观察滚动容器）。 */
-  #messages { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; }
+  /* 会话区外壳：滚动体（`#messages`）+ 内容列。 */
+  .chat-body { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  /* 行锚：普通块（内容列的 flex 项），承 `data-turn`。
+     ⚠️ **不要给它加 `content-visibility` / `contain-intrinsic-size`**（曾加过，已撤）：
+     视口外的行虽然跳过排版，但**高度只剩占位值**（`auto 120px`），而真实行高常常是它的好几倍 ——
+     拖动滚动条时，每一行进入视口都要用真实高度替换占位，滚动总量与滑块位置**在指针底下一直变**，
+     手感发涩；实测 153 行时 `scrollHeight` 与内容真实高度相差数百像素（无头 Chrome 几何探针）。
+     上游聊天区**本就不跳过排版**（`ChatView` 全挂 DOM），撤掉它才是同口径；首屏收成一页之后
+     行数也小得多，这个优化不再值得那点滚动抖动。 */
+  .turn-anchor { display: block; min-width: 0; }
+
+  /* `scrollbar-gutter: stable` 与上游滚动容器同（`ConversationRoot.module.css`）：滚动条槽位**无条件预留**，
+     槽位出现/消失不改 `clientHeight`（否则会触发跟随里的"视口变矮 ⇒ 重钉"，与滚动条互踢）。 */
+  #messages {
+    flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
+    scrollbar-gutter: stable;
+  }
+  /* 上游同款（`ChatView.module.css`）：**跟随尾部时禁掉浏览器自己的滚动锚定**。
+     不禁的话，内容长高时浏览器会把视口锚在某个元素上、与我们的"重钉到底"互踢 —— 流式期间就是滚动条抖。
+     标记由 `MessageList` 按跟随状态打（`data-dsh-following-tail`）。 */
+  #messages[data-dsh-following-tail] { overflow-anchor: none; }
   .msg-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   #messages.hidden { display: none; }
   .msg { display: flex; gap: 10px; align-items: flex-start; }
@@ -185,7 +213,10 @@
   .msg .col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   /* 差异化：发送者(user)内容窄、贴合右侧；回复(assistant)满宽、随对话区自适应 */
   .msg.user .col { max-width: 78%; align-self: flex-end; }
-  .msg.assistant .col { max-width: 100%; }
+  /* 助手列**撑满可用宽度**：上面 `.msg` 的 `align-items: flex-start` 是给用户气泡用的，
+     套到助手行上会让整列按内容收缩 —— 于是控制行那条贯穿细线只有文字那么长（真机反馈"横线怎么那么短"）。
+     上游同结构的做法是只让用户行 `align-items: flex-end`，助手行按默认 stretch 撑满。 */
+  .msg.assistant .col { max-width: 100%; flex: 1 1 auto; }
   .msg .name { display: none; } /* 角色名字默认隐藏（无作者头像行） */
   /* toast / avatar 内 codicon 尺寸（错误提示复用 .msg.assistant + .avatar 骨架） */
   .msg .avatar .codicon { font-size: 15px; line-height: 1; }
@@ -349,7 +380,7 @@
   #planChip:hover { background: rgba(177, 128, 215, 0.28); }
   #planChip:disabled { opacity: 0.55; cursor: default; }
   /* ===== 目标条（GoalBar）：停靠在输入框上方的独立卡片 =====
-     行为对齐上游 `ui-goal/GoalBar`（阶段文字 + 字形 + 目标 + 图标动作 + 行内编辑），
+     行为对齐上游的目标条（阶段文字 + 字形 + 目标 + 图标动作 + 行内编辑），
      **宽高按插件自己的刻度**（用户定）：高度 26（与 plan chip 同档）而不是上游的 36，
      圆角 10 而不是 12，图标钮 22×22 与输入区其它图标钮一致。 */
   .goal-bar { flex: none; display: flex; margin: 0 0 4px; }
@@ -775,19 +806,52 @@
   }
   /* 回合尾部：本轮文件改动 + 交付文件（位置在回答正文之后、动作条之前） */
   .turn-deliverables { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
-  /* 本轮文件改动：一行标签 + 若干 chip（路径名，点它用编辑器打开） */
-  .dv-produced { display: flex; flex-direction: column; gap: 4px; }
-  .dv-label { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
-  .dv-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
-  .dv-chip {
-    display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
-    padding: 2px 9px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 11.5px;
-    border: 1px solid var(--dsh-hairline);
-    background: transparent; color: var(--vscode-foreground, #ddd);
+  /* 本轮文件改动（上游 `ChangedFiles` 的形态）：**一张卡片** —— 头部（标题 + 折叠）+ 竖排文件名列表
+     （`display` 相对路径 + 右侧 `+x/-y`）+ **底部的「全部 N 个文件」**。超过 4 行折叠。
+     点一行在**编辑区**打开该文件（上游是开侧边栏 review）。
+     计数与清单**都来自 Host 的改动摘要**（行上的 `changesSummary`，2026-10-05 起）。 */
+  .dv-produced {
+    display: flex; flex-direction: column; min-width: 0;
+    border: 1px solid var(--dsh-hairline); border-radius: 8px;
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.08));
+    overflow: hidden;
   }
-  .dv-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
-  .dv-chip-ico { font-size: 12px; flex: none; color: var(--vscode-descriptionForeground, #999); }
-  .dv-more { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+  .dv-changes-head {
+    display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%;
+    padding: 8px 10px; margin: 0; border: 0; background: transparent;
+    font: inherit; text-align: left; color: var(--vscode-foreground, #ddd);
+    cursor: default;
+  }
+  .dv-changes-title { flex: 1 1 auto; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dv-changes-list {
+    list-style: none; margin: 0; padding: 0 10px 6px;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .dv-changes-row {
+    display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+    background: none; border: 0;
+    padding: 3px 6px; margin: 0; border-radius: 4px; cursor: pointer;
+    font: inherit; font-size: 11.5px; color: var(--vscode-descriptionForeground, #999);
+  }
+  .dv-changes-row:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16)); }
+  .dv-changes-row:hover .dv-changes-path { color: var(--vscode-textLink-foreground, #4daafc); text-decoration: underline; }
+  /* 路径占满剩余宽度并在不足时省略；计数**不缩**（上游同样把 `+x/-y` 钉在行尾） */
+  .dv-changes-path { flex: 1 1 auto; min-width: 0; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dv-changes-counts { flex: none; display: flex; align-items: baseline; gap: 6px; font-size: 11px; }
+  .dv-added { color: var(--vscode-charts-green, #89d185); }
+  .dv-deleted { color: var(--vscode-charts-red, #f14c4c); }
+  /* 二进制 / 超大文件没有行数，给固定词（上游 `changes.binary` / `changes.oversized`） */
+  .dv-changes-kind { color: var(--vscode-descriptionForeground, #999); }
+  /* 底部折叠入口（「全部 N 个文件」/「收起」+ **右侧箭头**）：贴卡片底边，与列表之间一条细线分层 */
+  .dv-changes-toggle {
+    display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 10px; margin: 0;
+    border: 0; border-top: 1px solid var(--dsh-hairline); background: transparent;
+    font: inherit; font-size: 11px; text-align: left; cursor: pointer;
+    color: var(--vscode-descriptionForeground, #999);
+  }
+  .dv-changes-toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16)); }
+  .dv-changes-toggle-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dv-changes-toggle-chev { flex: none; font-size: 12px; line-height: 1; color: var(--vscode-descriptionForeground, #999); }
   /* 交付文件：卡片网格（窄栏自动落成一列）+ 超过四个时的展开/收起 */
   .dv-presented { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .dv-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; min-width: 0; }
@@ -1296,11 +1360,62 @@
     display: inline-flex; align-items: center; gap: 8px;
     height: 26px; margin: 4px 0 2px;
     font: 600 12px var(--vscode-font-family);
-    color: var(--vscode-descriptionForeground, #999);
+    /* 文本色与掠光色都是 deep-diving 专用蓝（上游 `.running` 同）：普通回合的语义色仍归正文 */
+    color: var(--dsh-deep-diving);
+    --dsh-shimmer: var(--dsh-deep-diving-shimmer);
   }
+  /* 转圈图标：与文字同为 deep-diving 蓝（颜色继承 `.turn-status`） */
   .turn-status-ico { font-size: 11px; flex: none; }
+  /* 字号写在**外层**（`.shimmer-text` 上）：`ShimmerText` 的真实文字层与装饰副本共用同一个类名，
+     只写在内层会让副本按父级字号排、两层错位。 */
   .turn-status-text { white-space: nowrap; font-size: 10px; }
   .turn-status-clock { font-size: 13px; font-weight: 400; color: var(--vscode-descriptionForeground, #999); font-variant-numeric: tabular-nums; }
+
+  /* ===== 命令行（上游 `command` 节点的 `GenericCommandCard`）：标题是裸命令名 ===== */
+  .command-row { margin: 6px 0; font-size: 12px; }
+  .command-head {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+    color: var(--vscode-descriptionForeground, #999);
+    font: inherit;
+  }
+  .command-head:disabled { cursor: default; }
+  .command-icon { font-size: 12px; flex: none; }
+  .command-title { color: var(--vscode-foreground, #ddd); }
+  .command-sep { width: 1px; height: 12px; background: var(--dsh-hairline); flex: none; }
+  .command-summary { color: var(--vscode-descriptionForeground, #999); }
+  .command-row[data-state='error'] .command-summary { color: var(--vscode-errorForeground, #f14c4c); }
+  .command-body {
+    margin: 6px 0 2px 18px; padding: 6px 8px; max-height: 260px; overflow: auto;
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+    border-radius: 6px; font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px; white-space: pre-wrap;
+  }
+
+  /* ===== 压缩标记行（上游 `compaction` 节点）：一行一次自动压缩，摘要可展开 ===== */
+  .compaction-row { margin: 6px 0; font-size: 12px; }
+  .compaction-head {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+    color: var(--vscode-descriptionForeground, #999);
+    font: inherit;
+  }
+  .compaction-head:disabled { cursor: default; }
+  .compaction-leading { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+  .compaction-context-icon { font-size: 12px; }
+  .compaction-chevron { font-size: 12px; }
+  .compaction-title { color: var(--vscode-foreground, #ddd); }
+  .compaction-sep { width: 1px; height: 12px; background: var(--dsh-hairline); flex: none; }
+  .compaction-summary { color: var(--vscode-descriptionForeground, #999); }
+  .compaction-body { margin: 6px 0 2px 20px; color: var(--vscode-foreground, #ddd); }
+
+  /* ===== 重试行（上游 `model-retry`）：一行一条重试链，展开只有"延迟 + 失败原因" ===== */
+  .retry-row { margin: 2px 0; font-size: 12px; color: var(--vscode-descriptionForeground, #999); }
+  .retry-summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
+  .retry-summary::-webkit-details-marker { display: none; }
+  .retry-text { font-size: 11px; }
+  .retry-details { margin: 4px 0 2px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 11px; }
+  .retry-label { color: var(--vscode-descriptionForeground, #999); }
 
   /* ===== 上游 waterfall 提问弹窗（输入框上方）：一题一屏 + 翻页 + 跳过 + 折叠（对齐上游 QuestionComposer） ===== */
   .q-dialog {

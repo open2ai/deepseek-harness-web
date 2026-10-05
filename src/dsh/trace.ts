@@ -1,32 +1,8 @@
-// 诊断用追踪（**临时**）：DSH_RAWLOG 打开时，把关键活动追加到系统临时目录的文件。
+// 诊断日志用的安全序列化（`jsonPreview`）。
 //
-// 为什么落文件而不只打控制台：full 模式下控制台一次刷几十 KB（每个原始帧最长 200k），
-// 人工复制必然截断 —— 而「工具行有、展开却空」这类问题恰恰要看**完整的活动序列**
-// （宿主发了什么、webview 把哪条活动落到了哪一行）。
-//
-// 只在 DSH_RAWLOG 设置时生效；未设置时是纯空操作，不改变任何功能行为。
-// 文件位置：<系统临时目录>/dsh-plugin-trace.log
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-
-let file: string | undefined;
-
-/**
- * 追加一行诊断。永不抛出（诊断失败不能影响功能）。
- * @param line - 单行内容（调用方自带类别前缀，如 `host toolDone …` / `webview …`）。
- */
-export function traceTool(line: string): void {
-    if (!process.env['DSH_RAWLOG']) {
-        return;
-    }
-    try {
-        file ??= path.join(os.tmpdir(), 'dsh-plugin-trace.log');
-        fs.appendFileSync(file, `${new Date().toISOString()} ${line}\n`);
-    } catch {
-        /* 诊断失败不影响功能 */
-    }
-}
+// 这个文件先前还有一个"把活动追加到临时文件"的 `traceTool`：它已经没有调用方了（全库无人引用），
+// 所以连同落盘那套（`fs`/`os`/`path` 与文件变量）一起删掉 —— 需要那种追踪时再带着用途重新加，
+// 不留"看着像有诊断、其实一次都不会写"的空壳。
 
 /**
  * 日志用的安全序列化：**永不抛出**。

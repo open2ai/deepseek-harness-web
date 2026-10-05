@@ -151,9 +151,20 @@ export function snapshotRecordsToEvents(records: readonly unknown[]): RawEvent[]
  *   不开则服务端既不下发实时增量帧、snapshot 也不带 assistantStream 基线（实时侧同理，见 stream.ts）。
  *   records 现在清一色是 { type:'event', event } 包装：0.1.5-rc.2 的 { type:'chunks' } packing 行
  *   与独立 assistant/chunk 事件都已被上游移除，增量改为内嵌进结算事件的 data.stream（下面展开）。
- * @param maxMessages snapshot 里返回的“消息对齐”记录上限（调大以覆盖较长会话）。
+ * @param maxMessages snapshot 里返回的“消息对齐”记录上限（与上游客户端同一页大小；见 `HISTORY_PAGE`）。
  */
-export async function readFollowSnapshot(sessionId: string, maxMessages = 5000, timeoutMs = 10_000): Promise<FollowSnapshot> {
+/**
+ * 历史分页的**一页**（与上游客户端同一套参数）：`maxMessages` 上限 500、至少 50 条计入预算的消息、
+ * 至少跨过两个 `turn/start`，在同时满足两个下限的轮次开头停下。
+ *
+ * 为什么必须有 `turnWindow`：只给 `maxMessages` 时服务端会一路数满上限才切 —— 超长会话因此
+ * 一次拿到几百条消息（实测 1.33M 事件 / 56 回合 → 全量重建 3.4 秒、载荷 20.5MB），打开就是白屏几秒。
+ */
+export const HISTORY_PAGE = { maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } } as const;
+/** 「一路翻到某个回合」那一路的消息下限（上游同：跳转不复用普通分页的 50 条下限）。 */
+export const JUMP_PAGE_MIN_MESSAGES = 200;
+
+export async function readFollowSnapshot(sessionId: string, maxMessages: number = HISTORY_PAGE.maxMessages, timeoutMs = 10_000): Promise<FollowSnapshot> {
     return new Promise<FollowSnapshot>((resolve, reject) => {
         let done = false;
         let ctl: { cancel: () => void } | undefined;
@@ -177,7 +188,17 @@ export async function readFollowSnapshot(sessionId: string, maxMessages = 5000, 
         const timer = setTimeout(() => finish(undefined, new Error('DSH 读取会话快照超时')), timeoutMs);
         void openMuxStream(
             'session/follow',
-            { args: { request: { address: { kind: 'session', sessionId }, maxMessages, assistantStream: true } } },
+            {
+                args: {
+                    request: {
+                        address: { kind: 'session', sessionId },
+                        maxMessages,
+                        // 同一套"至少两条轮次边界"的下限：没有它，服务端会一路数满 maxMessages 才切。
+                        turnWindow: HISTORY_PAGE.turnWindow,
+                        assistantStream: true,
+                    },
+                },
+            },
             {
                 onItem: (value) => {
                     const v = value as Record<string, unknown> | undefined;
@@ -668,22 +689,30 @@ export interface DshImageAttachment {
  * —— 以**当前窗口的第一条事件序号**为 `beforeSeq`，取它之前的一页；返回的 `hasMore` 说明再往前还有没有。
  * 本插件同口径：`beforeSeq` 传窗口最老的那条 `seq`，返回的这一页由调用方**前插**进窗口。
  *
- * `throughSeq` 传 `-1` = 「不设上界」（上游把 -1 当作"以源日志末端为准"）。
+ * **`throughSeq` 必须是"流游标"（窗口里最新那条的 seq），不能省、也不能传 `-1`** —— 服务端切页是
+ * `end = min(throughSeq + 1, beforeSeq)`：传 `-1` 会切出空页且 `hasMore` 恒假（真机"加载更早只出现一次"）。
  * @param sessionId - 目标会话
  * @param beforeSeq - 窗口里最老事件的序号（**非负安全整数**；服务端会校验）
- * @param maxMessages - 这一页最多取多少条"消息对齐"记录（上游默认 50，这里按插件窗口放大）
+ * @param maxMessages - 这一页最多取多少条"消息对齐"记录（与首屏同一页大小）
  * @returns 这一页的事件（已展开内嵌增量、按 `seq` 升序）与「再往前还有没有」
  */
 export async function pageSessionEvents(
     sessionId: string,
     beforeSeq: number,
-    maxMessages = 600
+    maxMessages: number = HISTORY_PAGE.maxMessages,
+    /** 目标序号（含）：`-1` = 不设下界（只按 `beforeSeq` 取一页）。导轨"翻到某个回合"用它。 */
+    throughSeq = -1
 ): Promise<{ events: RawEvent[]; hasMore: boolean }> {
     const value = await rpcCall<{ records?: unknown[]; hasMore?: boolean }>('session.page', {
         address: { kind: 'session', sessionId },
-        throughSeq: -1,
+        throughSeq: Math.floor(throughSeq),
         beforeSeq: Math.floor(beforeSeq),
         maxMessages,
+        // 普通翻页用 50 条下限；"翻到某个回合"用 200（上游同：跳转那一页要求更多内容）。
+        turnWindow: {
+            minMessages: throughSeq === -1 ? HISTORY_PAGE.turnWindow.minMessages : JUMP_PAGE_MIN_MESSAGES,
+            minTurns: HISTORY_PAGE.turnWindow.minTurns,
+        },
     });
     return {
         events: snapshotRecordsToEvents(Array.isArray(value?.records) ? value.records : []),
@@ -754,12 +783,8 @@ export type DshQueueAction =
 export async function updateQueue(sessionId: string, itemId: string, action: DshQueueAction): Promise<void> {
     await rpcCall<{ accepted: boolean }>('session.updateQueue', { sessionId, itemId, action });
 }
-/** 会话改名（上游 `session/rename`，SessionRenameRequest { sessionId, title }）。 */
-export async function renameSession(sessionId: string, title: string): Promise<void> {
-    await rpcCall<{ title: string; seq: number }>('session.rename', { sessionId, title });
-}
 /**
- * 从一段**已完成回合**分叉出新会话（上游 `session/fork`，SessionForkRequest { sessionId, atSeq? }）。
+ * 从一段**已完成回合**分叉出新会话（上游 `session/fork`，SessionForkRequest { sessionId, atSeq?, increaseTitle? }）。
  *
  * `atSeq` 是事件序号，服务端取**第一条 `seq >= atSeq` 的 `turn/end`** 作为切点（含该回合），
  * 再把切点推到下一个 `turn/start` 之前；**省略或不传** = 从最后一条已完成的回合分叉。
@@ -771,6 +796,10 @@ export async function forkSession(sessionId: string, atSeq?: number): Promise<st
     const result = await rpcCall<{ sessionId: string }>('session.fork', {
         sessionId,
         ...(atSeq === undefined ? {} : { atSeq: Math.floor(atSeq) }),
+        // 子会话标题**由宿主升号**（与上游客户端同：它也只传这一个开关，不自己算名字）。
+        // 插件先前自己 `durableTitleFor` + 算号 + `rename` —— 那是把一个宿主能力在客户端重做一遍，
+        // 结果同一个源分叉两次都得到 `(1)`（本地只拿源标题推号，看不到已有的兄弟会话）。
+        increaseTitle: true,
     });
     return result.sessionId;
 }

@@ -157,7 +157,20 @@ export type HostToViewMessage =
   // 会话投影**整表**（会话统计 / token 用量 / plan / goal / 权限…）：来自宿主的 `session/control` 订阅，
   // 投影一变就推一份当前值。**整表语义**：收到即代表该会话此刻的全部投影（缺键 = 能力未组合）。
   // 页面的「会话统计 / Token 用量」两张卡读它，因此流式期间会跟着变（不是只在打开会话时刷一次）。
-  | { type: 'projections'; sessionId?: string; values?: Record<string, unknown> }
+  | {
+      type: 'projections'
+      sessionId?: string
+      values?: Record<string, unknown>
+      /**
+       * 目标条的 activation：`armed`（本进程可以自动续跑）/ `disarmed`（不能）/
+       * `{}`（没有当前目标，或还没读到 —— 这两种在 wire 上同形，页面按投影的阶段再分）。
+       *
+       * 它**不是投影**（那个值从不落盘、故意不放进投影），另有一条来路（见宿主
+       * `src/dsh/goal-activation.ts`）。跟投影**同一帧**下发是有意的：页面要拿它跟投影里的
+       * 活跃目标按 `(id, revision)` 对账，对不上就当作"还不知道" —— 分两帧到就会错配。
+       */
+      goalActivation?: { id?: string; revision?: number; activation?: 'armed' | 'disarmed' }
+    }
   // 任务清单（输入框上方的常驻条）：整表替换，`null`/缺省 = 没有清单（该区整块不渲染）。
   // 与「行」同源、但不是行：清单不属于任何一个回合，位置也不在对话流里。
   | { type: 'todos'; todos?: TodoItem[] | null }
@@ -203,6 +216,13 @@ export type HostToViewMessage =
   | {
       type: 'rows'
       rows?: unknown[]
+      /**
+       * **本帧变了/新增的行**（§3.3 的"只发变动的行"）：与 `rowKeys` 一起给。
+       * 页面按 `key` 覆盖缓存，再按 `rowsKeys`（原文 `rowKeys`）重排 —— 结果与整表逐字节等价。
+       */
+      rowDelta?: unknown[]
+      /** **全量顺序**（行的 `key`）：几百个小整数，每帧全发也不值一提；页面靠它拼回渲染顺序。 */
+      rowKeys?: number[]
       /** 该批行属于哪个会话（页面据此丢弃上一个会话的本地乐观行） */
       sessionId?: string
       /** 本会话是否有一轮**正在跑**（显式事实：页面据此决定「停止」按钮可用，不从行推导） */
@@ -213,6 +233,11 @@ export type HostToViewMessage =
       historyLoading?: boolean
       /** 当前窗口里的事件条数（诊断用；页面只展示不判定）。 */
       historyEvents?: number
+      /**
+       * **打开历史失败**（上游 `openState === 'error'` 的 `chat.loadError` 横幅）。
+       * **整表语义**：`null` = 当前没有失败（页面据此清掉上一条横幅）。
+       */
+      sessionOpenError?: { message: string; code?: string } | null
     }
   // 消息反馈的状态回帧（列表 / 写入结果 / 业务失败）。**不是渲染指令**：它只喂反馈切片。
   | {
@@ -305,7 +330,6 @@ export type ViewToHostMessage =
       op: 'list' | 'sessions' | 'wsnew' | 'session' | 'new'
       workspaceId?: string
       sessionId?: string
-      blank?: boolean
     }
   | { type: 'selfInfoReq' }
   // 「/」菜单：请求目录(命令+技能)、执行一条 dsh 斜杠命令

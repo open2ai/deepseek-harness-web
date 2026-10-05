@@ -57,7 +57,6 @@ export async function sendRemoteEventResult(
 function sendClientRequest(
     port: number,
     wireMethod: string,
-    body: RpcRequest,
     json: string,
     cookie: string | undefined
 ): Promise<RpcResponse> {
@@ -119,14 +118,14 @@ async function rpcCallAt<T = unknown>(port: number, method: string, payload: unk
     const json = JSON.stringify(body);
     let parsed: RpcResponse;
     try {
-        parsed = await sendClientRequest(port, wireMethod, body, json, authCookieForPort(port));
+        parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port));
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const needAuth = msg.includes('HTTP 401') || msg.includes('HTTP 403');
         if (needAuth && getEndpoint().port === port && getEndpoint().authUrl) {
             const loggedIn = await loginEndpoint(getEndpoint());
             if (loggedIn) {
-                parsed = await sendClientRequest(port, wireMethod, body, json, authCookieForPort(port));
+                parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port));
             } else {
                 throw e;
             }
@@ -146,14 +145,14 @@ async function postWire<T = unknown>(port: number, wireMethod: string, payload: 
     const json = JSON.stringify(body);
     let parsed: RpcResponse;
     try {
-        parsed = await sendClientRequest(port, wireMethod, body, json, authCookieForPort(port));
+        parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port));
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const needAuth = msg.includes('HTTP 401') || msg.includes('HTTP 403');
         if (needAuth && getEndpoint().port === port && getEndpoint().authUrl) {
             const loggedIn = await loginEndpoint(getEndpoint());
             if (loggedIn) {
-                parsed = await sendClientRequest(port, wireMethod, body, json, authCookieForPort(port));
+                parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port));
             } else {
                 throw e;
             }

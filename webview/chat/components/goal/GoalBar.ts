@@ -11,13 +11,15 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
 import type { GoalView } from '../../core/store/types'
 
-/** 阶段 → 条上文字（与上游 locales 同字面量）。complete 不进这张表：它压根不渲染。
- *  `active` + process-local `disarmed` 那一档（上游「未运行的目标」）本插件拿不到，暂缺。 */
+/** 阶段 → 条上文字（与上游 locales 同字面量）。complete 不进这张表：它压根不渲染。 */
 const PHASE_LABEL: Record<string, string> = {
   active: '进行中的目标',
   paused: '已暂停的目标',
   blocked: '受阻的目标',
 }
+
+/** `active` 的**未运行**那一档（上游 `phase.active.disarmed`）—— process-local activation 说了算。 */
+const ACTIVE_DISARMED_LABEL = '未运行的目标'
 
 export function GoalBar({ store }: { store: ChatStore }) {
   const goal: GoalView | null = store.goalState.value
@@ -88,9 +90,27 @@ export function GoalBar({ store }: { store: ChatStore }) {
     </div>`
   }
 
-  const label = PHASE_LABEL[goal.phase] ?? goal.phase
-  // paused（以及上游的 active+disarmed）给"恢复"；本插件只认得 phase，故只有 paused
-  const showResume = goal.phase === 'paused'
+  /**
+   * process-local activation，**按 `(id, revision)` 与投影对账** —— 与投影是两条来路，
+   * 晚到的那一份可能已经过期（上游读这一档时也是这么对账的：
+   * `next.id === goalId && next.revision === revision ? next.activation : undefined`）。
+   * 对不上 = "还不知道"，与上游同形。
+   */
+  const activationRaw = store.goalActivation.value
+  const activation = activationRaw.id === goal.id && activationRaw.revision === goal.revision
+    ? activationRaw.activation
+    : undefined
+  /**
+   * 阶段文字：`active` 时由 activation 决定是哪一档（上游 `activeLabel`）——
+   * `disarmed` = 「未运行的目标」（本进程不会自动续跑它），否则「进行中的目标」。
+   */
+  const label = goal.phase === 'active' && activation === 'disarmed'
+    ? ACTIVE_DISARMED_LABEL
+    : PHASE_LABEL[goal.phase] ?? goal.phase
+  /** 恢复：上游 `showResume = phase === 'paused' || (phase === 'active' && activation === 'disarmed')` */
+  const showResume = goal.phase === 'paused' || (goal.phase === 'active' && activation === 'disarmed')
+  /** 暂停：上游只在 **`active` + `armed`** 时给（激活还不知道时两边都不给，不是"默认给暂停"） */
+  const showPause = goal.phase === 'active' && activation === 'armed'
   return html`<div class="goal-bar" data-goal-bar>
     <div class="goal-bar-row" title=${goal.phase === 'blocked' ? goal.blockedReason : undefined}>
       <span class="goal-glyph" aria-hidden="true"><span class="codicon codicon-target"></span></span>
@@ -98,7 +118,7 @@ export function GoalBar({ store }: { store: ChatStore }) {
       <span class="goal-objective">${goal.objective}</span>
       ${actionError !== null ? html`<span class="goal-error" role="alert">${actionError}</span>` : null}
       <div class="goal-acts">
-        ${goal.phase === 'active'
+        ${showPause
           ? html`<button type="button" class="goal-act" title="暂停目标" aria-label="暂停目标"
               disabled=${pending} onClick=${() => { void run('pause') }}>
               <span class="codicon codicon-debug-pause"></span>

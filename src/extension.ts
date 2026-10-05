@@ -9,7 +9,7 @@ import { DshService, DshNoWorkspaceError } from './api/dshService';
 import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
-import { traceTool } from './dsh/trace';
+import { RowDiffer } from './dsh/rows/diff';
 import {
     applyNativeTitlebarContext,
     TITLEBAR_MODE,
@@ -35,19 +35,28 @@ function logRows(line: string): void {
 }
 
 // 渲染源的唯一通路：宿主把**行**下发给页面，页面据此渲染（旧指令通路已退役，见 docs/design/08 §13）。
+// **只发变动的行**（§3.3）：长会话整表是 13 MB 量级，而每帧真正变的只有个位数行 —— 详 `dsh/rows/diff.ts`。
+const rowDiffer = new RowDiffer<{ key: number }>();
 dsh.onRows = (rows, turnActive) => {
     // 带上会话标识：页面靠它判断「本地的乐观行是不是这个会话的」——
     // 不带的话切会话时上一个会话的乐观行会被当成未认领而留下，processing 恒真（一直「深度求索中」）。
     // 带上 turnActive：**是否在跑是本轮的显式事实**，页面从「行」推导不出来（见 dshService.turnActive）。
     // 窗口分页事实（hasMore/loading/events）与行同帧：列表顶端的「加载更早」按钮只读它，不自己猜。
+    // `sessionOpenError` 同帧下发（**整表语义**：没有失败时明确给 `null`，页面才好清掉上一条横幅）。
+    const openError = dsh.sessionOpenFailure();
+    const { payload } = rowDiffer.diff(rows as { key: number }[]);
+    // 节流预算按**实发**字节算（差分期顺手就有；不必再序列化整表，见 dshService.setSentPayloadBytes）
+    dsh.setSentPayloadBytes(JSON.stringify(payload).length);
     postToChats({
         type: 'rows',
-        rows,
+        ...payload,
+        rows: payload.rows as unknown[] | undefined,
         sessionId: dsh.getSessionId(),
         turnActive,
         historyHasMore: dsh.historyHasMore(),
         historyLoading: dsh.historyLoading(),
         historyEvents: dsh.windowEventCount(),
+        sessionOpenError: openError ?? null,
     });
 };
 // 任务清单（输入框上方的常驻条）：与行同源、同一处派生，页面按整表替换；`null` = 没有清单。
@@ -65,8 +74,8 @@ dsh.onContext = (sessionId, value) => {
 };
 // 会话投影整表（会话统计 / token 用量 / plan / goal / 权限…）：来自 `session/control`，
 // 投影一变就推一份当前值 —— 输入框下方那两张卡据此**跟着流式实时变**（见 dshService.onProjections）。
-dsh.onProjections = (sessionId, values) => {
-    postToChats({ type: 'projections', sessionId, values });
+dsh.onProjections = (sessionId, values, goalActivation) => {
+    postToChats({ type: 'projections', sessionId, values, goalActivation });
 };
 // 审批/提问：宿主侧常驻（见 dshService.ensureAskSubscription）。缓存最后一帧，新 webview ready 时重放。
 dsh.onApproval = (a) => {
@@ -766,7 +775,7 @@ function setupChatWebview(
         listWorkspaceSessions: (id) => listWorkspaceSessionsOf(id),
         wsSwitchNew: (id) => wsSwitchNew(id),
         // 未分组的伪标识在这里收口：`undefined` = 不设当前工作区、不补登记
-        wsRestore: (id, sid, blank) => wsRestore(id === UNGROUPED_ID ? undefined : id, sid, blank),
+        wsRestore: (id, sid) => wsRestore(id === UNGROUPED_ID ? undefined : id, sid),
         wsCreateNew: () => wsCreateNew(),
         getPanelState: () => ({ panelOpen: panel.hasPanel(), viewMode: panel.viewMode }),
         ensureReadyForList: async () => {
@@ -1060,7 +1069,7 @@ function setupChatWebview(
         } else if (msg.type === 'questionResponse') {
             void (async () => {
                 try {
-                    await dsh.answerQuestion(msg.rpcId, msg.sessionId, msg.answers);
+                    await dsh.answerQuestion(msg.rpcId, msg.answers);
                     // 成功才算答完：清缓存并广播关帧。放成功分支里 —— 回答失败时卡片必须还在
                     //（发起侧本地已收起，两边都清就无从重试）。
                     clearPendingAsk();
@@ -1548,7 +1557,7 @@ async function wsSwitchNew(wsId: string): Promise<boolean> {
 
 /** 把会话恢复到当前聊天（供 QuickPick / webview dropdown 共用；调用方负责关 UI）。
  *  `wsId` 传 `undefined` = 这一组是「未分组」：**不设当前工作区、也不补登记**（它本来就不属于任何工作区）。 */
-async function wsRestore(wsId: string | undefined, sessionId: string, blank: boolean): Promise<void> {
+async function wsRestore(wsId: string | undefined, sessionId: string): Promise<void> {
     const target = await ensureChatWebview();
     if (!target) {
         throw new Error('聊天视图未就绪，请先打开侧边栏 DSH 面板');
@@ -1857,7 +1866,7 @@ async function showWorkspacePicker(): Promise<void> {
                     close();
                 }
             } else if (row.action === 'session' && row.workspaceId && row.sessionId) {
-                await wsRestore(row.workspaceId, row.sessionId, row.blank === true);
+                await wsRestore(row.workspaceId, row.sessionId);
                 close();
             } else if (row.action === 'wssessions-more' && row.workspaceId) {
                 // 「展开其余 N 个会话 / 收起」：只切本地展开态，不重拉数据
@@ -1869,7 +1878,7 @@ async function showWorkspacePicker(): Promise<void> {
                 refresh();
             } else if (row.action === 'session-ungrouped' && row.sessionId) {
                 // 未分组：不设当前工作区、不补登记（它本来就不属于任何工作区）
-                await wsRestore(undefined, row.sessionId, row.blank === true);
+                await wsRestore(undefined, row.sessionId);
                 close();
             } else if (row.action === 'new') {
                 if (await wsCreateNew()) {

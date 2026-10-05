@@ -1,14 +1,12 @@
-// 过程**一片**（上游 step-group）的呈现判据 —— 独立纯函数：给定"这一片 + 它自己的事实 + 偏好"，
+// 过程**一片**（上游 step-group）的呈现判据（适配上游 0.2.0-rc.2）：给定"这一片 + 它自己的事实 + 偏好"，
 // 吐出"有没有头 / 头文案 / 图标 / 明细是否可见"。渲染侧只按结果画（`Chain.ts` 之后接线）。
 //
 // 与整回合路径的关系：**判据完全相同**（`processDisclosure` + 三个文案函数），只是把输入从
 // "整条链 + 回合级事实"换成"这一片的链项 + 这一片自己的事实"。所以这里不复制任何规则。
 //
-// 两个与渲染有关的约定（接线时别绕开）：
-//   · 片的事实由宿主下发（`DshRowGroup.facts`），与 `DshTurnProcess` 同形子集 → 直接喂给判据；
-//   · `noFold` 是插件的**有意偏离**（链/片里只含提问行时不出头），按**片**判。
+// 接线约定：片的事实由宿主下发（`DshRowGroup.facts`），是回合级事实的同形子集 → 直接喂给判据。
 
-import type { DshTurnProcess } from '../../../src/dsh/rows/types'
+import type { DshRowGroupFacts, DshTurnProcess } from '../../../src/dsh/rows/types'
 import type { DshTurnProcessItem } from './store/types'
 import { processDisclosure } from './process-fold'
 import {
@@ -32,12 +30,13 @@ export interface ProcessGroupViewInput {
     open: boolean
     /** 该片内的链项（已按链序） */
     items: readonly DshTurnProcessItem[]
-    /** **该片自己的**过程事实（宿主下发）；缺省 = 退回整回合那套事实 */
-    facts: DshTurnProcess | undefined
+    /** **该片自己的**过程事实（宿主下发）；缺省 = 退回整回合那套事实。
+     *  两种事实都收：片的 `DshRowGroupFacts` 是回合级 `DshTurnProcess` 的同形子集。 */
+    facts: DshRowGroupFacts | DshTurnProcess | undefined
     /** 实时细节偏好（上游 `liveProcessDetail`）；`undefined` = 读不到，按显示处理 */
     liveProcessDetail?: boolean
-    /** 本片是否"只含提问行"（插件有意偏离：不出头） */
-    noFold: boolean
+    /** 插话事实（回合级）：片级也用它，见 `ProcessGroup` 的调用点 */
+    hasInterleavedInput?: boolean
 }
 
 export interface ProcessGroupView {
@@ -69,7 +68,6 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             open: input.open,
             // 每片自带头（上游"每个分组 seat 一个头"）
             ownsHead: true,
-            noFold: input.noFold,
             turnStarted: input.turnStarted,
         }).head,
         detail: processDisclosure({
@@ -79,7 +77,6 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             grouping: input.grouping,
             open: input.open,
             ownsHead: true,
-            noFold: input.noFold,
             turnStarted: input.turnStarted,
         }).detail,
         title: liveDetail === '' ? label : `${label} · ${liveDetail}`,

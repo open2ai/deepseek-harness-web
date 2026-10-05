@@ -30,21 +30,6 @@ export interface ChainPagePrefs {
 type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
 
 /**
- * 一片是否"只含提问行"。
- *
- * ⚠️ **这条判据已不再影响折叠**（2026-10-02 撤掉旧偏离）：维护者的左右对照图显示
- * **提问行也参与过程折叠**（web 折起态下面没有那一行，插件此前多显示一行 `向用户提出了问题`）。
- * 现在它只作为**事实查询**保留：调用点仍把它传给 `noFold` 形参，而 `process-fold.ts` 已 `void` 掉该形参。
- * 等服务端确认后，这一支（连同 `noFold` 形参）可以整体删掉。
- *
- * @param items - 这一片的链项。
- * @returns 这一片是不是只有 `ask_user_question` 工具项。
- */
-export function isAskOnlySegment(items: readonly DshTurnProcessItem[]): boolean {
-  return items.length > 0 && items.every((item) => item.kind === 'tool' && item.name === 'ask_user_question')
-}
-
-/**
  * 渲染过程链里的一"片"。
  *
  * @param props.row - 所属回答行（回合级事实与定稿态从这里读）。
@@ -53,28 +38,43 @@ export function isAskOnlySegment(items: readonly DshTurnProcessItem[]): boolean 
  * @param props.items - 该片内的链项（已按链序）。
  * @param props.prefs - 页面级偏好。
  */
-export function ProcessGroup({ row, store, group, items, prefs }: {
+export function ProcessGroup({ row, store, group, items, prefs, outerHidden = false }: {
   row: AssistantRow
   store: ChatStore
   group: Pick<DshRowGroup, 'key' | 'facts'>
   items: readonly DshTurnProcessItem[]
   prefs: ChainPagePrefs
+  /** 外层（整条过程区）此刻是否折起 —— 折起时本片要跟着关掉（上游 `ChatGroupSeat` 同） */
+  outerHidden?: boolean
 }) {
   const turn = row.turn
   // ⚠️ 两个 ref 必须**在 `setOpen` 之前**声明：`setOpen` 是闭包、点的时候才跑，但引用在渲染那一刻
   // 就要求变量已初始化（`const` 的暂时性死区会让"声明在后"直接抛错）。整回合路径的 Chain 同理。
   const bodyRef = useRef<HTMLDivElement | null>(null)
   const pendingInit = useRef<'top' | 'bottom' | null>(null)
-  // 展开态：键 = `${turn}:${group.key}`（各片独立）。回合号缺失（旧宿主）时按"未记录"处理 ——
-  // 默认值与整回合路径一致（进行中展开、定稿收起）。
+  // 展开态：键 = `${turn}:${group.key}`（各片独立）。回合号缺失（旧宿主）时按"未记录"处理。
   const stored = turn === undefined ? undefined : store.groupFoldOpen?.value.get(`${String(turn)}:${group.key}`)
-  const open = stored ?? !row.done
+  // 默认**收起**：上游的分组头用 `useDisclosure`，初始即收 —— **与回合是否已关闭无关**。
+  const open = stored ?? false
   const setOpen = (next: boolean): void => {
     // 手动展开时按上游做一次**预定位**：未关闭的回合停在底部（看最新动静）、已关闭的停在顶部。
     // 真正的写入在渲染后的 layout effect 里（那时元素才存在）。
     if (next) pendingInit.current = row.done ? 'top' : 'bottom'
     if (turn !== undefined) store.setGroupFoldOpen?.(turn, group.key, next)
   }
+
+  /**
+   * **外层收起时把本片也关掉**（上游 `ChatGroupSeat` 的那条 effect：`outerHidden` 为真就 `setOpen(false)`）。
+   *
+   * 为什么不能省：外层"折起"只是把整个过程区挂上 `hidden`，**片自己的展开态还在** ——
+   * 不一起关掉的话，展开回来时下面那些片还是开着的（真机反馈："再点『已完成，用时 X』收起，
+   * 下面的展开也该一起收"）。这里与上游一样只认**外层折起**这一个触发点，用户手动收起外层时同样生效。
+   */
+  useEffect(() => {
+    if (outerHidden && open) {
+      setOpen(false)
+    }
+  }, [outerHidden, open])
 
   // 折叠判定与头文案：**判据一条都不复制**，全在 `core/process-group-view.ts`（纯函数、有守卫）。
   // `turnStarted` 用本片自己的事实（缺省退回回合级的），`open` 用本片的展开态。
@@ -85,9 +85,10 @@ export function ProcessGroup({ row, store, group, items, prefs }: {
     turnStarted: group.facts?.turnStarted ?? row.process?.turnStarted === true,
     open,
     items,
+    // 插话是**回合级**事实（链项里没有人类消息），所以片级也取宿主算好的那个字段
+    hasInterleavedInput: row.process?.hasInterleavedInput === true,
     facts: group.facts,
     liveProcessDetail: prefs.liveProcessDetail,
-    noFold: isAskOnlySegment(items),
   })
 
   // **标题稳定延迟**（上游 `useStableLiveProcessTitle`）：进行中每帧都可能换标题，

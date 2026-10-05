@@ -16,6 +16,56 @@ import type { OutboxSlice } from './outbox'
 import type { FeedbackSlice } from './feedback'
 import type { QueueSlice } from './queue'
 
+/**
+ * **行帧的拼装缓存**（§3.3 的"只发变动的行"）：宿主只发变动的行 + 全量 `rowKeys`，
+ * 页面按 `key` 覆盖缓存、再按 `rowKeys` 拼回渲染顺序 —— 结果与"宿主发整表"逐字节等价。
+ *
+ * 缓存放在**摄入边界**（这里）而不向下改 `applyHostRows` 的契约：乐观行认领、去重那些逻辑
+ * 一行不动，照旧看到"整表"。
+ */
+let rowCache = new Map<number, unknown>()
+let rowCacheSession: string | undefined
+
+/** 按本帧（整表 或 delta + keys）拼出整表；会话一变就丢缓存重来。 */
+function assembleRows(m: {
+  rows?: unknown[]
+  rowDelta?: unknown[]
+  rowKeys?: number[]
+  sessionId?: string
+}): unknown[] {
+  if (m.sessionId !== rowCacheSession) {
+    rowCache = new Map()
+    rowCacheSession = m.sessionId
+  }
+  // 整表帧（首帧 / 窗口整表替换）：直接替换缓存
+  if (m.rows !== undefined) {
+    rowCache = new Map()
+    for (const row of m.rows) {
+      const key = (row as { key?: unknown } | null)?.key
+      if (typeof key === 'number') rowCache.set(key, row)
+    }
+    return m.rows
+  }
+  for (const row of m.rowDelta ?? []) {
+    const key = (row as { key?: unknown } | null)?.key
+    if (typeof key === 'number') rowCache.set(key, row)
+  }
+  const keys = m.rowKeys ?? []
+  const out: unknown[] = []
+  for (const key of keys) {
+    const row = rowCache.get(key)
+    if (row !== undefined) out.push(row)
+  }
+  // 缓存里已不在顺序中的键（窗口前移丢掉的行）清掉，免得越积越多
+  if (rowCache.size > keys.length) {
+    const kept = new Set(keys)
+    for (const key of [...rowCache.keys()]) {
+      if (!kept.has(key)) rowCache.delete(key)
+    }
+  }
+  return out
+}
+
 export interface ReducerDeps {
   messages: MessagesSlice
   composer: ComposerSlice
@@ -100,7 +150,9 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       // 会话投影整表（会话统计 / token 用量 / plan / goal…）：与上下文分开一条，
       // 因为它一变就要重推整个整表、而环只要那两个字段。**整表语义**：直接替换。
       case 'projections':
-        status.applyProjections(m.values ?? {})
+        // 激活与投影同帧到达，但**不是投影**（`goals/get` + `goal/activation-changed` 的来路）：
+        // 一起交给 status 存起来，由目标条按 `(id, revision)` 对账
+        status.applyProjections(m.values ?? {}, m.goalActivation)
         // 迟到回答：投影里的 `userQuestions` 决定「哪些限时提问还能补答」（拿不到就是没有）
         question.applyLateQuestions(m.values ?? {})
         break
@@ -142,9 +194,17 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         break
       case 'rows':
         // 宿主下发的行（阶段 4，见 docs/design/08 §11）：渲染源切到宿主侧
-        messages.applyHostRows(m.rows, m.sessionId, m.turnActive)
+        // **只发变动的行**（§3.3）：`rowDelta` + `rowKeys` 在这里拼回整表 —— 等价性是硬约束
+        //（守卫 `tmp/_rows.diff.test.mjs` 逐前缀比对两种口径），拼装逻辑只此一处。
+        messages.applyHostRows(assembleRows(m), m.sessionId, m.turnActive)
         // 窗口分页事实（「加载更早」按钮的门与进行态）：跟同一帧下发，页面只做镜像
-        messages.applyHistory({ hasMore: m.historyHasMore, loading: m.historyLoading, events: m.historyEvents })
+        // `sessionOpenError` 同帧（整表语义：`null` = 没有失败，用来清掉上一条横幅）
+        messages.applyHistory({
+          hasMore: m.historyHasMore,
+          loading: m.historyLoading,
+          events: m.historyEvents,
+          openError: m.sessionOpenError,
+        })
         // 队列卡的本地「发送中」也按提交标识认领：这次提交可能落在对话流（空闲）或队列（忙时），
         // 两条路都以同一个 `rpcId` 回显 —— 只认队列帧的话，竞态下会有一条「发送中」永远挂着。
         // 同时记下「日志里已落账」的标识：pending 插话气泡据此去重（队列帧可能比行帧慢一帧）。

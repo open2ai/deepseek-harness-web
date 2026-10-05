@@ -57,7 +57,7 @@ export interface SelfDrawnTitlebarCtx {
     /** 切工作区并开新会话(共享 helper wsSwitchNew)；**自己兜错并回报成败**，不往外抛 */
     wsSwitchNew(wsId: string): Promise<boolean>;
     /** 恢复会话(共享 helper wsRestore) */
-    wsRestore(wsId: string, sessionId: string, blank: boolean): Promise<void>;
+    wsRestore(wsId: string, sessionId: string): Promise<void>;
     /** 新建工作区(共享 helper wsCreateNew) */
     wsCreateNew(): Promise<boolean>;
     /** 取 DSH 网页面板开关/查看模式(供 selfInfo:浏览器/本地/刷新按钮显隐) */
@@ -126,7 +126,7 @@ export function installSelfDrawnTitlebarMessages(
                         const ok = await ctx.wsSwitchNew(String(msg.workspaceId));
                         ctx.post({ type: 'wsActionDone', ok });
                     } else if (op === 'session' && msg.workspaceId && msg.sessionId) {
-                        await ctx.wsRestore(String(msg.workspaceId), String(msg.sessionId), msg.blank === true);
+                        await ctx.wsRestore(String(msg.workspaceId), String(msg.sessionId));
                         ctx.post({ type: 'wsActionDone', ok: true });
                     } else if (op === 'new') {
                         const created = await ctx.wsCreateNew();

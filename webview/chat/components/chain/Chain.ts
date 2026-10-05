@@ -2,7 +2,8 @@
 // **文案按上游 `processTitle()`**：取该片前三类活动的本地化名称（如「已读取文件并读取图片」），
 // **不带计数**；没有工具调用时是「已完成分析」。进行中则用进行时文案（「正在读取文件」）。
 // **折叠头出现的条件由偏好里的两列共同决定**（0.2.0 起）：
-//   进行中 → 只有 `stepGrouping === 'collapsed'`（compact/standard 档）出分组头，默认展开着看过程在动；
+//   进行中 → 只有 `stepGrouping === 'collapsed'`（compact/standard 档）出分组头；
+//            它和已关闭回合一样**默认收起**（上游 `useDisclosure()` 初始即收），点开才看明细；
 //            `history`（detailed）与 `none`（verbose）下进行中平铺、没有头；
 //   已完成 + `foldCompletedTurns`（compact/standard/detailed 三档都为真）→ 收起成折叠头，点开看明细；
 //   已完成 + `verbose`（不折叠）→ 过程行平铺。
@@ -46,12 +47,12 @@ export { chainRenderPlan, reasoningLive }
 
 type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
 
-export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; noFold: boolean; soleRow?: boolean }) {
+export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; soleRow?: boolean }) {
   const chain = row.chain
   // 上游显示偏好（控制已完成轮次的过程内容）；未知/未到 = compact，即接入前的固有形态
   const compact = store.transcriptView.value === 'compact'
   // 展开态是**回合级**的（整回合路径：同回合多段行共用；上游按 (turn, answerStep) 持久化）。
-  // 未记录 = 默认：进行中展开（能实时看过程在动）、定稿收起。
+  // 默认**收起**：上游的分组头初始即收，**与回合是否已关闭无关**；只有用户点开才展开。
   // **按片路径不用它**（各片有自己的键 `${turn}:${group.key}`，见 `ProcessGroup`）—— 那道回合级
   // 控制属于"整回合一条头"的形态，随片化的头一起退出；外层折叠是另一步（见 14 §进度 ⑧）。
   const turn = row.turn
@@ -62,7 +63,7 @@ export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: Assistan
   const bodyRef = useRef<HTMLDivElement | null>(null)
   const pendingInit = useRef<'top' | 'bottom' | null>(null)
   const [edges, setEdges] = useState<ScrollEdges>({ up: false, down: false })
-  const open = stored ?? !row.done
+  const open = stored ?? false
   const setOpen = (next: boolean): void => {
     // 手动展开时按上游做一次**预定位**：未关闭的回合停在底部（看最新动静）、已关闭的停在顶部。
     // 真正的写入在渲染后的 layout effect 里（那时元素才存在）。
@@ -82,8 +83,10 @@ export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: Assistan
   const outer = outerFold({
     foldCompleted: compact,
     done: row.done,
-    // 被插话切开 = 多条行；跨行折会藏掉用户正在看的段落（等价上游 `hasInterleavedInput`）
+    // 行兜底：本行不是本回合唯一一行时不跨行折（跨行折会藏掉用户正在看的段落）
     soleRow: soleRow !== false,
+    // 上游 `turnProcessAlwaysOpen()` 的一项：过程区间里有人插过话 → 永远展开（宿主算好的事实）
+    hasInterleavedInput: row.process?.hasInterleavedInput === true,
     hasProcess: row.process !== undefined,
     answerStep: row.process?.answerStep ?? undefined,
     storedAnswerStep: turn === undefined ? undefined : store.outerAnswerStep?.value.get(turn),
@@ -152,7 +155,6 @@ export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: Assistan
     grouping: store.stepGrouping?.value,
     open,
     ownsHead,
-    noFold,
     // 窗口就绪的最后一条门（上游 0.2.0：per-Turn 的 `turnStarted || turnClosed`）：
     // 窗口里有本回合的 `turn/start` 就算就绪；没有它则靠 `done`（= `turnClosed`）。
     // **历史分页截断不是不折叠的理由**（旧版那道 `historyIncomplete` 上游已删）。
@@ -239,39 +241,39 @@ export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: Assistan
    * 现在：`hidden` 挂 `.chain-body`，**这一行 + 细线始终在**（看起来 = "只剩这条线"）。
    */
   const wallSecOf = row.usageRaw?.['wallSec']
-  const doneLine = chain.length === 0
+  /**
+   * **一个回合只有一个控制行**：控制块归谁由 `MessageList` 按**过滤后的可见行**算出来（`ownsHead`），
+   * 这里只在**拥有它的那条行**上渲染「已完成 [, 用时 X]」。
+   *
+   * 为什么不能每条行各渲染一个：被插话切成多段行时，控制行会重复出现（真机现象是同一个回合
+   * 底下连着两块「已完成 / 已完成分析」）。归属必须跟着**可见**内容走 —— 一条只有不可见注入的行
+   * 不能把整个回合的控制块抢走。
+   */
+  const doneLine = chain.length === 0 || !ownsHead
     ? null
     : doneStatusText(row.done, row.status, typeof wallSecOf === 'number' ? wallSecOf * 1000 : undefined)
   /**
-   * **控制节点（上游 `TurnProcessNodeView`）的三态**，逐字对齐 0.2.0-rc.2：
-   *
-   * ```tsx
-   * const canCollapse = turnProcess.foldable && turnProcess.hasContent && !turnProcessAlwaysOpen(node)
-   * // turnProcessAlwaysOpen = 未关闭 || reason === 'aborted' || reason === 'error'
-   * disabled={!canCollapse}
-   * aria-expanded={turnProcess.hasContent ? open : undefined}
-   * {canCollapse && <IconChevronDownOutlineRegular className={css.chevron} />}
-   * ```
-   *
-   * 于是：
-   *   · `canCollapse` 真 → **有 chevron、可点**；
-   *   · 假 → **按钮仍在、`disabled`、无 chevron**（不是"换成一个纯文本 span"，上游是同一个 button）。
-   * ⚠️ **片数不是条件**（我上一轮误加了 `片数 > 1`，真机反馈"没有箭头可点"就是它）：
-   * 单片回合只要 `hasContent` 为真，上游照样给 chevron —— 点下去藏的是那一片过程区。
-   * 这里 `hasContent` 用 `outerFold` 的输入等价物：过程事实说"有过程内容"（`hasExternalProcess`
-   * 或真的留下思考行的 `inlineReasoning`），且偏好是紧凑档（非紧凑档本来就不折，见 `process-fold.ts`）。
+   * **控制节点的三态**（0.2.0 起）：`canCollapse = foldable && hasContent && !alwaysOpen`；
+   * 它真 → **有 chevron、可点**；假 → **按钮仍在、`disabled`、无 chevron**（是同一个 button）。
+   * ⚠️ **片数不是条件**：单片回合只要 `hasContent` 为真，上游照样给 chevron。
+   * 这里 `hasContent` 用过程事实的等价物："有过程外置"或"真的留下思考行"。
    */
   const hasProcessContent =
     row.process !== undefined && (row.process.hasExternalProcess === true || row.process.inlineReasoning === true)
   /**
    * 上游 `turnProcessAlwaysOpen()`：**只有**"未关闭"与 `aborted` / `error` 不能折。
-   *
-   * ⚠️ 2026-10-02 更正：此前写成"`status` 有值就不能折"——**太宽**。真机现象：点「在新对话中分支」后，
-   * 分叉切点合成的 `turn/end.reason.kind = 'forked'` 让这一行**没有箭头**，而 web 端有
-   * （上游把它当普通收官：文案 `已完成`、`canCollapse` 照常为真）。
+   * ⚠️ 不能再宽：`forked` 这类分叉切点合成的收尾原因是**普通收官**（上游照常给 chevron）。
    */
   const alwaysOpen = row.interrupted === true || row.status === 'aborted' || row.status === 'error'
-  const canCollapse = row.done && compact && hasProcessContent && !alwaysOpen
+  /**
+   * 可点 = `foldable && hasContent && !alwaysOpen`（上游 `TurnProcessNodeView` 的三项）。
+   *
+   * ⚠️ `foldable` 里含 **`answerAnchorSeq !== null`**（上游 `windowReady` 的一环）：**没有回答锚点的回合
+   * 一律不给箭头** —— 折叠动作的落点就是锚点世代，没有锚点可点。漏了这一条的表现是"箭头在、点了没反应"
+   * （真机 47 行，见 `tmp/_foldclick.probe.mjs`）。
+   */
+  const canCollapse =
+    row.done && compact && hasProcessContent && row.process?.answerAnchorSeq !== null && !alwaysOpen
   const toggleDone = (): void => {
     if (turn === undefined || !canCollapse) {
       return
@@ -294,11 +296,12 @@ export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: Assistan
             ? html`<span class="chain-done-chev" data-turn-done-chevron>${chevronGlyph(!outer.hidden)}</span>`
             : null}
         </button>
-        <div class="chain-done-rule" aria-hidden="true"></div>
       </div>`
 
-  // ⚠️ 空链的返回**必须**在所有 hook 之后（见上面 hook 区的注释）
-  if (chain.length === 0) {
+  // ⚠️ 空链的返回**必须**在所有 hook 之后（见上面 hook 区的注释）。
+  // 例外：**回合一条链都没有**时（请求期就失败的那种回合，宿主只补出一条容器行），
+  // 这一行仍要出**控制行**（「处理失败」/「已停止」就在那一格）—— 那是回合级事实，不挂在链上。
+  if (chain.length === 0 && doneLine === null) {
     return null
   }
 
@@ -345,6 +348,7 @@ export function Chain({ row, store, ownsHead, noFold, soleRow }: { row: Assistan
           entry.kind === 'group'
             ? html`<${ProcessGroup} key=${entry.key} row=${row} store=${store}
                 group=${{ key: entry.key, facts: entry.facts }} items=${entry.items}
+                outerHidden=${outer.hidden}
                 prefs=${{ compact, grouping: store.stepGrouping?.value, liveProcessDetail: store.liveProcessDetail?.value }} />`
             : html`<div class="chain-proc-text" key=${entry.item.key}>${entry.item.text}</div>`)}
       </div>

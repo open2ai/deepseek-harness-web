@@ -3,15 +3,20 @@
 import { signal } from '@preact/signals'
 import type { ContextBreakdown, ContextPressure, TodoItem } from '../protocol'
 import type { ChatHost } from '../host'
-import type { ChatStore, GoalView, SessionStatsView, TokenUsageView } from './types'
+import type { ChatStore, GoalActivationView, GoalView, SessionStatsView, TokenUsageView } from './types'
 
 export interface StatusSlice {
   store: Pick<
     ChatStore,
-    'busy' | 'sessionCwd' | 'sessionStats' | 'tokenUsage' | 'planState' | 'goalState' | 'todos' | 'contextFacts' | 'goalAction'
+    'busy' | 'sessionCwd' | 'sessionStats' | 'tokenUsage' | 'planState' | 'goalState' | 'goalActivation' | 'todos' | 'contextFacts' | 'goalAction'
   >
-  /** 由投影快照刷新会话统计、token 用量、plan 与 goal（形状见各派生函数）。 */
-  applyProjections(proj: Record<string, unknown>): void
+  /**
+   * 由投影快照刷新会话统计、token 用量、plan 与 goal（形状见各派生函数）。
+   * @param proj - 投影整表
+   * @param goalActivation - 目标条的 process-local activation（**不是投影**，跟同一帧来）；
+   *   `undefined` = 这一帧没带（如 `chatInfo` 基线）→ **保持原值**，不要误清
+   */
+  applyProjections(proj: Record<string, unknown>, goalActivation?: GoalActivationView): void
   /** 任务清单整表替换（宿主折叠好下发）；`null` = 没有清单。 */
   applyTodos(todos: readonly TodoItem[] | null | undefined): void
   /** 上下文占用两条投影（发送按钮左侧的环）：两条都没有 → null（整个环不渲染）。 */
@@ -26,11 +31,17 @@ export function createStatus(host: ChatHost): StatusSlice {
   const tokenUsage = signal<TokenUsageView | null>(null)
   const planState = signal<{ active: boolean; pending: boolean } | null>(null)
   const goalState = signal<GoalView | null>(null)
+  /**
+   * 目标条的 process-local activation（`{}` = 没有当前目标 / 还没读到）。
+   *
+   * ⚠️ 与 `goalState` 是**两条来路**（一个来自投影、一个来自 `goals/get` + 事件边沿），
+   * 所以别当成同一个目标的属性直接用 —— 消费处按 `(id, revision)` 对账。
+   */
+  const goalActivation = signal<GoalActivationView>({})
   /** 任务清单（输入框上方的常驻条）：空数组 = 没有清单，卡片整块不渲染 */
   const todos = signal<TodoItem[]>([])
   /** 上下文占用（发送按钮左侧的环）：两条投影都可能缺，都缺就整块不渲染 */
   const contextFacts = signal<{ pressure?: ContextPressure; breakdown?: ContextBreakdown } | null>(null)
-
   /** plan 投影：能力未组合则键缺失 → 保持 null。 */
   function derivePlanState(proj: Record<string, unknown>): { active: boolean; pending: boolean } | null {
     const p = proj['plan'] as { active?: boolean; pending?: boolean } | undefined
@@ -113,12 +124,16 @@ export function createStatus(host: ChatHost): StatusSlice {
    */
   let projectionValues: Record<string, unknown> = {}
 
-  function applyProjections(proj: Record<string, unknown>): void {
+  function applyProjections(proj: Record<string, unknown>, activation?: GoalActivationView): void {
     projectionValues = { ...proj }
     sessionStats.value = deriveSessionStats(projectionValues)
     tokenUsage.value = deriveTokenUsage(projectionValues)
     planState.value = derivePlanState(projectionValues)
     goalState.value = deriveGoalState(projectionValues)
+    // 激活照**整表语义**替换（新值 `{}` 也是有效值 = "没有当前目标"）；只有"这一帧没带"才保持原值
+    if (activation !== undefined) {
+      goalActivation.value = { ...activation }
+    }
   }
 
   function applyTodos(next: readonly TodoItem[] | null | undefined): void {
@@ -137,7 +152,7 @@ export function createStatus(host: ChatHost): StatusSlice {
    * 目标条的动作：把动作交给宿主去打上游 goal RPC（宿主现读投影取 CAS 引用，见 `dshService.goalAction`）。
    *
    * 为什么不经 `/goal` 命令：命令要**下一轮**才被 agent 处理（白跑一次模型回合），而条上的按钮是即时操作
-   * —— 上游 `ui-goal` 也是直接打 `ctx.remote.goals.*`。失败时宿主回 `{error}`，条内联显示。
+   * —— 上游的条也是直接打 goal remote（不发命令）。失败时宿主回 `{error}`，条内联显示。
    * @param action - edit（带 objective）/ pause / resume / clear
    * @returns 失败时 `{error: '<message> (<code>)'}`；成功 `{}`
    */
@@ -155,6 +170,8 @@ export function createStatus(host: ChatHost): StatusSlice {
     tokenUsage.value = null
     planState.value = null
     goalState.value = null
+    // 激活随会话一起换：上一个会话的档绝不能留给新会话（宿主也会在基线帧里重发一份）
+    goalActivation.value = {}
     todos.value = []
     contextFacts.value = null
     // sessionCwd 不随会话清空：它标识的是工作区，换会话后同一工作区仍有效；
@@ -162,7 +179,7 @@ export function createStatus(host: ChatHost): StatusSlice {
   }
 
   return {
-    store: { busy, sessionCwd, sessionStats, tokenUsage, planState, goalState, todos, contextFacts, goalAction },
+    store: { busy, sessionCwd, sessionStats, tokenUsage, planState, goalState, goalActivation, todos, contextFacts, goalAction },
     applyProjections,
     applyTodos,
     applyContext,

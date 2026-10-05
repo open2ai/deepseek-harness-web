@@ -14,8 +14,8 @@ import { toolStatusOf } from '../official/tool-status';
 import { turnEndFailure, type DshTurnFailure } from '../official/turn-end';
 import { createTurnProcessInput, deriveTurnProcess, filterGroupsForChain } from './turn-process';
 import { createInboxClaimFold } from './inbox-claims';
-import type { DshPresentedFile, DshRowItem, DshStreamEvent, DshStreamRow } from './types';
-
+import { todoItemsOf } from './todos';
+import type { DshPresentedFile, DshRowItem, DshStreamEvent, DshStreamRow, DshTodoItem } from './types';
 type AssistantRow = Extract<DshStreamRow, { kind: 'assistant' }>;
 
 /** 非空字符串取值（空串按缺省处理，与既有通路的同义 helper 一致）。 */
@@ -53,6 +53,97 @@ function hasToolChangeBlocks(content: readonly unknown[]): boolean {
         const type = (block as { type?: unknown }).type;
         return type === 'tool-addition' || type === 'tool-removal';
     });
+}
+
+/**
+ * 从 `user/message` 事件里认出**压缩检查点**（自动压缩把被压掉的那段历史替换成一条摘要消息）。
+ *
+ * 判据 = `surfaceOp` 是 **replace 型**（不是 `append`）+ 源里带 `compactionId`。两种源形状都收：
+ *   · `{ kind: 'plugin', plugin: 'compact', compactionId }` —— **本机 0.2.0-rc.2 的真实日志形状**；
+ *   · `{ kind: 'compact-checkpoint', compactionId }` —— 上游 `compactCheckpointSource()` 的构造（读上游代码时以它为准）。
+ * 两者都表示同一件事，不认会导致这条上万字的摘要被当成用户消息/普通注入。
+ *
+ * `sourceCommandId` 一并带出：**带它的检查点归手动压缩命令**（上游把这类事件判给 `command` 节点）。
+ *
+ * @param event - 候选事件。
+ * @returns 事务标识与（可能有的）发起命令；不是检查点则 undefined。
+ */
+function compactionCheckpoint(event: { type: string; surfaceOp?: unknown; data?: Record<string, unknown> }): {
+    compactionId: string;
+    sourceCommandId?: string;
+} | undefined {
+    if (event.type !== 'user/message') {
+        return undefined;
+    }
+    const op = event.surfaceOp;
+    if (op === undefined || op === 'append') {
+        return undefined;
+    }
+    const source = event.data?.['source'];
+    if (source === null || typeof source !== 'object' || Array.isArray(source)) {
+        return undefined;
+    }
+    const record = source as { kind?: unknown; plugin?: unknown; compactionId?: unknown; sourceCommandId?: unknown };
+    const isCheckpoint = record.kind === 'compact-checkpoint' || (record.kind === 'plugin' && record.plugin === 'compact');
+    if (!isCheckpoint || typeof record.compactionId !== 'string' || record.compactionId === '') {
+        return undefined;
+    }
+    return {
+        compactionId: record.compactionId,
+        ...(typeof record.sourceCommandId === 'string' ? { sourceCommandId: record.sourceCommandId } : {}),
+    };
+}
+
+/**
+ * 从 `compaction/summary.data` 取呈现要的事实（上游 `compactSummary` 同口径）：
+ * 摘要 = `summary` 里 text 块拼接后 trim（全空 → 不带，即"不可展开"）；
+ * 条目数 = `shadowedSeqs.length`（**须全为非负安全整数**，否则不带）；token 数须为非负安全整数。
+ *
+ * @param d - `compaction/summary` 的 data。
+ */
+function compactionSummaryFacts(d: Record<string, unknown>): {
+    summary?: string;
+    shadowedItemCount?: number;
+    shadowedTokenCount?: number;
+} {
+    const blocks = d['summary'];
+    let summary: string | undefined;
+    if (Array.isArray(blocks)) {
+        const text = blocks
+            .map((b) => (b !== null && typeof b === 'object' && (b as { type?: unknown }).type === 'text' && typeof (b as { text?: unknown }).text === 'string' ? ((b as { text: string }).text) : ''))
+            .join('');
+        if (text.trim() !== '') {
+            summary = text;
+        }
+    }
+    const shadowedSeqs = Array.isArray(d['shadowedSeqs']) ? d['shadowedSeqs'] : undefined;
+    const seqsOk = shadowedSeqs !== undefined && shadowedSeqs.every((s) => Number.isSafeInteger(s) && (s as number) >= 0);
+    const tokens = d['shadowedTokenCount'];
+    const tokensOk = Number.isSafeInteger(tokens) && (tokens as number) >= 0;
+    return {
+        ...(summary === undefined ? {} : { summary }),
+        ...(seqsOk ? { shadowedItemCount: (shadowedSeqs as unknown[]).length } : {}),
+        ...(tokensOk ? { shadowedTokenCount: tokens as number } : {}),
+    };
+}
+
+/**
+ * 从 `llm/retry.data.failure` 取重试行展开区要的两项（`message` / `code`）；都没有就不带。
+ *
+ * 中文不在这里选：`code` → 本地化由页面按上游 `failureMessage()` 的口径决议（同终局通知行）。
+ * @param raw - `failure` 原文。
+ */
+function retryFailure(raw: unknown): { message?: string; code?: string } | undefined {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+        return undefined;
+    }
+    const record = raw as { message?: unknown; code?: unknown };
+    const message = typeof record.message === 'string' ? record.message : undefined;
+    const code = typeof record.code === 'string' ? record.code : undefined;
+    if (message === undefined && code === undefined) {
+        return undefined;
+    }
+    return { ...(message === undefined ? {} : { message }), ...(code === undefined ? {} : { code }) };
 }
 
 /**
@@ -115,6 +206,25 @@ export interface RowsFoldCheckpoint {
     currentStep: number | undefined;
     /** 前缀里「用户行 key → 它属于哪个回合」：系统提示词按回合认位要用（行模型不带这个字段）。 */
     userTurns: ReadonlyArray<readonly [number, number | undefined]>;
+    /**
+     * **跨批次的配对表**（`commandId` / `compactionId` / `retryId` → 行下标）。
+     *
+     * 为什么必须进断点：一次「用户命令」（`/plan`、`/compact`…）的 `command/run` 与 `command/done`
+     * **可以隔着一个回合边界** —— 真实日志里 run 落在 `turn/end` 之后、done 落在下一个 `turn/start`
+     * 之后。断点正好建在那个 `turn/start` 上，于是 run 被封进前缀、done 在新批次里找不到它，
+     * 结果**同一个命令出两行**（`plan ｜ 执行中…` 与 `指令 ｜ …`）。三个表同理。
+     *
+     * 下标语义：恢复时 `rows` 由 `[...checkpoint.rows]` 起头，前缀部分的位置不变，所以下标直接可用。
+     */
+    commandRowAt: ReadonlyArray<readonly [string, number]>;
+    compactionRowAt: ReadonlyArray<readonly [string, number]>;
+    retryRowAt: ReadonlyArray<readonly [string, number]>;
+    /** 摘要先于检查点到达时的暂存（同上，跨批次也要活下来）。 */
+    pendingCompactionSummary: ReadonlyArray<
+        readonly [string, { summaryEventSeq?: number; summary?: string; shadowedItemCount?: number; shadowedTokenCount?: number }]
+    >;
+    /** 最近一次 `todo/write` 落盘的清单（todo 卡 diff 基线；跨回合、跨批次都要活下来）。 */
+    lastTodoWrite: DshTodoItem[] | null;
 }
 
 /** 增量折叠的产物：行 + 下一次可用的断点。 */
@@ -303,6 +413,31 @@ export function buildRowsIncremental(
      * 只在收到 `deliverables/presented` 时写：那个事件是工具的落账，成功才有。
      */
     const presentedByPath = new Map<string, DshPresentedFile>();
+    /**
+     * **重试链的行位置**（`retryId` → 行下标）。
+     *
+     * 上游按 `retryId` 把同一条链的事件聚成**一个节点**：只有 `retry === 1` 的 `llm/retry` 会**开链**
+     * （窗口里丢了首条就整链不渲染），后续 `llm/retry` 只更新该行，`llm/retry-started` 把该次标成已开始。
+     */
+    const retryRowAt = new Map<string, number>();
+    /** 自动压缩标记的行位置（`compactionId` → 行下标）：检查点落地时建、`compaction/summary` 到账时补摘要。 */
+    const compactionRowAt = new Map<string, number>();
+    /** 手动命令行的行位置（`commandId` → 行下标）：`command/run` 建行、`command/done` 只补结果。 */
+    const commandRowAt = new Map<string, number>();
+    /** 摘要先于检查点到达时的暂存（罕见；上游靠 `matches` 兜底，这里等价用一个小表）。 */
+    const pendingCompactionSummary = new Map<
+        string,
+        { summaryEventSeq?: number; summary?: string; shadowedItemCount?: number; shadowedTokenCount?: number }
+    >();
+    /**
+     * **最近一次 `todo/write` 落盘的清单**（窗口级、跨回合存活，**不随 `turn/start` 清空**）。
+     *
+     * 这是 todo 卡 diff 的基线（镜像上游 `tool-todo-history`：每条 `todo_write` 调用都与它之前
+     * 最近一次 `todo/write` 事件配对）。与 `todos.ts` 的 `foldTodos`（输入框常驻卡、本轮清空）**不是
+     * 同一份**——那份看「当前清单」，这份看「上一份落盘清单」，两者口径刻意分开。
+     * `null` = 窗口里还没有 `todo/write`（页面据此再按 `historyHasMore` 分「首次记录/旧清单不可用」）。
+     */
+    let lastTodoWrite: DshTodoItem[] | null = null;
 
     const openAssistant = (): void => {
         // 计数在**定稿**时写入（进行中页面用链内实时数，与既有口径一致）
@@ -605,7 +740,15 @@ export function buildRowsIncremental(
             toolCallCount += 1;
         }
         noteChainStep(step, row.chain.length);
-        replaceActive({ ...row, chain: [...row.chain, { kind: 'tool', key: key++, step, callId, name, argsRaw, status: 'running' }] });
+        replaceActive({
+            ...row,
+            chain: [...row.chain, {
+                kind: 'tool', key: key++, step, callId, name, argsRaw, status: 'running',
+                // todo 卡 diff 基线：此刻「本次写入」的 todo/write 还没到（工具先调用、后落盘），
+                // lastTodoWrite 就是**上一次**的清单，正是 diff 要的基线。
+                ...(name === 'todo_write' ? { todoBaseline: lastTodoWrite } : {}),
+            }],
+        });
         // 该步的工具落链了：先前「等过程成员出现再定稿」的步骤文本此刻可以补插（位置才准）
         flushSettledStepText();
     };
@@ -649,7 +792,14 @@ export function buildRowsIncremental(
             ...(name === 'ask_user_question' || name === 'request_user_input' ? { ask: true } : {}),
         });
         noteChainStep(step, row.chain.length);
-        replaceActive({ ...row, chain: [...row.chain, { kind: 'tool', key: key++, step, callId, name, status: 'preparing' }] });
+        replaceActive({
+            ...row,
+            chain: [...row.chain, {
+                kind: 'tool', key: key++, step, callId, name, status: 'preparing',
+                // 准备中的 todo_write 同样带上基线（升级成 running 时经 `...tool` 原样保留）。
+                ...(name === 'todo_write' ? { todoBaseline: lastTodoWrite } : {}),
+            }],
+        });
         flushSettledStepText();
     };
 
@@ -917,6 +1067,23 @@ export function buildRowsIncremental(
         for (const [rowKey, turn] of prev.userTurns) {
             userTurn.set(rowKey, turn);
         }
+        // 跨批次的配对表：一次用户命令的 run/done 可能被断点切开（见 `RowsFoldCheckpoint`），
+        // 不还原就会把同一个命令渲染成两行。下标语义与 `prev.rows` 对齐（前缀位置不变）。
+        for (const [id, at] of prev.commandRowAt) {
+            commandRowAt.set(id, at);
+        }
+        for (const [id, at] of prev.compactionRowAt) {
+            compactionRowAt.set(id, at);
+        }
+        for (const [id, at] of prev.retryRowAt) {
+            retryRowAt.set(id, at);
+        }
+        for (const [id, pending] of prev.pendingCompactionSummary) {
+            pendingCompactionSummary.set(id, pending);
+        }
+        // todo 卡 diff 基线跨回合存活：断点恢复时把前缀里最后一次 `todo/write` 的清单接回来，
+        // 否则尾巴里的 todo_write 会把基线当成 null（首次记录），diff 静默退化成「无对比」。
+        lastTodoWrite = prev.lastTodoWrite;
         fromIndex = at;
         // 断点处的 `turn/start` 本身还没有被消费过（断点记的是"这一回合从这里开始"）：
         // 它与后续事件一起走正常流程，`turn/start` 分支会把本回合状态重置一遍。
@@ -940,6 +1107,11 @@ export function buildRowsIncremental(
                     currentTurn,
                     currentStep,
                     userTurns: [...userTurn],
+                    commandRowAt: [...commandRowAt],
+                    compactionRowAt: [...compactionRowAt],
+                    retryRowAt: [...retryRowAt],
+                    pendingCompactionSummary: [...pendingCompactionSummary],
+                    lastTodoWrite,
                 };
                 if (process.env['DSH_ROWS_DEBUG'] !== undefined) {
                     console.warn(`[dsh-ckpt] 封存断点 at=${String(i)} rows=${String(rows.length)} key=${String(key)} turn=${String(currentTurn)}`);
@@ -1038,6 +1210,11 @@ export function buildRowsIncremental(
                 : undefined;
             const content = message === undefined ? undefined : message['content'];
             const blocks = Array.isArray(content) ? (content as unknown[]) : [];
+            if (blocks.length === 0) {
+                continue;
+            }
+            // 与上下文注入同一条口径：**看不见的（非工具增删块）不许自己开一行**，
+            // 否则会得到「有控制行、无内容」的假回答行（见 user/message 上下文分支的注释）。
             const row = ensureActive();
             if (row === undefined || blocks.length === 0) {
                 continue;
@@ -1060,6 +1237,89 @@ export function buildRowsIncremental(
             continue;
         }
 
+        if (type === 'command/run' || type === 'command/done') {
+            // 手动命令（上游 `command` / `manual-compaction` 节点）：`command/run`（start）+ `command/done`（update）
+            // 按 `commandId` 配成**一条独立行**；两者都是 log-only 事件（不进派生历史），只按 seq 折成一个节点。
+            const commandId = typeof d['commandId'] === 'string' ? (d['commandId'] as string) : '';
+            if (commandId !== '') {
+                const at = commandRowAt.get(commandId);
+                if (type === 'command/run') {
+                    if (at === undefined) {
+                        commandRowAt.set(commandId, rows.length);
+                        rows.push({
+                            kind: 'command',
+                            key: key++,
+                            commandId,
+                            name: typeof d['name'] === 'string' ? (d['name'] as string) : null,
+                        });
+                    }
+                } else {
+                    // `command/done` 只补结果：**行不移动**（上游 `commandFromDone` 保留 run 的 seq/time/name）
+                    const outcome = {
+                        kind: (d['kind'] === 'error' ? 'error' : 'success') as 'success' | 'error',
+                        ...(typeof d['text'] === 'string' ? { text: d['text'] as string } : {}),
+                    };
+                    if (at === undefined) {
+                        // run 在窗口外：上游照样建节点（name/args = null）
+                        commandRowAt.set(commandId, rows.length);
+                        rows.push({ kind: 'command', key: key++, commandId, name: null, outcome });
+                    } else {
+                        rows[at] = { ...(rows[at] as Extract<DshStreamRow, { kind: 'command' }>), outcome };
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (compactionCheckpoint({ type, surfaceOp: event.surfaceOp, data: d }) !== undefined || type.startsWith('compaction/')) {
+            // 自动压缩：**只有检查点落地才出行**（上游 `buildViewNode` 在没有 checkpoint 时返回 null）。
+            // 三类 `compaction/*` 事件只做登记/更新：`start`/`end` 对呈现惰性，`summary` 提供摘要与计数。
+            const checkpoint = compactionCheckpoint({ type, surfaceOp: event.surfaceOp, data: d });
+            const compactionId = type.startsWith('compaction/')
+                ? (typeof d['compactionId'] === 'string' ? (d['compactionId'] as string) : undefined)
+                : checkpoint?.compactionId;
+            if (compactionId !== undefined && compactionId !== '') {
+                // 手动压缩（`/compact`）归命令行（上游把这四个事件都判给 `command` 节点）→ 这里不建行
+                const sourceCommandId = type.startsWith('compaction/')
+                    ? (typeof d['sourceCommandId'] === 'string' ? (d['sourceCommandId'] as string) : undefined)
+                    : checkpoint?.sourceCommandId;
+                // 手动压缩（`/compact`）归命令行（上游把这类事件判给 `command` 节点）→ 这里不建行
+                if (sourceCommandId === undefined) {
+                    const at = compactionRowAt.get(compactionId);
+                    if (type === 'compaction/summary') {
+                        const patch = {
+                            ...(typeof event.seq === 'number' ? { summaryEventSeq: event.seq } : {}),
+                            ...compactionSummaryFacts(d),
+                        };
+                        if (at !== undefined) {
+                            rows[at] = { ...(rows[at] as Extract<DshStreamRow, { kind: 'compaction' }>), ...patch };
+                        } else {
+                            // 摘要先于检查点到达（罕见）：先记下来，等检查点落地时一起写
+                            pendingCompactionSummary.set(compactionId, patch);
+                        }
+                    } else if (!type.startsWith('compaction/')) {
+                        // 检查点本体：**这一条才让行出现**，锚点就是它的 seq
+                        if (at === undefined) {
+                            const pending = pendingCompactionSummary.get(compactionId);
+                            pendingCompactionSummary.delete(compactionId);
+                            const seq = typeof event.seq === 'number' ? event.seq : undefined;
+                            if (seq !== undefined) {
+                                compactionRowAt.set(compactionId, rows.length);
+                                rows.push({
+                                    kind: 'compaction',
+                                    key: key++,
+                                    compactionId,
+                                    seq,
+                                    ...(pending ?? {}),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         if (type === 'user/message') {
             if (isContextMessage({ type: 'user/message', data: d })) {
                 // 系统提示词形态（instructions）不入链：它由 system/message 那条单独承载
@@ -1067,7 +1327,11 @@ export function buildRowsIncremental(
                 if (form === 'instructions') {
                     continue;
                 }
-                // 上下文注入属于**过程**：入当前回答行的链（与既有通路一致，见 design/06 §2「过程折叠内」）
+                // 上下文注入属于**过程**：入当前回答行的链（与既有通路一致，见 design/06 §2「过程折叠内」）。
+                // **照旧开行** —— 「这条注入看不看得见、要不要占一行」是**渲染层**的事，与上游同机制：
+                // 上游为每条注入建一个 `context` 节点（`conversation-nodes/message.ts:76-91`），
+                // 由 `orderedVisibleChatNodes()` 的 `filter(isVisibleChatNode)` 把不可见的排除在**行**之外
+                //（`chat-snapshot-builder.ts:496-509`）；插件对应 `webview/chat/core/chat-visibility.ts`。
                 const row = ensureActive();
                 if (row === undefined) {
                     continue;
@@ -1333,6 +1597,17 @@ export function buildRowsIncremental(
             continue;
         }
 
+        // `todo/write`（投影落盘事件，log-only）：只更新 todo 卡 diff 的基线，**不产出行**。
+        // 基线口径镜像上游 `tool-todo-write`：**不清空**（与输入框常驻卡的 `foldTodos`「本轮清空」不同）、
+        // 后写胜；坏形（不是数组）保留上一份（与 `foldTodos` 的容错同口径）。
+        if (type === 'todo/write') {
+            const parsed = todoItemsOf(d['todos']);
+            if (parsed !== null) {
+                lastTodoWrite = parsed;
+            }
+            continue;
+        }
+
         if (type === 'tool/call') {
             // `toolName` 是同义兜底字段（既有实时通路即 `name ?? toolName`）：只认一个会让这类调用整条不出现
             const name = stringOf(d['name']) ?? stringOf(d['toolName']) ?? '';
@@ -1375,6 +1650,28 @@ export function buildRowsIncremental(
             continue;
         }
 
+        // `workspace/changes`（回合改动**宣告**，log-only）：**不产出行**，只把这个 seq 记到该回合的行上。
+        //
+        // 用途：回合尾部的「改动文件卡」。上游拿这个 seq 去读 **Host 内存态**的改动摘要
+        //（`GET /api/changes.summary?sessionId&seq`）—— Host 重启或会话被释放后摘要就没了，
+        // **那张卡也就不出现**（`docs/design/12` §2.1.7）。宣告事件本身在日志里一直都在，所以 seq 一直都在；
+        // 「有没有卡」由宿主按这个 seq 去问 Host 决定（见 `dsh/changes-summary.ts`）。
+        //
+        // ⚠️ 按行扫一遍而**不是**只认「当前活跃行」：同回合被插话切成的多条行都要拿到同一个 seq。
+        if (type === 'workspace/changes') {
+            const turn = typeof d['turn'] === 'number' ? (d['turn'] as number) : undefined;
+            const seq = typeof event.seq === 'number' ? event.seq : undefined;
+            if (turn !== undefined && seq !== undefined) {
+                for (let i = 0; i < rows.length; i += 1) {
+                    const r = rows[i];
+                    if (r.kind === 'assistant' && r.turn === turn) {
+                        rows[i] = { ...r, changesSeq: seq };
+                    }
+                }
+            }
+            continue;
+        }
+
         if (type === 'deliverables/presented') {
             // 模型显式声明的交付文件。**回合归属认事件自带的 `turn`**，不认「当前活跃行」——
             // 声明可以来自嵌套调用，按活跃行归集会在那种情形下串到别的回合去。
@@ -1412,10 +1709,96 @@ export function buildRowsIncremental(
                 seq: typeof event.seq === 'number' ? event.seq : undefined,
                 step: typeof d['step'] === 'number' ? (d['step'] as number) : undefined,
             });
+            // 行：只有 `retry === 1` 能开链（窗口里缺首条 → 整链不渲染，与上游同）；其余只更新该行
+            const retryId = typeof d['retryId'] === 'string' ? d['retryId'] : '';
+            const retry = typeof d['retry'] === 'number' ? d['retry'] : undefined;
+            if (retryId !== '' && retry !== undefined) {
+                const at = retryRowAt.get(retryId);
+                const failure = retryFailure(d['failure']);
+                const patch = {
+                    retry,
+                    ...(typeof d['turn'] === 'number' ? { turn: d['turn'] as number } : {}),
+                    ...(typeof d['step'] === 'number' ? { step: d['step'] as number } : {}),
+                    ...(typeof d['provider'] === 'string' ? { provider: d['provider'] } : {}),
+                    ...(typeof d['mode'] === 'string' ? { mode: d['mode'] } : {}),
+                    ...(typeof d['maxRetries'] === 'number' ? { maxRetries: d['maxRetries'] as number } : {}),
+                    ...(typeof d['delayMs'] === 'number' ? { delayMs: d['delayMs'] as number } : {}),
+                    ...(failure === undefined ? {} : { failure }),
+                };
+                if (at === undefined) {
+                    if (retry === 1) {
+                        retryRowAt.set(retryId, rows.length);
+                        rows.push({ kind: 'retry', key: key++, retryId, ...patch });
+                    }
+                } else {
+                    const row = rows[at] as Extract<DshStreamRow, { kind: 'retry' }>;
+                    // 新尝试排上 → 上一次的"已开始"作废（`started` 记的是**哪一次**，见下）
+                    const { started: _drop, cancelled: _drop2, ...rest } = row;
+                    rows[at] = { ...rest, ...patch };
+                }
+            }
+            continue;
+        }
+
+        if (type === 'llm/retry-started') {
+            // 只做状态迁移：把**该序号**的那次尝试标成"已开始"（不新增行、不新增尝试，与上游同）
+            const retryId = typeof d['retryId'] === 'string' ? d['retryId'] : '';
+            const at = retryId === '' ? undefined : retryRowAt.get(retryId);
+            if (at !== undefined) {
+                const row = rows[at] as Extract<DshStreamRow, { kind: 'retry' }>;
+                const retry = typeof d['retry'] === 'number' ? (d['retry'] as number) : row.retry;
+                const { cancelled: _drop, ...rest } = row;
+                rows[at] = { ...rest, started: retry };
+            }
             continue;
         }
 
         if (type === 'turn/end') {
+            // 重试行的 `cancelled` 是**派生态**（上游同）：回合关闭时仍停在 `scheduled` 就是"等待中被打断"
+            for (const at of retryRowAt.values()) {
+                const row = rows[at] as Extract<DshStreamRow, { kind: 'retry' }>;
+                if (row.started !== row.retry && row.cancelled !== true) {
+                    rows[at] = { ...row, cancelled: true };
+                }
+            }
+            /**
+             * **在途提问在回合关闭时结算**。
+             *
+             * 上游的 `ASK_ABORTED` 是**宿主**在回合的 abort 信号上抛出来的（提问 handler 被信号取消 →
+             * `tool/result` 带着那个码落盘）。插件的实时链路拿不到那条信号：用户按停止后，
+             * 这一侧只会看到 `turn/end`，于是提问项**永远停在 `running`** —— 表现是回合已经「已停止」，
+             * 那一行却还在掠光并写着「等待回答」。
+             *
+             * 判据取「回合已关闭 + 该提问仍无结果」：这时它**不可能**再被回答，按上游同语义标成
+             * 已中断（琥珀，不是失败）。**只动提问工具** —— 其余工具的"运行中"由各自的卡与宿主状态表达。
+             */
+            const reasonEarly = d['reason'] as { kind?: string } | undefined;
+            const closedByAbort = reasonEarly?.kind === 'aborted';
+            for (let i = 0; i < rows.length; i += 1) {
+                const row = rows[i];
+                if (row.kind !== 'assistant') {
+                    continue;
+                }
+                let touched = false;
+                const chain = row.chain.map((c): DshRowItem => {
+                    if (c.kind !== 'tool' || c.name !== 'ask_user_question') {
+                        return c;
+                    }
+                    if (c.status !== 'running' && c.status !== 'preparing') {
+                        return c;
+                    }
+                    touched = true;
+                    return {
+                        ...c,
+                        status: 'stopped' as const,
+                        // 用户主动停止 → 与上游同一码；其余终局（正常收官却仍悬着）按"回合已中断"记
+                        error: closedByAbort ? 'ASK_ABORTED' : c.error,
+                    };
+                });
+                if (touched) {
+                    rows[i] = { ...row, chain };
+                }
+            }
             const reason = d['reason'] as { kind?: string } | undefined;
             const kind = reason?.kind;
             // 失败事实（code/message）照上游两处口径，收在 `official/turn-end.ts`：
@@ -1426,14 +1809,20 @@ export function buildRowsIncremental(
             // 先占 key，等回答行收完再 push —— 顺序 = 该回合末尾。
             const noticeTone = failure !== undefined ? 'error' : kind === 'max-tokens' ? 'warning' : undefined;
             const noticeKey = noticeTone === undefined ? undefined : key++;
-            const row = activeRow();
+            let row = activeRow();
             if (row === undefined) {
-                // 这一轮**没产出过内容**（请求期就失败之类）：上游只出那条独立通知行，
-                // **不造空白回答行**（原先「补一行空回答」的兜底随独立行一起作废）。
-                if (noticeTone !== undefined && noticeKey !== undefined) {
-                    pushTurnNotice(noticeKey, noticeTone, failure);
+                // 这一轮**没产出过内容**（请求期就失败之类）。上游对这种回合**照样有回合级控制节点**
+                //（「处理失败」/「已停止」就写在那一格），所以这里补出这一轮的容器行：正文与链都空，
+                // 只承回合事实，下面那段照常把它标成 `done` + `status`。
+                // 不补的后果（真机截图）：只剩重试行与终局通知行，控制行那一格**什么都没有**。
+                openAssistant();
+                row = activeRow();
+                if (row === undefined) {
+                    if (noticeTone !== undefined && noticeKey !== undefined) {
+                        pushTurnNotice(noticeKey, noticeTone, failure);
+                    }
+                    continue;
                 }
-                continue;
             }
             // 折叠事实：口径全在 `turn-process.ts`（上游 `latestAnswer` / `processSpec` 的镜像），
             // 这里只把回合边界补进输入再取结果。

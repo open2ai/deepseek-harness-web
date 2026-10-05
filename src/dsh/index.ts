@@ -20,3 +20,5 @@ export * from './session';
 export * from './stream';
 export * from './sessionExport';
 export * from './sessionUpload';
+export * from './changes-summary';
+export * from './goal-activation';

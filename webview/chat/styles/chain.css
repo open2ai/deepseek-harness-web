@@ -68,9 +68,17 @@
      形状按真机截图 —— 文案在左、chevron **紧贴文案之后**（不是贴右边缘）、下面一条贯穿内容宽度的细线。
      它不是折叠头：不参与"片数 = 头数"，但它是**回合级**的展开/收起开关（与片内的头互不干扰）。
      细线走 `--dsh-hairline`（主题契约，见 docs/design/07 §0）—— 用 `--vscode-panel-border` 在浅色主题会消失。 */
-  .chain-done { margin: 2px 0 4px; }
+  /* ⚠️ **细线是这个行盒子的下边框**，不是它后面的另一个块 —— 否则线会掉到下一行去
+     （真机反馈「处理失败那个横线为啥不是一行」）。上游也是这么画的：控制行自己
+     `display:flex` + `border-bottom: 0.5px solid <细线色>`，文案与 chevron 都在这一行里。 */
+  .chain-done {
+    box-sizing: border-box; display: flex; align-items: center; gap: 4px;
+    width: 100%; min-width: 0;
+    margin: 2px 0 6px; padding-bottom: 5px;
+    border-bottom: 0.5px solid var(--dsh-hairline);
+  }
   .chain-done-btn {
-    display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+    display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%;
     border: none; background: none; padding: 2px 0; cursor: pointer; font: inherit;
     color: var(--vscode-descriptionForeground, #999); font-size: 11.5px; text-align: left;
   }
@@ -78,10 +86,9 @@
      折不动时按钮仍在、只是没有 chevron 也不可点。 */
   .chain-done-btn:disabled { cursor: default; }
   .chain-done-btn:hover:not(:disabled) .chain-done-text { color: var(--vscode-foreground, #ddd); }
-  .chain-done-text { white-space: nowrap; }
+  .chain-done-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .chain-done-chev { flex: none; display: inline-flex; align-items: center; }
   .chain-done-chev svg { width: 12px; height: 12px; display: block; }
-  .chain-done-rule { height: 0.5px; margin-top: 2px; background: var(--dsh-hairline); }
   /* 非回答步的输出文本（过程文本）：上游是独立的回答节点，插件一回合只开一条行 → 放进过程链显示。
      用正文色与正常行高，避免它被当成「次要信息」而看不出那是模型当时说的话。 */
   .chain-proc-text {
@@ -239,6 +246,97 @@
     flex: none; height: 0.5px;
     background: var(--dsh-hairline);
   }
+
+  /* ===== 紧凑详情卡（goal / schedule / 子代理协调 / todo diff 共用）=====
+     与通用「输入/输出」卡同款外壳，但内容是结构化列表而非 raw JSON。
+     结构照上游 ToolDetails：caption → 列表 → unchanged 折叠区。 */
+  .detail-card {
+    display: flex; flex-direction: column;
+    margin: 0 0 0 4px;
+    border: 0.5px solid var(--dsh-hairline);
+    border-radius: 12px;
+    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    padding: 8px 12px;
+    font-size: 12px; line-height: 1.55;
+    color: var(--vscode-foreground, #ddd);
+  }
+  .detail-caption {
+    padding: 2px 0 6px; font-size: 11px;
+    color: var(--vscode-descriptionForeground, #999);
+  }
+  .detail-list {
+    display: flex; flex-direction: column; gap: 6px;
+    margin: 0; padding: 0; list-style: none;
+  }
+  .detail-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  /* 标题行：状态字形 + 标题/路径 + 徽标 + 状态词 */
+  .detail-heading { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+  .detail-status {
+    flex: none; width: 14px; font-size: 12px; line-height: 1; text-align: center;
+    color: var(--vscode-descriptionForeground, #999);
+  }
+  .detail-status .codicon { font-size: 13px; }
+  /* todo 三态：已完成绿 / 进行中蓝 / 待处理暗（与输入框 TodoCard 同款语义） */
+  .detail-item[data-change] .detail-status { color: var(--vscode-descriptionForeground, #999); }
+  .detail-status .codicon-pass-filled { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #89d185)); }
+  .detail-status .codicon-play { color: var(--vscode-textLink-foreground, #4daafc); }
+  .detail-title { min-width: 0; overflow-wrap: anywhere; }
+  .detail-path {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border: none; background: none; padding: 0; font: inherit; cursor: pointer;
+    color: inherit; text-decoration: underline dotted;
+    text-decoration-color: var(--vscode-descriptionForeground, #999);
+    text-underline-offset: 3px;
+  }
+  .detail-path:hover, .detail-path:focus-visible { color: var(--vscode-foreground, #ddd); text-decoration-color: currentColor; }
+  .detail-badge {
+    flex: none; padding: 0 6px; border-radius: 6px; font-size: 11px; line-height: 18px;
+    background: var(--vscode-badge-background, rgba(128,128,128,0.18));
+    color: var(--vscode-descriptionForeground, #bbb);
+  }
+  .detail-badge[data-tone='info'] { color: var(--vscode-textLink-foreground, #4daafc); }
+  .detail-badge[data-tone='success'] { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #89d185)); }
+  .detail-badge[data-tone='warning'] { color: var(--vscode-charts-yellow, #cca700); }
+  .detail-badge[data-tone='error'] { color: var(--vscode-errorForeground, #f14c4c); }
+  .detail-status-text { color: var(--vscode-descriptionForeground, #999); }
+  .detail-previous { text-decoration: line-through; opacity: 0.7; }
+  .detail-subtitle { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
+  .detail-description {
+    margin: 0; white-space: pre-wrap; word-break: break-word;
+    color: var(--vscode-descriptionForeground, #ccc);
+  }
+  /* 字段表：label 定宽列 + value 换行 */
+  .detail-fields { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 0; }
+  .detail-field {
+    display: grid; grid-template-columns: max-content 1fr; column-gap: 12px; align-items: baseline;
+    min-width: 0;
+  }
+  .detail-field dt { color: var(--vscode-descriptionForeground, #999); white-space: nowrap; }
+  .detail-field dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .detail-lines { margin: 0; padding-left: 18px; }
+  /* 等宽块（job 输出 / agent 回复 / 结果 JSON） */
+  .detail-code {
+    margin: 2px 0 0; padding: 6px 8px; border-radius: 6px;
+    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 180px; overflow-y: auto;
+  }
+  .detail-empty { margin: 0; color: var(--vscode-descriptionForeground, #999); }
+  /* 子分组（对象字段的投影）与 unchanged 折叠区 */
+  .detail-group, .detail-unchanged { margin: 2px 0 0; }
+  .detail-group > summary, .detail-unchanged-summary {
+    display: flex; align-items: center; gap: 4px; cursor: pointer;
+    list-style: none; color: var(--vscode-descriptionForeground, #999); font-size: 11.5px;
+  }
+  .detail-group > summary::-webkit-details-marker, .detail-unchanged > summary::-webkit-details-marker { display: none; }
+  .detail-group > summary .codicon, .detail-unchanged-summary .codicon {
+    font-size: 12px; line-height: 1; transition: transform 0.12s ease;
+  }
+  /* 展开时 chevron 右转成下（原生 details[open] 驱动） */
+  .detail-group[open] > summary .codicon, .detail-unchanged[open] > summary .codicon { transform: rotate(90deg); }
+  .detail-group > .detail-list, .detail-unchanged > .detail-list { margin: 4px 0 0 4px; padding-left: 10px; border-left: 0.5px solid var(--dsh-hairline); }
 
   /* ===== 交付文件行（present）=====
      这一行自带头部：四态标记 + 「交付文件」+ **可见状态词与声明路径**；展开体是结果正文。
@@ -536,7 +634,7 @@
   /* 结果被截断时的兜底定位符（原文，等宽可换行） */
   .search-recovery { padding: 0 14px 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--vscode-descriptionForeground, #999); }
 
-  /* ===== 上下文注入/召回行（官方 ui-chat ContextInjectionRow.module.css + ContextBody.module.css 复刻）=====
+  /* ===== 上下文注入/召回行（摘要与展开体的结构按上游同款）=====
      收起=一行：图标(recall/inject) + 角色标题「上下文注入/跨会话召回」 + 来源标签 + notice 单行说明；
      展开=表单化 body（instructions/catalog/snapshot/notice/relay/recall/opaque），统一承载在代码块面里。
      深浅主题用 --vscode-* 语义变量映射官方 --dsw-alias-*。 */

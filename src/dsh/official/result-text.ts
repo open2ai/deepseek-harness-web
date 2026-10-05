@@ -33,7 +33,7 @@ function asString(value: unknown): string | undefined {
  * @returns 展示内容块、配对 id 与失败标记。
  */
 export function readToolResult(data: Record<string, unknown>): ToolResultPayload {
-    const message = data['message'] as { content?: unknown; source?: unknown } | undefined;
+    const message = data['message'] as { content?: unknown; source?: unknown; isError?: unknown } | undefined;
     const source = message?.source as { callId?: unknown } | undefined;
     const first = Array.isArray(message?.content) ? (message.content as unknown[])[0] : undefined;
     const wrapper = first as { type?: unknown; content?: unknown; isError?: unknown } | undefined;
@@ -44,8 +44,11 @@ export function readToolResult(data: Record<string, unknown>): ToolResultPayload
     return {
         blocks,
         callId: asString(source?.callId) ?? asString(data['callId']),
-        // 失配标记在包装块上；迁移前的旧格式在顶层
-        isError: wrapper?.['isError'] === true || data['isError'] === true,
+        // 失败标记的**主来源是一等消息上的 `message.isError`**（上游客户端取的就是这一层），
+        // 另兼容包装块自身的 `isError` 与迁移前顶层的 `isError`。
+        // ⚠️ 真实载荷里的失败**不一定**带顶层 `isError`：`error:{name,code}` + 内容首行 `Error: …` 就是全部，
+        // 漏掉消息那一层会把失败行判成 ok —— 没有红点、摘要停在参数（真机：网页端红字报错、插件什么都没有）。
+        isError: message?.['isError'] === true || wrapper?.['isError'] === true || data['isError'] === true,
     };
 }
 

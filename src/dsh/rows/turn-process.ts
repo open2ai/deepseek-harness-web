@@ -32,10 +32,8 @@ export type TurnProcessEntry =
     /**
      * 一次工具调用。
      *
-     * `ask` = 这是一次**提问工具**调用（`ask_user_question` / `request_user_input`）：
-     * 它**不算"过程外置"的成员**（2026-10-02 按 web 对照图定：web 的 `isVisibleChatNode` 不含提问节点，
-     * 所以"只有提问"的回合在 web 侧没有可折的过程内容；插件此前把它算成成员 → 折起后多出一行
-     * `向用户提出了问题`）。提问**记录行**本身照旧渲染，只是不参与"有没有过程内容"的判定。
+     * `ask` = 这是一次**提问工具**调用（`ask_user_question` / `request_user_input`）。
+     * 它**照常计入"过程外置"**（上游判据只数可见节点，工具节点一律可见）。字段保留仅作事实标注。
      */
     | { kind: 'tool-call'; seq?: number; step?: number; ask?: boolean }
     /** `tool/result`（只有 `append` 才算「其它」证据） */
@@ -43,9 +41,8 @@ export type TurnProcessEntry =
     /**
      * 上下文注入：进过程区间（上游的独立节点类型不含它）。
      *
-     * `visible` = 这一条注入**在链上真的会显示出来**（`core/chat-visibility.ts` 的
-     * `isVisibleContextItem`：只有含**工具增删块**的注入才留一行）。**只有可见的才算"过程外置"**
-     * —— 否则"只有提问、外加一条被隐藏的注入"的回合会被判成"有过程内容"（真机现象见 `14` §17）。
+     * `visible` = 这条注入在链上真的会显示（只有含**工具增删块**的才留一行）。
+     * **只有可见的才算"过程外置"**，否则"只有提问 + 一条被隐藏的注入"的回合会被误判成有过程内容。
      */
     | { kind: 'context'; seq?: number; visible?: boolean }
     /**
@@ -138,10 +135,10 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
     let otherStartSeq: number | undefined;
     /**
      * 非 assistant 步的过程成员（工具 / 上下文 / 重试）：算「过程外置」时按区间筛。
-     * `ask` = 提问工具调用 —— **不参与"过程外置"**（见 `TurnProcessEntry` 的 `tool-call` 注释）。
+     * `ask` = 提问工具调用，照常计入（仅作事实标注）。
      */
     const otherMembers: Array<{ seq: number; step: number | undefined; kind: 'tool' | 'context' | 'retry'; ask?: boolean }> = [];
-    /** 本回合的人类消息序号（插话与追加提问都算）：`compactAnswer` 的判据 */
+    /** 本回合的人类消息序号（插话与追加提问都算）：`compactAnswer` 与插话判据共用 */
     const humans: number[] = [];
 
     for (const e of input.entries) {
@@ -196,9 +193,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
             }
             case 'tool-call': {
                 if (e.seq !== undefined) {
-                    // 提问调用与别的工具一样是**可见过程成员**（tag `dsh-v0.2.0-rc.2` 的 `tool.ts`：
-                    // 工具节点除"preparing 且被打断"外一律 `visibility: 'visible'`）；
-                    // 它同样推进"过程起点"——上游 `processEvidence` 对 `tool/call` 一视同仁。
+                    // 提问调用与别的工具一样计入（上游对 `tool/call` 一视同仁），并推进"过程起点"
                     otherMembers.push({ seq: e.seq, step: e.step, kind: 'tool' });
                     otherStartSeq = min(otherStartSeq, e.seq);
                 }
@@ -211,9 +206,8 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
                 break;
             }
             case 'context': {
-                // **只有会显示的注入**才算"过程外置"的候选（这是 `14` §17 修掉的那条）：
-                // 被隐藏的注入（不含工具增删块）在屏幕上是空的，把它算进去会让"只有提问"的回合
-                // 被判成"有过程内容" → 折起后多出一行。它**同时也不推进过程起点**（同 `ask` 那条）。
+                // **只有会显示的注入**才算候选，且**不推进过程起点**：被隐藏的注入在屏幕上是空的，
+                // 算进去会让"只有提问"的回合被误判成有过程内容。
                 if (e.seq !== undefined && e.visible !== false) {
                     otherMembers.push({ seq: e.seq, step: undefined, kind: 'context' });
                     otherStartSeq = min(otherStartSeq, e.seq);
@@ -262,58 +256,14 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
                 (answerAnchorSeq === null || seq < answerAnchorSeq)
         );
 
-    if (answer === null) {
-        return {
-            answerAnchorSeq: null,
-            answerStep: null,
-            inlineReasoning: false,
-            turnStarted: input.turnStartSeq !== undefined,
-            controlAnchorSeq,
-            // 上游：没有回答时过程起点就取控制锚
-            processStartSeq: controlAnchorSeq,
-            hasExternalProcess: false,
-            compactAnswer: compactAnswerOf(null),
-        };
-    }
-
-    // 过程起点：优先回合起点；缺失时取「回答步之前最早的 assistant 证据」与「其它证据」中更早的一个
-    const earlierAssistantSeq = min(
-        undefined,
-        ...[...steps]
-            .filter(([step]) => typeof step === 'number' && answer.step !== undefined && step < answer.step)
-            .map(([, s]) => s.firstVisibleSeq)
-    );
-    const externalProcessSeq = min(otherStartSeq, earlierAssistantSeq);
-    const processStartSeq = input.turnStartSeq ?? (externalProcessSeq ?? answer.seq);
-
-    // 过程外置 = 区间 [过程起点, 回答锚点) 内、**不是回答步自身**的过程节点。
-    // 用节点（工具/上下文/重试各算一个）而不是"还有没有别的 assistant 消息"：漏掉任一类都会让折叠头该出不出的。
-    //
-    // ⚠️ **提问调用的归属**（2026-10-02 按 tag 审计后**撤销**先前的"提问不算"改写）：
-    // `conversation-nodes/tool.ts` 的 `buildViewNode` 里，工具节点的可见性是
-    // `preparing && interruptedAt !== undefined ? 'hidden' : 'visible'` —— **提问的工具行同样是可见节点**，
-    // 因此它也计入 `hasExternalProcess`。真机对照图里 web 那条 `已完成，用时 15秒 ⌄` **有 chevron**
-    // 正说明该回合 `hasContent` 为真（`hasExternalProcess` 或 `inlineReasoning`）—— 提问算成员是对的。
-    // 折起时它跟着一起藏（我们的提问记录行在 `.chain-body` 里），展开才看得到，与 web 同形。
-    // 纯推理步**算**、纯工具步**不算**（见下面成员构造的注释与 `visibleChunk`）。
     /**
-     * **过程外置的成员 = 屏幕上真的会显示出来的过程项**（2026-10-02 按 tag `dsh-v0.2.0-rc.2` 审计后定）。
-     *
-     * **上游依据（两处源码）**：
-     * 1. `conversation-nodes/turn-process.ts` 的 `processEvidence()`：**每个有"可见证据"的 assistant 步都登记**
-     *    —— 可见性由 `visibleChunk()` 判，而它对 `text-delta` **与 `reasoning-delta`** 一视同仁（有正文即可见）。
-     *    所以**纯推理步（有推理正文、没有回答文本）也算成员**（我一度收紧成"只认文本"，那是错的）。
-     *    纯工具步**不算**：`visibleChunk()` 对 tool-call 一律 false → `visibleBlocks === 0` →
-     *    该步节点 `visibility: 'hidden'`（见 `conversation-nodes/assistant.ts` 的 `buildViewNode`）。
-     * 2. `conversation-nodes/turn-process-presentation.ts` 的 `derivePresentation()`：
-     *    `if (node === undefined || !isVisibleChatNode(node) || node.kind === 'turn-process') continue` ——
-     *    **只数可见节点**；而 `isVisibleChatNode` 把普通 `context`（不含工具增删块）排除在外。
-     *
-     * 映射到本文件：
-     *   · assistant 步：**有回答文本或自带推理**才算（`hasReply || hasReasoning`，与 `visibleChunk` 同宽）；
-     *   · 工具调用：照旧算（会渲染成工具行）—— **提问也包括**（工具节点除"preparing 且被打断"外一律可见）；
-     *   · 上下文注入：**只有可见的那种算**（带工具增删块），见 `case 'context'`。
+     * **过程区间里有没有"被插进来的话"**（上游 `hasInterleavedInput`）：与上面的 `compactAnswer`
+     * 共用判据，只是**不设回答锚点上界**。上游 `turnProcessAlwaysOpen()` 的一项 —— 有插话就不许折。
      */
+    const hasInterleavedInput = humans.some(
+        (seq) => openingHumanAnchor === undefined || seq > openingHumanAnchor
+    );
+
     const memberSeqs: Array<{ seq: number; step: number | undefined; assistant: boolean; ask?: boolean }> = [];
     for (const [step, s] of steps) {
         const anchor = s.settledSeq ?? s.firstVisibleSeq;
@@ -329,16 +279,96 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
         memberSeqs.push({ seq: m.seq, step: m.step, assistant: false });
     }
     /**
-     * 该步的推理**会不会在链上留下思考行**（上游 `processMember` 的等价物）。
-     *
-     * 真机实测（30 会话）：只靠 `inlineReasoning` 撑着 `foldable` 的 18 条行里，**0 条**链上有思考行
-     * （14 条链是空的、4 条只有被隐藏的注入）—— 这个字段在屏幕上没有任何可折内容，却让过程区出头。
-     * 上游那一路还有 `processMember` 这一门；插件用"链上真有思考行"等价替代（见 `14` §19）。
+     * 该步的推理**会不会在链上留下思考行**：`inlineReasoning` 只有"真的留下思考行"时才算可折内容
+     * （上游那一路还有 `processMember` 这一门，这里用"链上真有思考行"等价替代）。
      *
      * @param step - 目标步。
      */
     const stepHasVisibleReasoning = (step: number | undefined): boolean =>
         step !== undefined && input.entries.some((e) => e.kind === 'chunk' && e.step === step && hasReasoningChunk(e.chunk));
+
+    /**
+     * **过程分组的收口循环**（两条路共用：这一轮有定稿回答 / 没有）。
+     *
+     * 上游在遇到「带回答内容的步」时收口，该步自身成为一个独立可见节点；插件把中间步的文本留在链里
+     * （`12` §1.5 的适配），所以这里只产出**分界**：每一片 = 上一次收口之后到这一次收口之间的一段过程。
+     * 片级事实与回合级**同一套判据**（`memberSeqs` / `compactAnswerOf` / 定稿口径），只是区间换成片内。
+     *
+     * @param fromSeq - 第一片的起点（回合起点；没有回答时取控制锚 —— 上游同）。
+     * @param stopStep - 收到这一步为止（回答步本身不单独成片，它的正文就是行的正文）；`undefined` = 全扫。
+     */
+    const buildGroups = (fromSeq: number, stopStep: number | undefined): DshRowGroup[] => {
+        const out: DshRowGroup[] = [];
+        let from = fromSeq;
+        let fromStep: number | null = null;
+        for (const step of stepOrder) {
+            if (step === undefined || (stopStep !== undefined && step >= stopStep)) {
+                break;
+            }
+            const s = steps.get(step);
+            if (s === undefined || !s.hasReply) {
+                continue;
+            }
+            const anchor = s.settledSeq ?? s.firstVisibleSeq;
+            if (anchor === undefined) {
+                continue;
+            }
+            out.push({
+                key: `s${String(fromStep ?? step)}-${String(step)}@${String(anchor)}`,
+                fromStep,
+                toStep: step,
+                facts: {
+                    answerAnchorSeq: anchor,
+                    answerStep: step,
+                    inlineReasoning: s.hasReasoning && stepHasVisibleReasoning(step),
+                    turnStarted: input.turnStartSeq !== undefined,
+                    controlAnchorSeq,
+                    processStartSeq: from,
+                    hasExternalProcess: memberSeqs.some(
+                        // 与回合级**同一判据**（提问也包括，见上面成员构造的注释）
+                        (m) => m.seq >= from && m.seq < anchor && !(m.assistant && m.step === step)
+                    ),
+                    compactAnswer: compactAnswerOf(anchor),
+                },
+            });
+            from = anchor;
+            fromStep = step;
+        }
+        return out;
+    };
+
+    if (answer === null) {
+        // ⚠️ **没有定稿回答的回合也要产出分组**：上游对"无回答"没有特例（同一句注释见下面 `inlineReasoning`
+        // 那行）——「该步产出回答文本就收口」与"这一轮最终有没有定稿回答"无关。先前这里直接 return，
+        // 于是整回合一个组都不出 → 页面退回"整回合单头"（真机对照：网页端有「已完成分析」，插件没有）。
+        const bareGroups = buildGroups(controlAnchorSeq, undefined);
+        return {
+            answerAnchorSeq: null,
+            answerStep: null,
+            // ⚠️ **没有回答也要按可见过程成员算**（上游 `derivePresentation` 没有"无回答"特例）。
+            // 写死 false 会让"只有思考/提问、没有回答"的回合（被终止的那种）在折起态**没有摘要行**，
+            // 而 web 端有一条 `已完成分析` —— 真机对照图就是这么暴露的。
+            inlineReasoning: memberSeqs.some((m) => m.assistant && stepHasVisibleReasoning(m.step)),
+            turnStarted: input.turnStartSeq !== undefined,
+            controlAnchorSeq,
+            // 上游：没有回答时过程起点就取控制锚
+            processStartSeq: controlAnchorSeq,
+            hasExternalProcess: memberSeqs.some((m) => !m.assistant),
+            hasInterleavedInput,
+            compactAnswer: compactAnswerOf(null),
+            ...(bareGroups.length === 0 ? {} : { groups: bareGroups }),
+        };
+    }
+
+    // 过程起点：优先回合起点；缺失时取「回答步之前最早的 assistant 证据」与「其它证据」中更早的一个
+    const earlierAssistantSeq = min(
+        undefined,
+        ...[...steps]
+            .filter(([step]) => typeof step === 'number' && answer.step !== undefined && step < answer.step)
+            .map(([, s]) => s.firstVisibleSeq)
+    );
+    const externalProcessSeq = min(otherStartSeq, earlierAssistantSeq);
+    const processStartSeq = input.turnStartSeq ?? (externalProcessSeq ?? answer.seq);
     /** 回答步的推理是否会在链上留下思考行。 */
     const answerHasVisibleReasoning = stepHasVisibleReasoning(answer.step ?? undefined);
     const hasExternalProcess = memberSeqs.some(
@@ -359,42 +389,9 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
      *   · 片的 `inlineReasoning` = 收口那一步自带推理。
      * **回答步本身不单独成片**（它的正文就是行的正文），故循环在 `answer.step` 处收住。
      */
-    const groups: DshRowGroup[] = [];
-    let groupFrom = processStartSeq;
-    let groupFromStep: number | null = null;
-    for (const step of stepOrder) {
-        if (step === undefined || (answer.step !== undefined && step >= answer.step)) {
-            break;
-        }
-        const s = steps.get(step);
-        if (s === undefined || !s.hasReply) {
-            continue;
-        }
-        const anchor = s.settledSeq ?? s.firstVisibleSeq;
-        if (anchor === undefined) {
-            continue;
-        }
-        groups.push({
-            key: `s${String(groupFromStep ?? step)}-${String(step)}@${String(anchor)}`,
-            fromStep: groupFromStep,
-            toStep: step,
-            facts: {
-                answerAnchorSeq: anchor,
-                answerStep: step,
-                inlineReasoning: s.hasReasoning && stepHasVisibleReasoning(step),
-                turnStarted: input.turnStartSeq !== undefined,
-                controlAnchorSeq,
-                processStartSeq: groupFrom,
-                hasExternalProcess: memberSeqs.some(
-                    // 与回合级**同一判据**（提问也包括，见上面成员构造的注释）
-                    (m) => m.seq >= groupFrom && m.seq < anchor && !(m.assistant && m.step === step)
-                ),
-                compactAnswer: compactAnswerOf(anchor),
-            },
-        });
-        groupFrom = anchor;
-        groupFromStep = step;
-    }
+    // 兜底再归一化一次：`answer.step` 只该是数字或 `undefined`（`null` 在上游 `answerOf` 已归一），
+    // 这里按"非数字即未知"处理 —— 未知就**不收口**，照常按步扫下去。
+    const groups = buildGroups(processStartSeq, typeof answer.step === 'number' ? answer.step : undefined);
 
     return {
         answerAnchorSeq: answer.seq,
@@ -405,6 +402,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
         controlAnchorSeq,
         processStartSeq,
         hasExternalProcess,
+        hasInterleavedInput,
         compactAnswer: compactAnswerOf(answer.seq),
         // **只在真有分组时才带上这个键**：单步回合（最常见）保持与既有完全一致的载荷，
         // 免得几十套逐字节比对的行守卫因为多一个空数组而全红。
@@ -422,6 +420,10 @@ function answerOf(s: StepFacts | undefined, step: number | undefined, turnEndSeq
     if (s === undefined) {
         return null;
     }
+    // ⚠️ **`null` 要当成"步号未知"**：历史/持久化载荷里"步号缺失"落成的是 `null`，
+    // 而 `null !== undefined` 为真、`step >= null` 又恒为真 —— 下游（分组的收口循环）会因此在
+    // 第 0 步就 break、整回合一个组都不出（真机现象：本该有两片却只剩"整回合单头"）。
+    const stepNo = typeof step === 'number' ? step : undefined;
     const boundary = s.endSeq ?? turnEndSeq;
     const settled = s.settledSeq;
     const seq =
@@ -432,7 +434,7 @@ function answerOf(s: StepFacts | undefined, step: number | undefined, turnEndSeq
     if (seq === undefined || !s.hasReply || s.hasToolCall) {
         return null;
     }
-    return { seq, step, hasReasoning: s.hasReasoning };
+    return { seq, step: stepNo, hasReasoning: s.hasReasoning };
 
 }
 

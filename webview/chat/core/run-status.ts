@@ -39,50 +39,33 @@ export function runStatusText(elapsedMs: number): string {
 }
 
 /**
- * **终局态**状态行文案（上游 `chat.worked`/`chat.workedFor` —— 0.2.0 起是
- * `已完成` / `已完成，用时 {duration}`，英文 `Completed` / `Completed in {d}`）。
+ * **终局态**状态行文案：正常收官「已完成 / 已完成，用时 {duration}」、被停止「已停止」、失败「处理失败」。
  *
- * 上游由回合级过程控制节点渲染（`chat/TurnProcessNodeView.tsx:26-32`）；插件此前**整行没做**，
- * 于是"网页端有一条完成态摘要、插件没有"（见 `tmp/版本差异记录/…/03` §3.1）。
+ * ⚠️ **失败这一格必须有文案**：先前这里返回 `null`（想法是"失败另有终局行说明"），
+ * 结果是这一行渲染成一个**空盒子** —— 网页端同一位置写的是「处理失败」。三档的判据与文案都照上游：
+ * `aborted` → 已停止、`error` → 处理失败（两档**都不带时长**：带了反而像"跑完了"）、
+ * 其余 kind 一律「已完成 / 已完成，用时 X」（上游只特判这两种，`max-tokens`/`interrupted`/`forked`
+ * 乃至陌生值都走「已完成」—— 原样印内部 kind 会把它们漏到界面上）。
  *
- * **终局原因不只"完成"**（2026-10-02 按真机截图补）：被停止的回合在同一位置显示「已停止」
- * （上游 `message.stopped`，与回答行角标同一个词）。这里的分支与 `core/turn-copy.ts` 的
- * `statusBadgeText()` **同一口径**（同一句话只该有一个来源）：
- *   · `undefined`（正常收官） → `已完成`；
- *   · `aborted` / `interrupted` → `已停止`；
- *   · `error` / `max-tokens` → 各自的**独立终局行**已经在说这件事（标题 + 原因 + hint），这里**不重复**；
- *   · 其余陌生值 → **原样显示**（静默吞掉会让"这一轮非正常结束"这个事实消失）。
+ * 与 `turn-copy.ts` 的 `statusBadgeText()` 分工不同：那个是**消息级**角标（"这条回答被中断"），
+ * 这个才是**回合级**控制行。
  *
- * 时长来自本回合的 `turn-stats`（`row.usageRaw.wallSec`，动作条的 ⏱ 弹窗同一份事实）：
- * **没有时长就不带**（不显示占位、不伪造成 0 秒）。
+ * 时长取本回合总用时（`row.usageRaw.wallSec`，与动作条 ⏱ 同源）；**没有就不带**（不显示占位、不伪造 0 秒）。
  *
  * @param done - 本回合是否已关闭（未关闭 = 运行中，不出这一行）。
  * @param status - 宿主的 `turn/end.reason.kind`；`undefined` = 正常收官（`completed` 不传进来）。
  * @param wallMs - 本回合总用时（毫秒）；`undefined` = 没拿到。
- * @returns 文案；`null` = 不出这一行。
+ * @returns 文案；`null` = 不出这一行（只有"还没关闭"这一种）。
  */
 export function doneStatusText(done: boolean, status: string | undefined, wallMs: number | undefined): string | null {
   if (!done) {
     return null
   }
-  if (status === 'error' || status === 'max-tokens') {
-    return null
+  if (status === 'error') {
+    return '处理失败'
   }
-  /**
-   * ⚠️ **只有 `aborted` 是"已停止"，其余一律"已完成"**（2026-10-02 按 tag `dsh-v0.2.0-rc.2` 更正）。
-   *
-   * 上游 `TurnProcessNodeView.tsx` 的原文是**只特判两种**：
-   * ```tsx
-   * const label = reason === 'aborted' ? t('message.stopped')
-   *   : reason === 'error' ? t('message.turnProcess.failed')
-   *     : duration === undefined ? t('message.turnProcess.worked')     // '已完成'
-   *       : t('message.turnProcess.took')                             // '已完成，用时 '
-   * ```
-   * 也就是说 **`interrupted`、`forked`、`completed` 以及任何别的 kind 都走 `worked`/`took`**，
-   * 文案表里根本没有这些词。此前我们把"陌生 kind 原样显示"（一条自作聪明的兜底）留下了 ——
-   * 真机现象：点「在新对话中分支」后，分叉切点合成的 `turn/end.reason.kind = 'forked'`
-   * 被直接印成 **`forked，用时 xx秒`**（web 端当时显示的是「已完成，用时 xx秒」）。
-   */
-  const label = status === 'aborted' ? '已停止' : '已完成'
-  return wallMs === undefined ? label : `${label}，用时 ${formatRunDuration(wallMs)}`
+  if (status === 'aborted') {
+    return '已停止'
+  }
+  return wallMs === undefined ? '已完成' : `已完成，用时 ${formatRunDuration(wallMs)}`
 }

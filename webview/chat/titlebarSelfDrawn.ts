@@ -139,13 +139,12 @@ export function initSelfDrawnTitlebar(api: SelfDrawnTitlebarApi): void {
   }
 
   /** 建一行工作区行（button）；act/id 用于点击委派 */
-  function makeWsRow(act: string, opts: { id?: string; icon: string; iconClass?: string; text: string; desc?: string; cls?: string; sid?: string; blank?: string; disabled?: boolean }): HTMLButtonElement {
+  function makeWsRow(act: string, opts: { id?: string; icon: string; iconClass?: string; text: string; desc?: string; cls?: string; sid?: string; disabled?: boolean }): HTMLButtonElement {
     const b = document.createElement('button')
     b.className = 'wsrow' + (opts.cls ? ' ' + opts.cls : '')
     b.dataset['act'] = act
     if (opts.id) b.dataset['id'] = opts.id
     if (opts.sid) b.dataset['sid'] = opts.sid
-    if (opts.blank !== undefined) b.dataset['blank'] = opts.blank
     if (opts.disabled) b.disabled = true
     b.innerHTML =
       `<span class="codicon codicon-${opts.icon} ${opts.iconClass ?? ''} ws-${act}-icon"></span>` +
@@ -198,7 +197,6 @@ export function initSelfDrawnTitlebar(api: SelfDrawnTitlebarApi): void {
           makeWsRow('session', {
             id: w.workspaceId,
             sid: s.sessionId,
-            blank: String(s.blank),
             icon: s.current ? 'check' : s.running ? 'sync' : 'history',
             iconClass: 'ws-session-icon',
             text: s.title,
@@ -348,7 +346,6 @@ export function initSelfDrawnTitlebar(api: SelfDrawnTitlebarApi): void {
         op: 'session',
         workspaceId: id,
         sessionId: row.dataset['sid'],
-        blank: row.dataset['blank'] === 'true',
       })
       closeWsDropdown()
     } else if (act === 'new') {

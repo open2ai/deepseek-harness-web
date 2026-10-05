@@ -17,6 +17,8 @@ import { diffCardModel } from '../../core/diff-card'
 import { readCardModel } from '../../core/read-card'
 import { searchCardModel } from '../../core/search-card'
 import { imageCardModel } from '../../core/image-card'
+import { detailsCardModel } from '../../core/details-card'
+import { todoDiffModel } from '../../core/todo-diff'
 import { WebCard } from './WebCard'
 import { PresentRow } from './PresentRow'
 import { AskCardBody } from './AskCardBody'
@@ -25,6 +27,7 @@ import { TerminalBlock } from './TerminalBlock'
 import { DiffCard } from './DiffCard'
 import { ReadCard } from './ReadCard'
 import { SearchCard } from './SearchCard'
+import { DetailsCardBody } from './DetailsCardBody'
 
 type Tool = Extract<DshTurnProcessItem, { kind: 'tool' }>
 
@@ -46,6 +49,11 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   const image = imageCardModel(cards, cwd)
   const search = searchCardModel(cards)
   const web = webCardModel(cards)
+  // 详情卡（goal / schedule / 子代理协调类）与 todo 卡（todo_write）只在**专属工具**上命中；
+  // 形状不符一律 null，自然落到下面的通用卡。两者只认 `item`（含 todoBaseline），不走 `cards`。
+  const details = detailsCardModel(item)
+  // 可缺省读取（与 `MessageList` 读 `sessionOpenError` 同一口径）：部分守卫/旧桩的 store 里没有这个切片
+  const todoDiff = todoDiffModel(item, store.historyHasMore?.value === true)
 
   // 行状态三级（**单一来源**：卡内状态点与文案取的就是这个 rowState，行与卡不可能打架）：
   //   1) 提问卡可覆盖（ASK_CANCELLED→ok / ASK_ABORTED→stopped，见 ask-card）
@@ -82,7 +90,16 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // （等待回答 / n 分之 m 已回答 / 已取消 / 已中断），算不出来时（结果坏形、未知错误码）**回落到通用摘要**
   // （`工具名 · 参数首行`）—— 上游此处即取 model.summary，不把摘要位留空。
   const fallbackSummary = ask !== null && ask.summary !== '' ? ask.summary : genericSummary
-  const headSummary = failureLine !== null ? failureLine || undefined : fallbackSummary || undefined
+  // 详情卡的收起行摘要（上游 `summary = details.summary ?? items[0].title ?? empty ?? model.summary`）：
+  // 结构化摘要（如「3 个智能体」/ 目标 objective）优先于通用摘要。
+  const detailsSummary = details !== null ? (details.summary ?? details.items[0]?.title ?? details.empty) : undefined
+  const baseSummary = failureLine !== null
+    ? failureLine || undefined
+    : (detailsSummary !== undefined && detailsSummary !== '' ? detailsSummary : fallbackSummary || undefined)
+  // todo 卡的 diff 摘要（「新增 X · 更新 Y」）跟在「x/y 已完成」之后 —— 上游 `summarySuffix` 的位置。
+  // 无法对比（旧清单不可用）时 todoDiff.summary 为 null，不缀。
+  const todoDiffSuffix = todoDiff?.summary ?? ''
+  const headSummary = todoDiffSuffix !== '' && baseSummary !== undefined ? `${baseSummary} · ${todoDiffSuffix}` : baseSummary
   // 收起行摘要里的文件路径可点击打开（对齐上游 ToolRow 的 filePath/onOpenFile）：
   //   - 只对文件类变体（read/write/edit，含 read_image）有值，取参数里的 path/file_path；
   //   - **失败行不挂**（失败行的摘要位是结果首行，不是路径）；
@@ -188,6 +205,12 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
 
   // ---- web 卡（web_fetch / web_search）----
   if (web !== null) return wrap(html`<${WebCard} card=${web} />`)
+
+  // ---- todo 卡（todo_write：与上次清单的 diff）----
+  if (todoDiff !== null) return wrap(html`<${DetailsCardBody} model=${todoDiff.details} store=${store} />`)
+
+  // ---- 详情卡（goal / schedule / 子代理协调类）----
+  if (details !== null) return wrap(html`<${DetailsCardBody} model=${details} store=${store} />`)
 
   // ---- 通用兜底：其余工具都用上面的 ioBody（「输入」调用参数 pretty JSON + 「输出」调用结果）----
   return wrap(ioBody())

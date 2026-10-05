@@ -98,22 +98,12 @@ export function chainItemNode(
 }
 
 /**
- * **外层折叠**（上游 `ChatGroupSeat.tsx` 的 `outerHidden` / `alwaysOpen`）：同一回合里，
- * 只有"**当前回答世代**"那一片可见，更早的世代整片隐藏（用 `hidden="until-found"`
- * —— 仍可被网页查找命中，命中即由 `beforematch` 唤出，见 `Chain.ts`）。
+ * **外层折叠**：同一回合里只有"**当前回答世代**"可见，更早的世代整片隐藏
+ * （`hidden="until-found"` —— 仍可被网页查找命中，命中即由 `beforematch` 唤出，见 `Chain.ts`）。
  *
- * 上游判据（`13` §3 逐字）：
- * `outerHidden = foldCompletedTurns && 回合已关闭 && spec 存在 && !alwaysOpen && stored?.answerStep !== (spec.answerStep ?? 0)`
- *
- * 三处按插件事实落地：
- *   · `foldCompletedTurns` = 页面偏好 `compact`（`transcriptView` 的紧凑/标准/详细三档都为真）；
- *   · `stored?.answerStep` = `store.outerAnswerStep`（**回合级**一份，`revealOuter` 记新的世代）；
- *   · `alwaysOpen` 的两个"不是正常收官"的条件用 `status`（报错/中断/停止）与 `interrupted` 代替
- *     （宿主只在**非 completed** 的收尾原因上带 `status`，见 `core/turn-copy.ts` 的口径）。
- *
- * ⚠️ **只在同一行内生效**：被插话切开的回合是多条行（上游是同一个 seat），跨行折会藏掉
- * 用户当下正在看的段落 —— 所以行数 > 1 时整支关闭（等价上游的 `hasInterleavedInput`）。
- * 展开态、`answerStep`、`alwaysOpen` 的完整对照见 `14` §7。
+ * 判据：`foldCompleted && 回合已关闭 && 有过程事实 && !alwaysOpen && 记录世代 ≠ 当前世代`。
+ * ⚠️ **行兜底**：插件把"一段回答"做成一条行（上游是一个 seat），跨行折会藏掉用户正在看的段落 ——
+ * 所以本行不是本回合唯一一行时整支关闭。完整对照见 `14` §7。
  *
  * @param input - 本回合的折叠偏好与事实。
  * @returns `hidden` = 是否折起（只留当前世代），`answerStep` = 当前世代（唤出时要记的值），`revealed` = 本回合用户已唤出过。
@@ -123,25 +113,25 @@ export function outerFold(input: {
     foldCompleted: boolean
     /** 本回合是否已关闭 */
     done: boolean
-    /** 本行是不是本回合的**唯一**一行（多行 = 被插话切开 → 不折） */
+    /** 本行是不是本回合的**唯一**一行（行兜底：多行时不跨行折） */
     soleRow: boolean
+    /** 过程区间里有人插过话 → 永远展开（由宿主按上游判据算好） */
+    hasInterleavedInput?: boolean
     /** 宿主下发的过程事实（`spec` 不存在 = 没有过程证据 → 不折） */
     hasProcess: boolean
     /** 本行的回答世代 */
     answerStep: number | undefined
     /** 用户已唤出的世代（`undefined` = 没有记录） */
     storedAnswerStep: number | undefined
-    /** `alwaysOpen` 的输入：回合未正常收官（`status` 有值）或消息被中断 */
+    /** `alwaysOpen` 的输入：上游只认 `aborted` / `error`（`forked`、`interrupted` 都算普通收官） */
     interrupted: boolean
-    /** 回合计入外层折叠是否 ≤ 1 片（单片时折与不折没有区别） */
+    /** 本行的片数（**仅作诊断/透传**：上游折不折不看片数，单片回合同样折起） */
     sliceCount: number
 }): { hidden: boolean; answerStep: number; revealed: boolean } {
     const answerStep = input.answerStep ?? 0
     const revealed = input.storedAnswerStep === answerStep
-    const alwaysOpen = input.interrupted || !input.soleRow
-    // ⚠️ **不再要求"片数 > 1"**（2026-10-02 对齐上游 `TurnProcessNodeView`）：上游折不折只看
-    // `foldable && hasContent && !alwaysOpen` —— 单片回合同样折（折起后只剩那条摘要行 + 细线）。
-    // 这条"片数 > 1"是我早先自己加的，真机反馈「没有箭头可点击」正是它（`14` §21）。
+    const alwaysOpen = input.interrupted || !input.soleRow || input.hasInterleavedInput === true
+    // 折不折只看 `foldable && hasContent && !alwaysOpen` —— **没有"片数 > 1"这一项**
     const hidden =
         input.foldCompleted &&
         input.done &&

@@ -20,6 +20,7 @@ export interface MessagesSlice {
     | 'historyHasMore'
     | 'historyLoading'
     | 'historyEvents'
+    | 'sessionOpenError'
     | 'applyHistory'
     | 'loadOlder'
     | 'showNotice'
@@ -55,8 +56,16 @@ export interface MessagesSlice {
   historyLoading: Signal<boolean>
   /** 窗口里的事件条数（诊断与「还需要往下翻多久」的直观量，不参与判定）。 */
   historyEvents: Signal<number>
+  /** **打开历史失败**的事实（上游 `openState === 'error'`）：列表顶端据此出一条横幅；`undefined` = 没有失败。 */
+  sessionOpenError: Signal<{ message: string; code?: string } | undefined>
   /** 记下宿主给的窗口事实（跟 `rows` 帧一起来，见 core/protocol 的 `rows`）。 */
-  applyHistory(info: { hasMore?: boolean; loading?: boolean; events?: number }): void
+  applyHistory(info: {
+    hasMore?: boolean
+    loading?: boolean
+    events?: number
+    /** 整表语义：`null` = 没有失败（用来清掉上一条横幅） */
+    openError?: { message: string; code?: string } | null
+  }): void
   /** 请求往前翻一页（宿主去读更早的一页并 prepend；失败由宿主回 `history` 帧复位）。 */
   loadOlder(): void
   /** 本次提交**失败**（宿主 `chatError`）：把该标识对应的本地乐观行标为「未提交成功」，
@@ -101,6 +110,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const historyHasMore = signal(false)
   const historyLoading = signal(false)
   const historyEvents = signal(0)
+  /** **打开历史失败**（上游 `openState === 'error'` 的 `openError`）：列表顶端横幅读它。 */
+  const sessionOpenError = signal<{ message: string; code?: string } | undefined>(undefined)
   /** 回合级折叠展开态（见 core/process-fold）：key 是**会话内**回合号，换会话必须清 */
   const turnFoldOpen = signal<ReadonlyMap<number, boolean>>(new Map<number, boolean>())
   const setTurnFoldOpen = (turn: number, open: boolean): void => {
@@ -398,10 +409,17 @@ export function createMessages(host: ChatHost): MessagesSlice {
     scrollPend.value = scrollPend.value + 1
   }
   /** 记下宿主给的窗口事实（跟 `rows` 帧一起来；缺项不动，避免每帧把已知状态清回默认）。 */
-  const applyHistory = (info: { hasMore?: boolean; loading?: boolean; events?: number }): void => {
+  const applyHistory = (info: {
+    hasMore?: boolean
+    loading?: boolean
+    events?: number
+    openError?: { message: string; code?: string } | null
+  }): void => {
     if (info.hasMore !== undefined) historyHasMore.value = info.hasMore
     if (info.loading !== undefined) historyLoading.value = info.loading
     if (info.events !== undefined) historyEvents.value = info.events
+    // 整表语义：给了就照它写（`null` → 清掉横幅）
+    if (info.openError !== undefined) sessionOpenError.value = info.openError ?? undefined
   }
   /** 往前翻一页：宿主去读更早的历史并 prepend；在飞时不重复发（按钮也已禁用）。 */
   const loadOlder = (): void => {
@@ -421,6 +439,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
     historyHasMore.value = false
     historyLoading.value = false
     historyEvents.value = 0
+    // 「打开失败」是**上一个会话**的事实，换会话必须清（否则横幅会挂到别的会话上）
+    sessionOpenError.value = undefined
   }
 
   return {
@@ -433,6 +453,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
       historyHasMore,
       historyLoading,
       historyEvents,
+      sessionOpenError,
       applyHistory,
       loadOlder,
       showNotice,
@@ -447,6 +468,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
     historyHasMore,
     historyLoading,
     historyEvents,
+    sessionOpenError,
     pushApproval,
     addUser,
     beginAssistant,

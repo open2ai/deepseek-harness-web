@@ -1,19 +1,26 @@
-// 回合尾部：本轮文件改动（从写盘调用推导）+ 交付文件（模型声明）。
+// 回合尾部：本轮文件改动（Host 的改动摘要）+ 交付文件（模型声明）。
 //
 // 位置与上游一致：**回答正文之后、动作条之前**（动作条是回合尾部的下半段，不是正文的一部分）。
 // 点任意一项都在**编辑器区**打开（上游把这类路径交给宿主默认程序；本插件聊天区就在 VS Code 里，
 // 编辑器打开才顺手，见 extension 侧 openFile 的同一处说明）。
+//
+// **改动卡的存在性由 Host 决定**（2026-10-05 修正）：上游 `ChangedFiles` 的数据来自 Host 内存态的
+// 改动摘要（`GET /api/changes.summary`；数据在宿主，页面只渲染），
+// 而 Host 的契约是「**该会话被释放或本进程从没记过就没有**」——所以**摘要取不到就不出这张卡**
+//（Host 重启后打开历史会话，网页端也没有这张卡）。插件早先从 `write`/`edit` 调用**重建**清单，
+// 于是历史会话凭空多出一张上游没有的卡（2026-10-04 真机截图）；现改为**宿主取回 + 原样渲染**。
 import { html } from 'htm/preact'
-import { useMemo, useState } from 'preact/hooks'
+import { useState } from 'preact/hooks'
 import type { ChatRow, ChatStore } from '../../core/store/chat'
-import { baseName, extensionLabel, producedPaths } from '../../core/deliverables'
+import type { DshChangesSummary } from '../../../../src/dsh/rows/types'
+import { baseName, extensionLabel } from '../../core/deliverables'
 
 type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
 
 /** 交付文件超过这个数先折叠（上游同值） */
 const COLLAPSED_PRESENTED_COUNT = 4
-/** 本轮文件改动最多平铺几个（上游同值）；多出来的只报数，不再铺开 */
-const PRODUCED_SHOWN_LIMIT = 6
+/** **本轮文件改动**列表超过这个行数先折叠（上游 `COLLAPSED_ROWS` 同值） */
+const COLLAPSED_ROWS = 4
 
 /** 卡片状态行：模型说明优先（去掉结尾的括号后缀），否则扩展名，再否则「文件」。 */
 function cardNote(description: string | undefined, path: string): string {
@@ -22,44 +29,76 @@ function cardNote(description: string | undefined, path: string): string {
 }
 
 export function Deliverables({ row, store }: { row: AssistantRow; store: ChatStore }) {
-  // 折叠态属于**这一条回答**（换行即重置），故用组件内状态
+  // 折叠态属于**这一条回答**（换行即重置），故用组件内状态。
+  // 两块**各自一份**：改动列表与交付卡片的行数不同、用户会分别开合，共用一个状态会互相带开。
+  const [changesExpanded, setChangesExpanded] = useState(false)
   const [expanded, setExpanded] = useState(false)
-  // 链不变就不必重算：写盘调用的参数解析要走一遍 JSON.parse
-  const produced = useMemo(() => producedPaths(row.chain), [row.chain])
   const presented = row.presentedFiles ?? []
   /**
    * **只有回合（这一段）收官后才出**。
    *
    * 上游这一块挂在 `conversation.chat.turnTail` 槽、由 `TurnTailNodeView` 渲染，
-   * 取值还要过 `producedForClosing(…, closingSeq)` —— `closingSeq` 是**收官那条** assistant 的序号，
-   * 它之后的结算一律不算。也就是说：**它是回合尾部的报告，不是过程里的进度条**。
-   *
-   * 本插件的行是流式期间一路重折的，`row.chain` 里的写盘调用一落链就会被看见 ——
-   * 少了这道门，模型还在跑的时候「本轮文件改动」就已经列出来、还随每个写盘调用往上长
-   *（真机现象：会话没结束就出现「本轮文件改动」，网页端那时候还没有）。
-   * 被插话切开的前段：那一段收束时 `done` 也会置真，于是我们与上游一样**逐段**出。
+   * 取值还要过 `presentedForClosing` / 摘要读取 —— 也就是说：**它是回合尾部的报告，不是过程里的进度条**。
+   * 本插件的行是流式期间一路重折的，写盘调用一落链就会被看见 —— 少了这道门，模型还在跑的时候
+   * 「本轮文件改动」就已经列出来、还随每个写盘调用往上长。被插话切开的前段：那一段收束时 `done`
+   * 也会置真，于是我们与上游一样**逐段**出。
    */
   if (!row.done) return null
-  // 上游：**只有开启「代码工作工具」才展示这一区**（关闭时立即隐藏；显式交付卡片与行内文件链接不受影响）。
-  // 判据写成「只有显式 false 才隐藏」：上游该项**默认开**，读不到/未装该字段都按开启处理。
-  if (store.developerTools?.value === false) return null
-  if (produced.length === 0 && presented.length === 0) return null
+  /**
+   * 上游 `Deliverables`：**改动卡**受「代码工作工具」（`showCodeDiff`）管，**交付卡片不受它影响**。
+   * 改动卡的另一个门是**Host 得拿得出那份摘要**（`row.changesSummary` 缺省 = 拿不到）——
+   * 判据写成「只有显式 false 才隐藏」：该项上游**默认开**，读不到/未装该字段都按开启处理。
+   */
+  const fetched: DshChangesSummary | undefined = store.developerTools?.value === false ? undefined : row.changesSummary
+  // 摘要里一个文件都没有 → 同样不出卡（上游 `summary.files.length > 0` 是那张卡的存在条件之一）
+  const summary = fetched !== undefined && fetched.files.length > 0 ? fetched : undefined
+  if (summary === undefined && presented.length === 0) return null
   const cwd = store.sessionCwd.value
   const open = (p: string): void => store.openFile(p, undefined, cwd)
-  const shownProduced = produced.slice(0, PRODUCED_SHOWN_LIMIT)
-  const hiddenProduced = produced.length - shownProduced.length
+  /**
+   * **本轮文件改动**（上游 `ChangedFiles` 的形态）：
+   * 标题 = `已编辑 {total} 个文件`（**恰好一个文件时**是 `已编辑 {name}`），下面**竖排**行
+   * （`display` 相对路径 + 右侧 `+x/-y` 行数，二进制/超大给固定词），超过 `COLLAPSED_ROWS` 行折叠成
+   * `全部 {n} 个文件`。计数与文件清单**一律取 Host 的摘要**，不自己数（数出来就会与卡上的标题打架）。
+   */
+  const files = summary?.files ?? []
+  const changesFoldable = files.length > COLLAPSED_ROWS
+  const shownFiles = changesFoldable && !changesExpanded ? files.slice(0, COLLAPSED_ROWS) : files
+  const single = summary !== undefined && summary.total === 1 ? files[0] : undefined
   const shownPresented = expanded ? presented : presented.slice(0, COLLAPSED_PRESENTED_COUNT)
   return html`<div class="turn-deliverables">
-    ${produced.length > 0
+    ${summary !== undefined
       ? html`<div class="dv-produced">
-          <span class="dv-label">本轮文件改动</span>
-          <div class="dv-chips">
-            ${shownProduced.map((p) => html`<button type="button" key=${p} class="dv-chip" title=${p}
-              onClick=${() => open(p)}><span class="codicon codicon-file dv-chip-ico"></span>${baseName(p)}</button>`)}
-            ${hiddenProduced > 0
-              ? html`<span class="dv-more">${hiddenProduced === 1 ? '+ 1 个文件' : `+ ${hiddenProduced} 个文件`}</span>`
-              : null}
-          </div>
+          ${single === undefined
+            ? html`<div class="dv-changes-head">
+                <span class="dv-changes-title">已编辑 ${String(summary.total)} 个文件</span>
+              </div>`
+            : html`<div class="dv-changes-head">
+                <span class="dv-changes-title">已编辑 ${baseName(single.path)}</span>
+              </div>`}
+          ${single === undefined
+            ? html`<ul class="dv-changes-list">
+                ${shownFiles.map((f) => html`<li key=${f.path}>
+                  <button type="button" class="dv-changes-row" title=${f.display} onClick=${() => open(f.path)}>
+                    <span class="dv-changes-path">${f.display}</span>
+                    <span class="dv-changes-counts">
+                      ${f.binary === true
+                        ? html`<span class="dv-changes-kind">二进制</span>`
+                        : f.oversized === true
+                          ? html`<span class="dv-changes-kind">过大</span>`
+                          : html`<span class="dv-added">+${String(f.added)}</span><span class="dv-deleted">-${String(f.deleted)}</span>`}
+                    </span>
+                  </button>
+                </li>`)}
+              </ul>`
+            : null}
+          ${changesFoldable
+            ? html`<button type="button" class="dv-changes-toggle" aria-expanded=${changesExpanded}
+                onClick=${() => setChangesExpanded((v) => !v)}>
+                <span class="dv-changes-toggle-text">${changesExpanded ? '收起' : `全部 ${String(files.length)} 个文件`}</span>
+                <span class=${'codicon ' + (changesExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down') + ' dv-changes-toggle-chev'} aria-hidden="true"></span>
+              </button>`
+            : null}
         </div>`
       : null}
     ${presented.length > 0
@@ -78,7 +117,7 @@ export function Deliverables({ row, store }: { row: AssistantRow; store: ChatSto
             ? html`<button type="button" class="dv-toggle" aria-expanded=${expanded}
                 onClick=${() => setExpanded((v) => !v)}>
                 <span class=${'codicon ' + (expanded ? 'codicon-chevron-up' : 'codicon-chevron-down')}></span>
-                ${expanded ? '收起' : `全部 ${presented.length} 个文件`}
+                ${expanded ? '收起' : `全部 ${String(presented.length)} 个文件`}
               </button>`
             : null}
         </div>`

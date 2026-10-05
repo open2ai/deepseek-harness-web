@@ -30,57 +30,17 @@ export function formatMsgClock(t: number | undefined | null): string {
   return `${date} ${clock}`
 }
 
-/** 工具名 → 友好中文 */
-export function friendlyToolName(name: string): string {
-  const map: Record<string, string> = {
-    bash: '执行命令',
-    pwsh: '执行命令',
-    shell: '执行命令',
-    powershell: '执行命令',
-    glob: '查找文件',
-    read: '读取文件',
-    readTextFile: '读取文件',
-    think: '思考',
-    findings: '分析',
-    grep: '搜索',
-    search: '搜索',
-    write: '写文件',
-    edit: '编辑文件',
-    str_replace_editor: '编辑文件',
-    apply_patch: '应用补丁',
-  }
-  return map[name] ?? name
-}
-
-/**
- * 工具友好名 → codicon 图标类名（无 codicon- 前缀）。steps[].tools 存的是友好名，故按友好名映射；
- * bash/pwsh/shell 已被 friendlyToolName 并成"执行命令"，壳细分在下游丢失，此处接受。未知原名兜底 wrench。
- */
-export function toolIcon(friendly: string): string {
-  const map: Record<string, string> = {
-    执行命令: 'terminal', // bash / pwsh / shell / powershell
-    读取文件: 'file-text', // read / readTextFile
-    写文件: 'save', // write
-    编辑文件: 'edit', // edit / str_replace_editor
-    应用补丁: 'diff-added', // apply_patch
-    查找文件: 'files', // glob
-    搜索: 'search', // grep / search
-    思考: 'lightbulb', // think
-    分析: 'graph-line', // findings
-  }
-  return map[friendly] ?? 'wrench'
-}
-
 /**
  * raw 工具名 → 展示标题（中文观感：Pwsh / 网页获取 / 搜索…）。
  * 标题是 UI 层文案，不是模型吐出。无专属标题的工具一律用通用标题「工具调用」，
  * 真实工具名改由摘要承载（见 deriveToolSummary）。
  */
 const TOOL_TITLES: Record<string, string> = {
-  bash: 'Bash',
-  pwsh: 'Pwsh',
-  powershell: 'PowerShell',
-  shell: 'Shell',
+  // 壳类：上游 `tool.title.bash` / `tool.title.pwsh` 两键的**同一句文案**（不是工具名）
+  bash: '运行命令',
+  pwsh: '运行命令',
+  powershell: '运行命令',
+  shell: '运行命令',
   read: '读取',
   read_image: '读取图片',
   readTextFile: '读取',
@@ -89,7 +49,8 @@ const TOOL_TITLES: Record<string, string> = {
   str_replace_editor: '编辑',
   apply_patch: '应用补丁',
   glob: '查找文件',
-  grep: 'Grep',
+  // 上游 `tool.title.grep` = 「搜索文件内容」（与 `glob`「查找文件」**不同键**，别合并）
+  grep: '搜索文件内容',
   search: '网页搜索',
   web_search: '网页搜索',
   web_fetch: '网页获取',
@@ -97,10 +58,55 @@ const TOOL_TITLES: Record<string, string> = {
   think: '思考',
   findings: '分析',
   plan: 'plan',
-  subagent: 'subagent',
+  subagent: '创建子智能体',
+  // 子智能体 / 后台任务的协调类工具（上游 `tool.title.*` 逐条对应）
+  list_agents: '查看子智能体',
+  send_message: '发送消息',
+  interrupt_agent: '中断智能体',
+  wait_agent: '等待子智能体',
+  spawn_teammate: '创建队友',
+  job_list: '查看后台任务',
+  job_output: '读取任务输出',
+  job_kill: '取消后台任务',
+  lsp: '查询代码符号',
+  create_goal: '创建目标',
+  get_goal: '查看目标',
+  update_goal: '更新目标',
+  // 定时任务（上游 `tool.title.createSchedule` 等四键；工具名是 schedule_* 蛇形）
+  schedule_create: '创建定时任务',
+  schedule_list: '查看定时任务',
+  schedule_delete: '删除定时任务',
+  schedule_update: '修改定时任务',
   ask_user_question: '提问',
   todo_write: '更新任务清单',
   present: '交付文件',
+  list_subagent_models: '查看可用模型',
+  // 上游标题表里还有这一族（本机默认组合尚未出现，见 `12` §0.5 的清点）：文案逐条取上游 zh 字面量，
+  // 免得用户一旦打开对应组合，插件这边回退成「工具调用」而网页端显示具体动作。
+  cordis_package_inspect: '查询 Cordis 环境',
+  cordis_runtime_inspect: '查询 Cordis 环境',
+  cordis_run: '运行 Cordis 插件',
+  cordis_stop: '停止 Cordis 插件',
+  cordis_undefine: '移除 Cordis 插件',
+  cordis_inspect_list: '检查提供方',
+  cordis_inspect_query: '查询运行时',
+  cordis_inspect_self: '检查动态插件',
+  workflow: '运行工作流',
+  ralph: '运行循环工作流',
+  session_event_read: '读取事件',
+  session_event_search: '搜索事件',
+  session_event_trace: '追踪事件',
+  session_search: '搜索会话',
+  session_trace: '追踪会话',
+  terminal_open: '创建终端',
+  terminal_read: '读取终端',
+  terminal_list: '查看终端',
+  terminal_signal: '发送终端信号',
+  terminal_close: '关闭终端',
+  team_task_create: '创建团队任务',
+  team_task_get: '读取团队任务',
+  team_task_update: '更新团队任务',
+  team_task_list: '查看团队任务',
 }
 
 /** 无专属标题的工具统一用「工具调用」。 */
@@ -153,7 +159,8 @@ export function toolIconOfTool(name: string): string {
     edit: 'edit',
     str_replace_editor: 'edit',
     apply_patch: 'diff-added',
-    glob: 'files',
+    // `glob` 与 `grep` 同属上游的 `search` 变体 → **同一个放大镜**（不是文件夹图标）
+    glob: 'search',
     grep: 'search',
     search: 'search',
     web_search: 'search',
@@ -164,6 +171,52 @@ export function toolIconOfTool(name: string): string {
     plan: 'list-unordered',
     ask_user_question: 'question',
     todo_write: 'checklist',
+    // goal / schedule / 子代理协调 / 后台任务 / lsp：按上游详情图标的**语义归类**挑 codicon 近似
+    //（上游是自绘图标，这里只追「类」不追像素 —— codicon 是近似，不是逐像素对应）。
+    create_goal: 'target',
+    get_goal: 'target',
+    update_goal: 'target',
+    schedule_create: 'calendar',
+    schedule_list: 'calendar',
+    schedule_delete: 'calendar',
+    schedule_update: 'calendar',
+    subagent: 'organization',
+    list_agents: 'organization',
+    send_message: 'organization',
+    interrupt_agent: 'organization',
+    wait_agent: 'organization',
+    spawn_teammate: 'organization',
+    job_list: 'checklist',
+    job_output: 'checklist',
+    job_kill: 'checklist',
+    lsp: 'search',
+    list_subagent_models: 'list-unordered',
+    // 上游详情卡按**名字前缀**归类图标（`cordis_` 插件 / `terminal_` 代码 / `session_` 放大镜 /
+    // `job_`+`team_task_` 清单 / `workflow`+`ralph` 分支）；这里照同一套归类给 codicon 近似。
+    cordis_package_inspect: 'extensions',
+    cordis_runtime_inspect: 'extensions',
+    cordis_run: 'extensions',
+    cordis_stop: 'extensions',
+    cordis_undefine: 'extensions',
+    cordis_inspect_list: 'extensions',
+    cordis_inspect_query: 'extensions',
+    cordis_inspect_self: 'extensions',
+    terminal_open: 'code',
+    terminal_read: 'code',
+    terminal_list: 'code',
+    terminal_signal: 'code',
+    terminal_close: 'code',
+    session_event_read: 'search',
+    session_event_search: 'search',
+    session_event_trace: 'search',
+    session_search: 'search',
+    session_trace: 'search',
+    team_task_create: 'checklist',
+    team_task_get: 'checklist',
+    team_task_update: 'checklist',
+    team_task_list: 'checklist',
+    workflow: 'git-branch',
+    ralph: 'git-branch',
   }
   return map[name] ?? 'wrench'
 }
@@ -205,6 +258,14 @@ export function deriveToolSummary(argsRaw: string | undefined, name?: string): s
     if (base === '') return ''
     return name ? clipLine(`${name} · ${base}`) : base
   }
+  // 搜索类的查询是**数组**（`web_search` 的 `queries`）：先逐个取首行、再用 `, ` 连起来。
+  // ⚠️ 漏了这一条，搜索那一行就只剩标题、什么摘要都没有（网页端同一行显示的是这几个查询词）。
+  if (isSearch && Array.isArray(rec['queries'])) {
+    const queries = rec['queries'].filter((q): q is string => typeof q === 'string' && q !== '')
+    if (queries.length > 0) {
+      return clipLine(queries.map(firstLine).join(', '))
+    }
+  }
   const keys = isCmd
     ? ['description', 'command', 'cmd', 'code', 'script']
     : isWrite
@@ -218,7 +279,8 @@ export function deriveToolSummary(argsRaw: string | undefined, name?: string): s
       return clipLine(firstLine(v))
     }
   }
-  return ''
+  // 偏好键都没命中：**兜底原始参数首行**（不是空摘要）—— 空摘要会让这一行看起来什么都没有
+  return clipLine(firstLine(argsRaw))
 }
 
 /**

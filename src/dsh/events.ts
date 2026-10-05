@@ -92,14 +92,6 @@ interface RemoteInvocation {
     readonly event: string;
 }
 
-type WaterfallFrame = {
-    type: 'waterfall';
-    event: string;
-    eventId: string;
-    agentId: string;
-    request: Record<string, unknown>;
-};
-
 const RECONNECT_DELAY_MS = 1500;
 const STREAM_TIMEOUT_MS = 10_000;
 

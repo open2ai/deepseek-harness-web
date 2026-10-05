@@ -30,6 +30,14 @@ export type DshRowItem =
         meta?: unknown;
         /** 结果原始内容块（仅当结果含图片块时带） */
         blocks?: unknown;
+        /**
+         * **本次 `todo_write` 之前**已落盘的清单（仅 `todo_write` 工具带）。
+         *
+         * 上游 `tool-todo-history` 把每条 `tool/call` 与它之前最近一次 `todo/write` 事件配对，
+         * 卡上据此渲染「与上次清单相比」的 diff。`null` = 窗口里没有更早的 `todo/write`
+         *（页面按 `historyHasMore` 再分「首次记录」还是「旧清单不可用」）；缺省 = 非 todo 工具。
+         */
+        todoBaseline?: DshTodoItem[] | null;
     }
     | {
         kind: 'context';
@@ -85,6 +93,14 @@ export interface DshTurnProcess {
      * 与上游同：这里 user 与 steering 一视同仁（分类只影响行的种类，不影响这条判据）。
      */
     compactAnswer: boolean;
+    /**
+     * **过程区间里有没有"被插进来的话"**（上游 `hasInterleavedInput`）：本回合里存在
+     * `user`/`steering` 消息且它的 seq 晚于开场人类锚点。
+     *
+     * 上游 `turnProcessAlwaysOpen()` 的一项 —— 有人插话的回合"永远展开"，不许折回当前世代。
+     * 它比"行数 > 1"（插件早先的代理）更准：行分片不算插话。
+     */
+    hasInterleavedInput: boolean;
     /**
      * **过程分组**（上游的 step-group）：在「带回答内容的步」处收口，一片一段。
      *
@@ -149,6 +165,42 @@ export interface DshTodoItem {
     status: 'pending' | 'in_progress' | 'completed';
 }
 
+/**
+ * 回合**改动摘要**里的一个文件（与上游 `WorkspaceChangedFile` 同义）。
+ *
+ * 形状定义放在这里（而不是 `dsh/changes-summary.ts`）是刻意的：`changesSummary` 是**行的一部分**，
+ * 而本文件是行模型的形状之家、且只含类型 —— 页面侧 `import type` 取行模型时不会把宿主侧的
+ * `node:http` / `vscode` 依赖链带进 webview 的类型工程（见 `webview/chat/tsconfig.json`）。
+ */
+export interface DshChangedFile {
+    /** 相对会话工作目录的路径，或工作目录外的绝对路径。 */
+    path: string;
+    /** 排序键与展示标签（工作目录内的相对路径；`../`／`~`／绝对路径三种兜底）。 */
+    display: string;
+    /** 新增行数（二进制/超大文件为 0）。 */
+    added: number;
+    /** 删除行数（二进制/超大文件为 0）。 */
+    deleted: number;
+    /** git 报二进制（或某一侧含 NUL）时存在。 */
+    binary?: boolean;
+    /** 某一侧超过 `maxFileBytes` 时存在（不给行数、不给对比）。 */
+    oversized?: boolean;
+}
+
+/** 一个回合的改动摘要（Host 只给这些；`cwd`/`snapshot` 留在 Host 侧）。 */
+export interface DshChangesSummary {
+    /** 它描述的回合号。 */
+    turn: number;
+    /** 按 `display` 排序的改动文件（受 Host 的 `maxFiles` 上限）。 */
+    files: DshChangedFile[];
+    /** 完整改动文件数（含被上限裁掉的）。 */
+    total: number;
+    /** 全部改动文件的新增行数合计（含被裁掉的）。 */
+    added: number;
+    /** 全部改动文件的删除行数合计（含被裁掉的）。 */
+    deleted: number;
+}
+
 /** 一行（宿主侧构建，供页面渲染）。上下文注入不是行，它是回答行**链上的一项**（见 design/06 §2）。 */
 export type DshStreamRow =
     | {
@@ -173,6 +225,78 @@ export type DshStreamRow =
       }
     /** 系统提示词行：位置在该回合用户提问**之前**（构建时即按序插入，页面不再自己找位）。 */
     | { kind: 'sysprompt'; key: number; text: string }
+    /**
+     * **手动命令行**（独立行，镜像上游 `command` 节点）。
+     *
+     * 上游把 `command/run`（start）与 `command/done`（update）按 `commandId` 配成**一个节点**：
+     * 标题 = **裸命令名**（不带 `/`、**不显示 args**），摘要 = `command/done` 的 `text`，
+     * 缺则按 kind 给 `command.running` / `command.failed` / `command.done`；
+     * **只有结算文案里含换行才可展开**。
+     *
+     * ⚠️ 上游 `isVisibleChatNode` **剔除 `name === 'permission'`** 的命令行（那种不渲染）。
+     */
+    | {
+        kind: 'command';
+        key: number;
+        commandId: string;
+        /** 命令名（只有 `command/done`、run 在窗口外时为 `null`，上游同） */
+        name: string | null;
+        /** 结果（`command/done`；未结算时缺省 = 进行中） */
+        outcome?: { kind: 'success' | 'error'; text?: string };
+      }
+    /**
+     * **自动压缩标记**（独立行，镜像上游 `compaction` 节点）。
+     *
+     * 上游只在**检查点落地**时才出这一行 —— 那条把被压掉的历史整段替换掉的 `user/message`
+     * （`surfaceOp` 是 replace 型）。**没有检查点就什么都不渲染**（`compaction/start` 之后、
+     * 检查点之前无行；`compaction/end` 对呈现惰性）。摘要与计数取它引用的 `compaction/summary`。
+     */
+    | {
+        kind: 'compaction';
+        key: number;
+        /** 事务标识（`compaction/*` 事件与检查点共用它） */
+        compactionId: string;
+        /** 检查点事件序号（= 这一行的锚点，上游 `CompactionSummaryNode.seq` 同） */
+        seq: number;
+        /** 摘要事件的序号（窗口里没引用到时缺省） */
+        summaryEventSeq?: number;
+        /** 摘要正文（`compaction/summary` 的 text 块拼接并 trim；空则缺省 → 不可展开） */
+        summary?: string;
+        /** 被替换掉的表层条目数（`shadowedSeqs.length`，形状不对则缺省） */
+        shadowedItemCount?: number;
+        /** 被替换掉的估算 token 数（非负安全整数才算） */
+        shadowedTokenCount?: number;
+        /** 手动压缩（`/compact`）发起的事务归属于命令行，见 `command` 行 */
+        sourceCommandId?: string;
+      }
+    /**
+     * **模型重试链**（独立行，镜像上游 `model-retry` 节点）：按 `retryId` 把同一生产者的重试事件
+     * 聚成**一条行**，正文只渲染**最后一次尝试**。
+     *
+     * 上游开链条件是「`llm/retry` 且 `retry === 1`」；`llm/retry-started` 只把同 `retry` 号标成已开始，
+     * 不新增尝试。行锚点 = **首条** `llm/retry` 的 seq（`command/done` 那样的"保持原位"同源）。
+     */
+    | {
+        kind: 'retry';
+        key: number;
+        /** 上游节点标识（同一生产者的重试链共享它） */
+        retryId: string;
+        /** 已排过的尝试次数（末条 `llm/retry` 的 `retry`） */
+        retry: number;
+        /** 所在回合与步（上游 `model-retry` 的坐标，用于落进正确的过程区间） */
+        turn?: number;
+        step?: number;
+        provider?: string;
+        mode?: string;
+        /** 上限（只 `mode === 'normal'` 有；`always` 模式上游显示 `∞`） */
+        maxRetries?: number;
+        delayMs?: number;
+        failure?: { message?: string; code?: string };
+        /** **哪一次**尝试已真正开始（收到过 `llm/retry-started` 的那个 `retry` 序号）；未开始 = 缺省 */
+        started?: number;
+        /** 结算时仍停在 `scheduled` 且 step/回合已关闭 → 上游派生的 `cancelled` */
+        cancelled?: true;
+      }
     /**
      * 回合**终局通知**行（**独立行**，镜像上游两个节点：`turn-error` 与 `turn-max-tokens`）。
      *
@@ -231,13 +355,23 @@ export type DshStreamRow =
         /** 本回合模型声明的交付文件（渲染在回答正文之后、动作条之前；没有声明就不带这个字段） */
         presentedFiles?: DshPresentedFile[];
         /**
-         * 这一回合是**从历史读回来的**（不是本订阅期间实时产生的）。
+         * 本回合 `workspace/changes` **宣告**的事件序号（一个回合一条，取最后一条）。
          *
-         * 用途：回合尾部的「本轮文件改动 / 交付文件」只在**实时**回合显示 —— 打开历史会话时，
-         * 网页端也不显示那两块（它只在实时收到事件时把交付物挂到回合上）。数据本身在行里一直都在，
-         * 所以由渲染侧按这个标识决定显不显示；判定见 `buildRows` 的历史水位。
+         * 用途：回合尾部的「改动文件卡」——宿主拿它去读 **Host 内存态**的改动摘要
+         *（`GET /api/changes.summary?sessionId&seq`，见 `dsh/changes-summary.ts`）。
+         * **摘要取不到就没有那张卡** —— 这正是上游的行为：Host 重启或会话被释放后，
+         * 历史回合的摘要就没了，网页端也不显示该卡（`docs/design/12` §2.1.7）。
+         * 缺省 = 本回合没有宣告（子代理会话、没有 git、或该回合没有文件改动）。
          */
-        fromHistory?: boolean;
+        changesSeq?: number;
+        /**
+         * 按 `changesSeq` 向 Host 取回的改动摘要；**缺省 = 还没有 / 已经拿不到了**。
+         *
+         * 上游的「改动文件卡」就是这份摘要渲染出来的（`ChangedFiles`：相对路径 + `+x/-y` 行数）；
+         * 拿不到摘要就**不渲染那张卡**（`docs/design/12` §2.1.7）。取回与缓存见
+         * `src/api/dshService.ts` 的 `withChangesSummaries`。
+         */
+        changesSummary?: DshChangesSummary;
     };
 
 /** 一条上游事件（保结构：序号、回合/步、类型与载荷）。 */

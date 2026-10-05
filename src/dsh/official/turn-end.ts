@@ -4,12 +4,20 @@
 // 勿混入插件自有逻辑；核心变化只改本目录。
 
 /**
- * 回合终止原因的取值（对齐上游 `TurnEndReasonMap` 的 6 个键）。
+ * 回合终止原因的取值（对齐上游 `TurnEndReasonMap` 的 **7 个键**）。
  *
  * 语义提醒：`interrupted` 指**崩溃遗弃回合的事后关闭**（只在冷读/恢复时合成），
- * 用户点停止、取消请求走的是 `aborted`。
+ * 用户点停止、取消请求走的是 `aborted`；`forked` 只在**分叉种子**里出现（循环自身从不产出）；
+ * `blocked` 上游至今**没有界面处理**（消费侧按陌生值对待即可，见下）。
  */
-export type DshTurnEndKind = 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted';
+export type DshTurnEndKind =
+    | 'completed'
+    | 'aborted'
+    | 'blocked'
+    | 'error'
+    | 'max-tokens'
+    | 'interrupted'
+    | 'forked';
 
 /**
  * 插件**自己产出**终止原因时用的停止占位值。

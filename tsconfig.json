@@ -16,8 +16,12 @@
         "rootDir": "src",
         "strict": true, /* enable all strict type-checking options */
         /* Additional Checks */
+        /* 未用的局部/参数**一律报错**：这一对开关是"删了一半的重构"的挡板 ——
+           开之前全库清过一次（11 处历史残骸），之后编译器直接拦。
+           有意保留的入参按惯例写成 `_` 前缀（编译器会放过）。 */
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
         // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
         // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
-        // "noUnusedParameters": true,  /* Report errors on unused parameters. */
     }
 }

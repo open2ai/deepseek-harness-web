@@ -3,7 +3,7 @@
   "displayName": "DeepSeek Harness Web",
   "description": "DeepSeek Harness 插件",
   "version": "0.1.15",
-  "publisher": "sparks-dev",
+  "publisher": "csparksdev",
   "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.107.1",

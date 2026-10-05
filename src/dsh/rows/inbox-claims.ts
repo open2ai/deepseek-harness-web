@@ -14,13 +14,6 @@
 // 与上游「取该事件之前的最新折叠状态」同一时点，不是事后整表判断。
 import type { DshStreamEvent } from './types';
 
-/** 一次 splice 的坐标与内容（`inserted` 只留消息 id）。 */
-interface PendingSplice {
-    start: number;
-    removedCount: number;
-    inserted: string[];
-}
-
 /** 待处理链：快照（claim 之后的基线）或用前一个状态 + 一次 splice 表达。 */
 type PendingState =
     | { kind: 'snapshot'; ids: string[] }

@@ -10,28 +10,30 @@ import { RowMeta } from './meta'
 import { statusBadgeText } from '../../core/turn-copy'
 import { TurnNoticeRow } from './TurnNoticeRow'
 
-export function AssistantRow({ row, store, latest, ownsHead, noFold, soleRow, tailNotices }: { row: Extract<ChatRow, { kind: 'assistant' }>; store: ChatStore; latest?: boolean; ownsHead: boolean; noFold: boolean; soleRow?: boolean; tailNotices?: readonly ChatRow[] }) {
+export function AssistantRow({ row, store, latest, turnTail, ownsHead, soleRow, tailNotices }: { row: Extract<ChatRow, { kind: 'assistant' }>; store: ChatStore; latest?: boolean; turnTail?: boolean; ownsHead: boolean; soleRow?: boolean; tailNotices?: readonly ChatRow[] }) {
   // 上游无正文流式光标（流式指示靠左下角 TurnStatus），正文不加打字光标
   // 动作条（复制/分叉/反馈/用量/用时）：仅回答结束后(done)显示，回答过程中不出现
   // 回答收得紧不紧（`compactAnswer`）：过程区间里有人插话时为 `wide`，链与正文之间放宽（见 chain.css）
   const answerGap = row.process === undefined ? undefined : row.process.compactAnswer ? 'compact' : 'wide'
-  // 状态角标文案：「已停止」只在**没有**消息级中断标记时兜底（有标记时由正文末尾那个药丸表达）；
-  // `error`/`max-tokens` 不出角标（它们有独立的终局行）
+  // 状态角标：**只有一种情况**会出现（回合被取消、而本行又没有消息级中断标记兜底）；
+  // 其余 kind 一律不出角标 —— 它们要么有自己的终局行，要么由过程摘要行统一说「已完成」。
   const badge = statusBadgeText(row.status, row.interrupted === true)
-  // 分叉可不可用 = **本行是不是这一轮的终局节点**（上游 `branchUnavailable = closing === null
-  // || latestTranscriptSeq !== closing.finalNode.seq`，再或上 `hasLaterChatNode`）：
-  //   · `latest` = 没有更晚的聊天节点（等价上游 `hasLaterChatNode === false`）；
-  //   · 这一轮必须**收在正文上**：被终止（用户停止）、出错、token 上限、消息级中断都会把终局
-  //     落在别人身上（正文末尾的中断药丸 / 独立的终局行），上游此时把分叉置为"可见但不可用"。
-  // `status` 只在**非 completed** 的收尾原因上出现（见 `statusBadgeText` 的契约），所以正常轮次不受影响。
-  const branchUnavailable =
-    latest !== true ||
-    row.interrupted === true ||
-    row.status !== undefined ||
-    (tailNotices !== undefined && tailNotices.length > 0)
+  // 分叉可不可用**只有两条判据**（与上游逐字同口径）：① 这一轮**没有定稿回答**（没有回答锚点）；
+  // ② 收官回答**之后、同一回合里还有转录活动**。后者的等价物就是 `turnTail`：本行是这一轮的
+  // 内容收尾节点（回合内没有更晚的内容行）。
+  //
+  // ⚠️ **不要再按"收尾原因"或"有没有终局行"加判据**：收尾原因是 `forked`（从这条回答分叉出来的
+  // 回合）、`aborted`、`max-tokens`、消息级中断……这些**都不影响**分叉能不能用 —— 上游只在
+  // "没有定稿回答"或"后面还有工具/结果/重试"时置灰。曾经这里还按 `status` / `interrupted` /
+  // 终局通知各加了一条 → 分叉出来的回合（收尾原因 `forked`）一进去就是灰的，点不动（真机反馈）。
+  //
+  // ⚠️ **不能用 `latest` 代替 `turnTail`**：`latest` 是**整表**最后一条可见行，一条回合**之后**的
+  // 命令行/压缩标记会把它顶掉 —— 那正是「正常完成的会话却点不动分叉」的成因（`latest` 保留给
+  // 动作条的常显样式，不再是这里的判据）。
+  const branchUnavailable = turnTail !== true
   // 失败原因**不在这里**：它是独立行（镜像上游 `turn-error` / `turn-max-tokens`，见 `TurnNoticeRow.ts`）
   return html`<div class="msg assistant${latest ? ' latest' : ''}" data-turn-process-answer=${answerGap}><div class="col">
-    <${Chain} row=${row} store=${store} ownsHead=${ownsHead} noFold=${noFold} soleRow=${soleRow} />
+    <${Chain} row=${row} store=${store} ownsHead=${ownsHead} soleRow=${soleRow} />
     <div class="body"><${MessageBody} text=${row.text} streaming=${!row.done} />${row.interrupted === true
       ? html`<span class="answer-stopped">已停止</span>`
       : null}</div>

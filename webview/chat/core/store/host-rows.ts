@@ -46,6 +46,18 @@ function toChatRow(r: DshStreamRow): ChatRow {
       ...(r.code === undefined ? {} : { code: r.code }),
     }
   }
+  if (r.kind === 'retry') {
+    // 重试链：整行照搬（含 `started` / `cancelled` 两个派生态与 `failure`），页面只决议文案
+    return { ...r }
+  }
+  if (r.kind === 'compaction') {
+    // 压缩标记：整行照搬，摘要与计数由宿主从 `compaction/summary` 取好
+    return { ...r }
+  }
+  if (r.kind === 'command') {
+    // 命令行：整行照搬（`name` 是可见性判据的一部分，不能丢）
+    return { ...r }
+  }
   return {
     kind: 'assistant',
     key: r.key,
@@ -70,6 +82,9 @@ function toChatRow(r: DshStreamRow): ChatRow {
     ...(r.presentedFiles !== undefined ? { presentedFiles: r.presentedFiles } : {}),
     // 用量 / 用时：动作条的图标与弹窗读这个字段（与既有实时通路同名，组件无需感知来源变了）
     ...(r.stats !== undefined ? { usageRaw: r.stats } : {}),
+    // 回合改动摘要（Host 内存态）：`Deliverables` 的「改动文件卡」据此渲染；缺省就不出那张卡
+    ...(r.changesSeq === undefined ? {} : { changesSeq: r.changesSeq }),
+    ...(r.changesSummary === undefined ? {} : { changesSummary: r.changesSummary }),
   }
 }
 

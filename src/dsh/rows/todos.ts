@@ -10,8 +10,11 @@ const TODO_STATUSES = new Set<string>(['pending', 'in_progress', 'completed']);
 /**
  * 事件载荷 → 清单。**整表语义**：形状不合（不是数组）返回 null（当作没写，保留上一份），
  * 单条形状不合就丢掉那一条（宁缺勿错，不把坏条渲染成一条空任务）。
+ *
+ * 导出给 `build.ts` 复用：todo 卡的 diff 基线要按 `todo/write` 事件逐条折叠（**不清空**，
+ * 与下面 `foldTodos` 的「本轮清空」口径不同），解析口径必须同源才不打架。
  */
-function itemsOf(value: unknown): DshTodoItem[] | null {
+export function todoItemsOf(value: unknown): DshTodoItem[] | null {
     if (!Array.isArray(value)) {
         return null;
     }
@@ -49,7 +52,7 @@ export function foldTodos(events: readonly DshStreamEvent[]): DshTodoItem[] | nu
         if (event.type !== 'todo/write') {
             continue;
         }
-        const parsed = itemsOf(event.data?.['todos']);
+        const parsed = todoItemsOf(event.data?.['todos']);
         if (parsed !== null) {
             state = parsed;
         }

@@ -82,6 +82,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     historyHasMore: messages.store.historyHasMore,
     historyLoading: messages.store.historyLoading,
     historyEvents: messages.store.historyEvents,
+    sessionOpenError: messages.store.sessionOpenError,
     applyHistory: messages.store.applyHistory,
     loadOlder: messages.store.loadOlder,
     showNotice: messages.store.showNotice,
@@ -171,6 +172,9 @@ export function createChatStore(host: ChatHost): ChatStore {
     attachmentCache: attachments.store.attachmentCache,
     requestAttachment: attachments.store.requestAttachment,
     goalState: status.store.goalState,
+    // process-local 的激活（另一条来路：宿主 `goals/get` + `goal/activation-changed`）——
+    // 目标条按 `(id, revision)` 与上面的投影对账后才用
+    goalActivation: status.store.goalActivation,
     // 目标条的动作（edit/pause/resume/clear）：请求-应答，见 store/status 的 goalAction
     goalAction: status.store.goalAction,
     // 任务清单（输入框上方的常驻条）

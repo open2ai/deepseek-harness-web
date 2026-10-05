@@ -4,7 +4,7 @@
 //   停止之后服务端补发的补记事件（如工具的取消结果）、以及别处（浏览器 / 另一面板）
 //   驱动同一会话的事件，都靠它收到。见 docs/design/08 §8「事件层专项分析」。
 import { openMuxStream } from './api';
-import { snapshotRecordsToEvents, toRawEvent, type RawEvent } from './session';
+import { HISTORY_PAGE, snapshotRecordsToEvents, toRawEvent, type RawEvent } from './session';
 
 /** 断线重连的等待时长（与 $events 流同款）。 */
 const RECONNECT_DELAY_MS = 1500;
@@ -37,6 +37,21 @@ export interface DshFollowHandlers {
     onEvent: (event: unknown) => void;
     /** 快照页：消费方据此**替换**事件窗口。 */
     onSnapshot: (window: DshFollowWindow) => void;
+    /**
+     * **打开历史失败**（上游 `openState === 'error'` + `openError`）：**打开之后**的流失败也算
+     * —— 上游 `failEventStream()` 同样把 `openState` 置成 `'error'`（它不自动重连；我们仍然重连以保持连续，
+     * 但错误态一直挂到下一次成功拿到快照为止）。
+     * @param error - 失败原因（消息 + code，`code` 取错误名，取不到就不带）。
+     */
+    onOpenError?: (error: { message: string; code?: string }) => void;
+}
+
+/** 流的错误对象 → 可展示的 `{ message, code }`（code 取错误名，缺省不带）。 */
+function streamErrorOf(err: unknown): { message: string; code?: string } {
+    if (err instanceof Error) {
+        return { message: err.message, ...(err.name === '' || err.name === 'Error' ? {} : { code: err.name }) };
+    }
+    return { message: String(err) };
 }
 
 /** 常驻订阅句柄。 */
@@ -82,7 +97,18 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
         const isCurrent = (): boolean => !stopped && gen === generation;
         void openMuxStream(
             'session/follow',
-            { args: { request: { address: { kind: 'session', sessionId }, maxMessages: 5000, assistantStream: true } } },
+            // **首屏只取一页**（参数与上游客户端同一套，见 `HISTORY_PAGE`）。先前这里一次要 5000 条 ——
+            // 超长会话会被整份折叠并下发（实测：1.33M 事件 / 56 回合 → 全量重建 3.4 秒、载荷 20.5MB），
+            // 打开就是几秒白屏。其余历史由列表顶端的「加载更早」按需取（同一个分页函数、同一套参数）。
+            {
+                args: {
+                    request: {
+                        address: { kind: 'session', sessionId },
+                        ...HISTORY_PAGE,
+                        assistantStream: true,
+                    },
+                },
+            },
             {
                 onItem: (value) => {
                     if (!isCurrent()) {
@@ -117,7 +143,14 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                     }
                 },
                 // 收尾一律先比代数：旧流的关闭/出错不该动新流、也不该再排一次重连
-                onError: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
+                onError: (err) => {
+                    if (!isCurrent()) {
+                        return;
+                    }
+                    handlers.onOpenError?.(streamErrorOf(err));
+                    control = undefined;
+                    retry();
+                },
                 onEnd: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
                 onClose: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
                 onFatal: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
@@ -132,10 +165,12 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                 }
                 control = c;
             })
-            .catch(() => {
+            .catch((e) => {
                 if (!isCurrent()) {
                     return;
                 }
+                // 连流都没打开：同样算"打开历史失败"（上游 `doOpen` 的 catch 分支）
+                handlers.onOpenError?.(streamErrorOf(e));
                 control = undefined;
                 retry();
             });

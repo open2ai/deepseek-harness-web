@@ -28,8 +28,12 @@ import type { DshTurnProcess } from '../../../src/dsh/rows/types'
 export interface ProcessDisclosureInput {
     /** 回合是否已关闭（上游 `turnClosed`；插件由 `turn/end` 置真的 `done`） */
     done: boolean
-    /** 回合的过程事实；缺失 = 上游"根本没有控制条节点"（不折叠、也不出折叠头） */
-    process: DshTurnProcess | undefined
+    /**
+     * 回合的过程事实；缺失 = 上游"根本没有控制条节点"（不折叠、也不出折叠头）。
+     *
+     * 只取判据真正读的字段：片的 `facts` 是回合级事实的同形子集，要求全集会把片这条调用点挡在类型外面。
+     */
+    process: Pick<DshTurnProcess, 'hasExternalProcess' | 'inlineReasoning' | 'answerAnchorSeq'> | undefined
     /** 用户偏好：紧凑才折叠（上游 `compactTranscript`） */
     compact: boolean
     /**
@@ -47,8 +51,6 @@ export interface ProcessDisclosureInput {
     open: boolean
     /** 本行是不是**折叠头的归属行**（回合首行 ＝ 上游的 `turn-process` 控制节点；只有它渲染折叠头） */
     ownsHead: boolean
-    /** 本回合**没有**可折叠的东西（插件偏离：链里只含提问行） —— 整回合都不折叠 */
-    noFold: boolean
 }
 
 export interface ProcessDisclosure {
@@ -113,11 +115,7 @@ export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclos
         (input.turnStarted === true || input.done)
     // 上游的 `foldable`（对回合而言）：窗口就绪 **且**（过程外置 或 回答步自带推理）
     // —— 「区间内什么都没有」时不折叠，但这不等于"没有过程"：回答步的推理同样算。
-    //
-    // ⚠️ **`noFold`（"只含提问行不折叠"）这条偏离已于 2026-10-02 撤销**（维护者的左右对照图）：
-    // 插件折起态里多出一行 `向用户提出了问题`，而 web 折起态下面什么都没有 —— 说明**提问行也参与过程折叠**。
-    // 形参先留着（调用点仍传），但**不再参与判据**；等服务端确认后可以整体删掉。
-    void input.noFold
+    // ⚠️ 插件曾有一条偏离 `noFold`（"链里只含提问行就不折叠"），**已删除**：提问在上游是可见节点、照常计入。
     const foldable = windowReady && (process.hasExternalProcess || process.inlineReasoning)
     // 上游 `ChatGroupSeat` 的 `grouped`（`stepGrouping` 决定分组头覆盖谁）：与「外层折叠」是**两道独立的门**。
     // 缺省 `history` = 接入前的形态（只有已关闭回合有折叠头）。

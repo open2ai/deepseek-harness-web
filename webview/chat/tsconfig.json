@@ -7,6 +7,9 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
+    // 与根工程同口径：未用的局部/参数一律报错（有意保留的入参写 `_` 前缀）
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noEmit": true,
     "isolatedModules": true,
     "esModuleInterop": true,
