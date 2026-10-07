@@ -89,3 +89,27 @@ export function openFromTurnBoundary(raw: unknown): boolean | undefined {
     const seq = (raw as { openTurnStartSeq?: unknown }).openTurnStartSeq;
     return seq !== null && seq !== undefined;
 }
+
+/**
+ * **本窗口里有没有未闭合的回合**（纯函数，与 `dshService.turnActiveFromWindow` 同一套走法）。
+ *
+ * 为什么要单独抽出来：权威读数（`turnBoundary` 投影）说"在跑"、而**自己这条路的事件窗口**里
+ * 却先遇到 `turn/end`（或压根没有回合事件）时，说明这条窗口是**旧的** —— 典型场景是刚打开面板
+ * 或断线重连之前留下的那一份。真机现象：网页端那一轮还在跑，插件这边整轮已经"结束"了
+ * （没有状态行、主钮是发送）。
+ *
+ * @param events - 当前事件窗口（顺序即日志顺序）。
+ * @returns `true` = 先遇到 `turn/start`；`false` = 先遇到 `turn/end`；`undefined` = 窗口里没有回合事件。
+ */
+export function windowHasOpenTurn(events: readonly { type?: string }[]): boolean | undefined {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+        const type = events[i]?.type;
+        if (type === 'turn/end') {
+            return false;
+        }
+        if (type === 'turn/start') {
+            return true;
+        }
+    }
+    return undefined;
+}

@@ -18,7 +18,7 @@ export function slashTrigger(store: ChatStore): TriggerDef {
       // 目录不可用时按需补拉（store 内部：在飞则并入、失败后按间隔自动重试、已有快照则不动）。
       // 判据是**状态**而不是「目录空不空」：服务端明确回答「没有命令/技能」时不该无谓重拉。
       if (store.needsSlashList()) store.requestSlashList()
-      return { query: line.slice(1), start: lineStart }
+      return { query: line.slice(1), start: lineStart, quoted: false }
     },
     rows(): TriggerRow[] {
       const rows: TriggerRow[] = []

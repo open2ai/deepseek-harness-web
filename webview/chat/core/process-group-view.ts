@@ -68,6 +68,9 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             open: input.open,
             // 每片自带头（上游"每个分组 seat 一个头"）
             ownsHead: true,
+            // 这一片自己的 seat：窗口门里"有回答锚点"那一条**只属于回合级**（分组头开合的是这一片的明细，
+            // 不需要锚点）—— 少了它，没有回答步的那一片（停下来的回合只留一条思考）分组头不出现
+            groupSeat: true,
             turnStarted: input.turnStarted,
         }).head,
         detail: processDisclosure({
@@ -77,6 +80,7 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             grouping: input.grouping,
             open: input.open,
             ownsHead: true,
+            groupSeat: true,
             turnStarted: input.turnStarted,
         }).detail,
         title: liveDetail === '' ? label : `${label} · ${liveDetail}`,

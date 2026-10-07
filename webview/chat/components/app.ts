@@ -14,6 +14,7 @@ import { ModelPicker } from './ModelPicker'
 import { keepRowVisible } from '../core/scroll'
 import { useTriggerMenu } from '../core/trigger/useTrigger'
 import { decideInputKey, resolveSubmitMode } from '../core/inputKeys'
+import { primaryStops, standaloneStop, parentOffline } from '../core/stop-control'
 import { slashTrigger } from '../core/trigger/slash'
 import { atTrigger } from '../core/trigger/at'
 import { MessageList } from './message/MessageList'
@@ -272,11 +273,15 @@ export function Composer({ store }: { store: ChatStore }) {
     store.images.value.length === 0 &&
     store.refs.value.length === 0
   const running = store.turnRunning.value
-  // 主钮三态与上游一致：`primaryStops = running && subagent===null && (empty || blocked)`
-  //（后者本插件取「普通会话」那一支：拿不到 subagent/blocked）。
-  // 于是：**只有输入区空着才是「停止生成」**；非空时主钮是发送（忙时=排队发送）。
-  const stops = (running || processing) && empty
-  const busy = store.busy.value // 过渡态：恢复历史/切工作区时禁用输入
+  // 子会话事实（宿主随行帧下发）+ 三条判据（都在 `core/stop-control.ts`，逐条镜上游 `InputBar`）：
+  //   · `stops`：**子会话的主钮永远是「发送」**（它不能自己停自己）；普通会话里只有输入区空着才是停止；
+  //   · `extraStop`：**可继续**子会话在跑时另挂一个独立停止控件（不依赖父在线）；
+  //   · `parentOffline`：可继续子会话 + 父不在线 → 输入区锁住（那个独立停止照常可用）。
+  const subagent = store.subagentFacts.value
+  const stops = primaryStops(running, processing, empty, subagent)
+  const extraStop = standaloneStop(running, subagent)
+  const lockedByParent = parentOffline(subagent)
+  const busy = store.busy.value || lockedByParent // 过渡态 + 父离线锁：都禁用输入
   /**
    * **主钮与 `Enter` 必须是同一条策略**（`resolveSubmitMode` 只此一处实现）：
    * 按钮投递的正是 `Enter` 会投递的那种方式，文案再按投递方式取。
@@ -578,11 +583,16 @@ export function Composer({ store }: { store: ChatStore }) {
         </div>`
           : null}
         <span class="send-group">
-          <${ContextMeter} store=${store} />
+          ${extraStop
+            ? html`<button id="stop-extra" class="stop" title="停止生成" aria-label="停止生成"
+                onClick=${() => store.cancel()}>
+                <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="3"/></svg>
+              </button>`
+            : null}
           <button id="send" title=${sendLabel} class=${stops ? 'stop' : ''} disabled=${stops ? false : (!canSend || !!busy)}
             onClick=${() => (stops ? store.cancel() : store.send(submitMode))}>
             <svg class="send-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14V3"/><path d="M3.5 6.5 8 2l4.5 4.5"/></svg>
-            <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
+            <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="3"/></svg>
           </button>
         </span>
       </div>
@@ -653,11 +663,17 @@ function ChatApp({ store }: { store: ChatStore }) {
     <${FeedbackDialog} store=${store} />
     <${FeedbackToast} store=${store} />
     <${Composer} store=${store} />
-    ${/* 【2026-10-01 修正】这里**不得**再按 `performanceUsage` 掐掉整块 ——
-         简洁档不是"什么都不显示"，而是"只显示两枚静态药丸（输出速度 / 缓存命中）"，
-         而那个分支就在 `StatsCards` 里。父层一掐，组件里的简洁分支就成了死代码，
-         真机表现正是「简洁档下输入框下面什么都没有」（网页端此时是显示两枚药丸的）。 */ ''}
-    <${StatsCards} store=${store} />
+    ${/* 输入框**外面、底部**那一行（宿主页面的同一块在输入卡**下方**、不在卡片里）：**会话统计 /
+         Token 用量两枚 pill 在前、上下文占用环在后**，同一行（宿主页面把统计 pill 挂在这一行的槽位上、
+         占用环由输入条在这一行末尾渲染；出处与行号见 `details/upgrade/10` §8）。两组数据各自决定
+         自己渲不渲染，都没数据时整行收起。
+         ⚠️ 这一行**不得**按 `performanceUsage` 掐掉整块 —— 简洁档不是"什么都不显示"，而是
+         "只显示两枚静态药丸（输出速度 / 缓存命中）"，那个分支就在 `StatsCards` 里；父层一掐它就成了
+         死代码（真机表现正是「简洁档下输入框下面什么都没有」）。 */ ''}
+    <div class="composer-dock">
+      <${StatsCards} store=${store} />
+      <${ContextMeter} store=${store} />
+    </div>
     ${ModalShell()}`
 }
 

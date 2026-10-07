@@ -339,6 +339,14 @@ export type DshStreamRow =
         counts: { toolCallCount: number; messageCount: number; subagentCount: number };
         /** 该回答的事件时刻（epoch 毫秒；时钟格式化在页面） */
         timeMs?: number;
+        /**
+         * **本回合 `turn/start` 的时刻**（epoch 毫秒）。
+         *
+         * 用途只有一个：左下角「深度求索中，用时 X」的**时钟锚点** —— 上游那个时钟锚的是
+         * **本回合的开始时刻**（不是页面挂载时刻），所以面板中途打开/切回来时不会从 0 重新计。
+         * 缺省 = 本回合的 `turn/start` 不在窗口里（此时上游同样不显示时长，只显示「深度求索中」）。
+         */
+        turnStartMs?: number;
         /** 折叠判定的事实（回合关闭时写入；进行中的回合没有它 → 与控制条「回合已关」门控一致） */
         process?: DshTurnProcess;
         /** **消息级**「这条回答被中断」（上游 `assistant/message.data.interrupted`，见 `conversation-nodes/assistant.ts:207`）：

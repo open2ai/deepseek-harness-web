@@ -1,12 +1,16 @@
-// 上下文占用环（发送按钮左侧）：一个环 + 点开自己的明细弹窗（独立的一小块，不挤进任何现有弹层）。
+// 上下文占用环（**输入框下面**那一格，上游叫 composer dock）：一个环 + 百分比 + 点开自己的明细弹窗。
 //
 // 数据两条投影：`contextPressure`（最近一次请求的 prompt 大小 + 上下文窗口）与 `contextBreakdown`
 // （下一次请求的启发式构成：系统提示词 / 工具 / 其余对话）。
-// **渲染门控只有一条**：知道「已用多少」就画环 ——
-//   · 窗口未知 → 不编百分比，显示「窗口未知」并把已用 token 报出来；
-//   · 已用为 0（新建/空白会话）→ 弧长取一小段可见标记，否则只剩淡轨道、看着像没显示。
-// 只有**两个数都拿不到**（该 dsh 没组合 token-meter）才整个不渲染。
-// 占用率取 `projectedTokens ?? pressureTokens`：前者会跟着本轮增删与压缩实时变，后者只反映最近一次请求。
+//
+// **位置与两条显示规则都照上游**（出处与行号见 `details/upgrade/10` §8）：
+//   · **什么时候显示**：分子（已用 token）与容量（上下文窗口）**都拿到**才渲染 —— 上游的占用率函数
+//     两者缺一即返回 null、组件直接不渲染（它的文件头也写着"两个数都拿到之前什么都不画"）。
+//     取 `projectedTokens ?? pressureTokens`（前者会跟着本轮增删与压缩实时变，后者只反映最近一次请求）。
+//     上游另有一道门：**某个活动控件展开时让位**（语音输入那个插件注入的输入区活动位）——
+//     插件没有这个控件，故不搬。
+//   · **显示什么**：环 **+ 百分比文字**（上游触发器里就是环与读数并排）；点开是明细：
+//     `上下文已用 45%` + `~已用 / 窗口` + 三段占用条 + 三行构成。
 import { html } from 'htm/preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ChatStore } from '../core/store/chat'
@@ -25,27 +29,25 @@ const ROWS: Array<{ key: keyof ContextBreakdown; kind: 'system' | 'tools' | 'mes
 ]
 
 interface Occupancy {
-  /** 占用率：**窗口未知时为 null** —— 不编数字，但仍然显示环与已用 token（见文件头） */
-  percent: number | null
+  /** 占用率（上游同式：`Math.min(100, Math.round(已用 / 窗口 * 100))`） */
+  percent: number
   used: number
-  /** 窗口未知时缺省 */
-  contextWindow?: number
+  contextWindow: number
 }
 
 /**
- * 占用率。
+ * 占用率（上游那个占用率函数的同口径）。
  *
- * 只要**知道已用多少**就给出事实：窗口缺失时 `percent = null`（页面显示「窗口未知」而不是画一个假的百分比）。
- * 一个数都不知道（该 dsh 没组合 token-meter）才返回 null —— 那才是真的没得显示。
+ * **两个数都要有**：已用（`projectedTokens ?? pressureTokens`）与上下文窗口，缺一返回 null —— 组件据此
+ * 整个不渲染（上游如此；插件此前"窗口未知也画环、写『窗口未知』"，2026-10-06 按用户要求对齐上游）。
+ * 唯一的加固是 `contextWindow > 0`：0 会让上游算出 `Infinity → 100%`（真机不会出现这种投影，
+ * 但不值得把一个假读数画出来）。
  */
 function occupancyOf(pressure: ContextPressure | undefined): Occupancy | null {
   const used = pressure?.projectedTokens ?? pressure?.pressureTokens
-  if (typeof used !== 'number') {
-    return null
-  }
   const contextWindow = pressure?.contextWindow
-  if (typeof contextWindow !== 'number' || contextWindow <= 0) {
-    return { percent: null, used }
+  if (typeof used !== 'number' || typeof contextWindow !== 'number' || contextWindow <= 0) {
+    return null
   }
   return { percent: Math.min(100, Math.round((used / contextWindow) * 100)), used, contextWindow }
 }
@@ -99,12 +101,9 @@ export function ContextMeter({ store }: { store: ChatStore }) {
   if (context === null) return null
   const percent = context.percent
   const breakdown = facts?.breakdown
-  // 弧长：0% 或窗口未知时留一小段 **可见标记** —— 否则环只剩一条淡轨道，看起来就像没显示
-  const arcPercent = Math.max(percent ?? 0, 2)
-  const label =
-    percent === null
-      ? `上下文已用 ~${formatCompactTokens(context.used)}（窗口未知）`
-      : `上下文已用 ${String(percent)}%`
+  // 弧长：0% 时留一小段**可见标记** —— 否则环只剩一条淡轨道，看起来就像没显示
+  const arcPercent = Math.max(percent, 2)
+  const label = `上下文已用 ${String(percent)}%`
 
   return html`<span class="ctx-meter" ref=${rootRef}>
     <button type="button" class="ctx-trigger" title=${label} aria-label=${label} aria-haspopup="dialog" aria-expanded=${open}
@@ -115,21 +114,20 @@ export function ContextMeter({ store }: { store: ChatStore }) {
           stroke-dasharray=${`${String((CIRCUMFERENCE * arcPercent) / 100)} ${String(CIRCUMFERENCE)}`}
           transform="rotate(-90 7 7)"></circle>
       </svg>
+      <span class="ctx-reading">${`${String(percent)}%`}</span>
     </button>
     ${open
       ? html`<div class="ctx-pop" role="dialog" aria-label="上下文已用">
           <div class="ctx-pop-head">
             <span class="ctx-headline">上下文已用</span>
-            ${percent === null ? null : html`<span class="ctx-percent">${`${String(percent)}%`}</span>`}
-            <span class="ctx-figures">${`~${formatCompactTokens(context.used)}${context.contextWindow === undefined ? '' : ` / ${formatCompactTokens(context.contextWindow)}`}`}</span>
+            <span class="ctx-percent">${`${String(percent)}%`}</span>
+            <span class="ctx-figures">${`~${formatCompactTokens(context.used)} / ${formatCompactTokens(context.contextWindow)}`}</span>
           </div>
-          ${percent === null
-            ? null
-            : html`<div class="ctx-bar">
-                ${segmentsOf(percent, breakdown).map(
-                  (s) => html`<span class=${'ctx-seg is-' + s.kind} key=${s.key} style=${{ width: `${String(s.width)}%` }}></span>`
-                )}
-              </div>`}
+          <div class="ctx-bar">
+            ${segmentsOf(percent, breakdown).map(
+              (s) => html`<span class=${'ctx-seg is-' + s.kind} key=${s.key} style=${{ width: `${String(s.width)}%` }}></span>`
+            )}
+          </div>
           ${breakdown === undefined
             ? null
             : html`<dl class="ctx-rows">

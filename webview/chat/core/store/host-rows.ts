@@ -71,6 +71,8 @@ function toChatRow(r: DshStreamRow): ChatRow {
     counts: r.counts,
     bodyStarted: true,
     ...(r.turn !== undefined ? { turn: r.turn } : {}),
+    // 时钟锚点（回合开始时刻）：左下角「深度求索中，用时 X」用它，页面不自己起算
+    ...(r.turnStartMs === undefined ? {} : { turnStartMs: r.turnStartMs }),
     ...(r.status !== undefined ? { status: r.status } : {}),
     ...(r.process !== undefined ? { process: r.process } : {}),
     // 过程分组（上游 step-group）：宿主只给分界与每片自己的事实，怎么渲染由页面决定

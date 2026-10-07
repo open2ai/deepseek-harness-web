@@ -1,6 +1,10 @@
 // 回合**终局文案**的决议（纯函数，无 Preact/DOM，便于直接喂用例）：
-//   ① 终局通知行的标题与正文（失败 `turn-error` / 输出 token 上限 `turn-max-tokens`）；
-//   ② 回答行状态角标的文案。
+//   终局通知行的标题与正文（失败 `turn-error` / 输出 token 上限 `turn-max-tokens`）。
+//
+// ⚠️ **回答行上不再有"状态角标"**（曾经的 `statusBadgeText()`）：上游那个位置只有**消息级**的
+// 「已停止」药丸（`AssistantRow` 的 `.answer-stopped`，判据是 `assistant/message.data.interrupted`），
+// 并没有"把终止原因取值翻成中文"的角标 —— 那是插件自造的，会在**正常结算**、只是被用户停止的回合上
+// 多画一个带边框的「已停止」（web 同位置什么都没有）。角标、样式与判据一并删除。
 //
 // 上游把失败文案拆成两层，本文件是**第二层**（view）：
 //   · 节点层产出 `{message, code}`（插件对应 `src/dsh/official/turn-end.ts`）；
@@ -65,27 +69,4 @@ export function turnNoticeCopy(row: { tone: 'error' | 'warning'; message?: strin
   }
   const message = turnFailureText(row)
   return { title: turnFailureTitle(row.code), ...(message === undefined ? {} : { message }) }
-}
-
-/**
- * 回答行**状态角标**的文案；`undefined` = 不渲染角标。
- *
- * 上游这个位置显示的是「已停止」（`message.stopped`），而它**不对应某个 `reason.kind`**，对应的是
- * **消息级**的「这条回答被中断」状态 —— `aborted`（用户停止）与 `interrupted`（崩溃遗弃的事后关闭）都会显示它。
- * 插件现在**按消息级事实**把「已停止」渲染在正文末尾（`AssistantRow`，上游 `AssistantMarkdown` 的位置），
- * 所以 `interrupted` 为真时这里**不再出角标**（同一件事不显示两遍）。
- *
- * ⚠️ **角标不再印任何 kind**：`error` / `max-tokens` / `forked` / `blocked` 及一切陌生值都返回 `undefined`
- * —— 上游从不在界面上显示这些内部词（它们要么有自己的终局行，要么走控制节点的「已完成」）。
- * 早先那条"陌生值原样显示"的兜底会把 `forked` 这类词印给用户，已删除。
- *
- * @param status - 宿主给的 `turn/end.reason.kind`（`completed` 不会传进来）。
- * @param interrupted - 该行是否已按**消息级**标记渲染了「已停止」。
- * @returns 角标文案，或不渲染。
- */
-export function statusBadgeText(status: string | undefined, interrupted = false): string | undefined {
-  if (status === undefined) return undefined
-  if (interrupted) return undefined
-  // 只在这一种情况下出角标：回合被取消、而该行又没有消息级中断标记可显示（否则就重复了）。
-  return status === 'aborted' ? '已停止' : undefined
 }

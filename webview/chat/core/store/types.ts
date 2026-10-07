@@ -220,6 +220,11 @@ export type ChatRow =
       counts: TurnCounts
       /** 正文首 chunk 是否已到达（正文开始 = 过程定稿，链可收起） */
       bodyStarted: boolean
+      /**
+       * 本回合 `turn/start` 的**时刻**（epoch 毫秒，宿主下发）：左下角「深度求索中，用时 X」的时钟锚点。
+       * 上游锚的是**回合开始时刻**（不是页面挂载时刻），所以面板中途打开/切回来不会从 0 重新计。
+       */
+      turnStartMs?: number
       /** 折叠判定的事实（宿主下发，见 docs/design/08 §12）：回答锚点非空 = 末步是有回答内容的定稿步 */
       process?: DshRowProcess
       /**
@@ -423,8 +428,22 @@ export interface ChatStore {
   messages: Signal<ChatRow[]>
   view: Signal<'welcome' | 'chat'>
   processing: Signal<boolean>
+  /**
+   * 左下角「深度求索中，用时 X」的**时钟锚点**（epoch 毫秒）：= 正在跑的那一回合的 `turn/start` 时刻。
+   *
+   * 由 `messages` 切片从宿主行上取（最后一条**未定稿**的回答行的 `turnStartMs`）。
+   * `undefined` = 还不知道本回合何时开始（提交后、第一条行到达前）→ 状态行按上游只显示「深度求索中」。
+   */
+  runAnchorMs: Signal<number | undefined>
   /** 宿主权威的「一轮在跑」（`rows` 帧 `turnActive`）。停止/插话只认它；`processing` 是推导值，会提前变假。 */
   turnRunning: Signal<boolean>
+  /**
+   * **子会话事实**（`rows` 帧的 `subagent` 字段；普通会话 = `undefined`）。
+   *
+   * 页面据此判停止控件：主钮能不能让出「停止」（子会话永远不能）、要不要另挂一个独立 Stop、
+   * 输入区要不要被"父离线"锁住 —— 判据在 `core/stop-control.ts`，事实由宿主下发。
+   */
+  subagentFacts: Signal<import('../stop-control').SubagentFacts | undefined>
   /** 过渡态：恢复历史/切工作区等无明确进度等待（驱动 composer 禁用 + 占位/骨架）。null=空闲 */
   busy: Signal<'loading' | 'switching' | null>
   /** 当前会话工作区根路径；'' = 未知。终端卡的 cwd 标签在工具调用未带 workdir 时用它兜底（上游同口径） */

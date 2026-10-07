@@ -51,6 +51,14 @@ export interface ProcessDisclosureInput {
     open: boolean
     /** 本行是不是**折叠头的归属行**（回合首行 ＝ 上游的 `turn-process` 控制节点；只有它渲染折叠头） */
     ownsHead: boolean
+    /**
+     * 本次判定是**一片**（上游 `ChatGroupSeat` 的每个 seat）而不是整个回合。
+     *
+     * 差别只有一处：**窗口门里的"有回答锚点"那一条只属于回合级**（上游 `processWindowReady` 里没有它）。
+     * 分组头开合的是这一片的明细，不需要锚点 —— 少了这个区分，"没有回答步的那一片"（例如停下来的
+     * 回合只留一条思考）分组头整个不出现。
+     */
+    groupSeat?: boolean
 }
 
 export interface ProcessDisclosure {
@@ -105,13 +113,21 @@ export function visibleStepTexts<T extends ChainLike>(
  */
 export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclosure {
     const process = input.process
-    // 上游的 `processWindowReady`：事实齐全 + 紧凑 + **有回答锚点** + （**窗口里有本回合的 turn/start**
-    // 或 **本回合已关闭**）。最后那条在 0.2.0 里是 per-Turn 的 `turnStarted || turnClosed` ——
-    // 历史分页截断**不再**是禁止折叠的理由（旧版那道 `historyIncomplete` 已被上游删除）。
+    // 上游的 `processWindowReady`：事实齐全 + 紧凑 + （**窗口里有本回合的 turn/start** 或 **本回合已关闭**）。
+    // 最后那条在 0.2.0 里是 per-Turn 的 `turnStarted || turnClosed` —— 历史分页截断**不再**是禁止折叠的理由
+    // （旧版那道 `historyIncomplete` 已被上游删除）。
+    //
+    // ⚠️ **"有回答锚点"这一条只属于回合级那道门，不能拿来卡分组头**（真机 2026-10-06 截图）：
+    // 上游 `processWindowReady` 里**没有**回答锚点这一项（锚点只用在"哪些节点算这一片的过程成员"上）；
+    // 插件把它写进窗口门是为了**回合级那个可点折叠**（折叠动作的落点就是锚点世代，没有锚点可点，
+    // 见 `Chain.ts` 的 `canCollapse`）。分组头（`groupSeat`，每片自己的 seat）不需要锚点：
+    // 它开合的是**这一片**的明细。少了这个区分，「停下来的回合只留一条思考」那一片（没有回答步）
+    // `windowReady` 恒假 → 分组头整个不出现 —— 网页端同一位置有「已完成分析」那个框。
+    const anchorReady = input.groupSeat === true ? true : process?.answerAnchorSeq !== null
     const windowReady =
         process !== undefined &&
         input.compact &&
-        process.answerAnchorSeq !== null &&
+        anchorReady &&
         (input.turnStarted === true || input.done)
     // 上游的 `foldable`（对回合而言）：窗口就绪 **且**（过程外置 或 回答步自带推理）
     // —— 「区间内什么都没有」时不折叠，但这不等于"没有过程"：回答步的推理同样算。

@@ -163,13 +163,19 @@ export const HIDDEN_UNTIL_FOUND = 'until-found'
  * @param props.done - 本回合是否已定稿（思考行 live 判据用）。
  * @param props.store - 页面 store。
  */
-export function chainDetailBody({ items, bodyRef, groupBody, edges, done, store }: {
+export function chainDetailBody({ items, bodyRef, groupBody, edges, done, store, tail }: {
   items: readonly DshTurnProcessItem[]
   bodyRef: Ref<HTMLDivElement>
   groupBody: boolean
   edges: ScrollEdges
   done: boolean
   store: ChatStore
+  /**
+   * 明细体**末尾**的附加内容（可选）：目前只有「已停止」药丸走这里 ——
+   * 上游那个药丸长在**该步自己的正文块**上，而"这一步没有正文、只有思考/工具"时那个块本身就是
+   * 这一片的成员 → 药丸落在分组框**里面**（真机左右对照 2026-10-06）。有正文时它仍归正文那一路。
+   */
+  tail?: unknown
 }): unknown {
   if (items.length === 0) return null
   const lastReasonIdx = lastReasoningIndex(items)
@@ -177,5 +183,5 @@ export function chainDetailBody({ items, bodyRef, groupBody, edges, done, store 
     data-group-body=${groupBody ? 'true' : undefined}
     data-scroll-up=${groupBody && edges.up ? 'true' : undefined}
     data-scroll-down=${groupBody && edges.down ? 'true' : undefined}>${items.map((item, index) =>
-      chainItemNode(item, index, { done, lastReasonIdx, store }))}</div>`
+      chainItemNode(item, index, { done, lastReasonIdx, store }))}${tail ?? null}</div>`
 }

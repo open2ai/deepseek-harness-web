@@ -807,6 +807,21 @@ export async function forkSession(sessionId: string, atSeq?: number): Promise<st
 export async function cancelSession(sessionId: string): Promise<void> {
     await rpcCall<{ accepted: boolean }>('session.cancel', { sessionId });
 }
+/**
+ * **中断子会话**（上游 `subagents/interruptByParent`，签名 = 三个命名形参 + `'continuable'`）。
+ *
+ * 与 `cancelSession` 的分工见 `stop-target.ts`：子会话走这条（`session/cancel` 会被服务端拒），
+ * 而且它按**持久化的父地址权威**工作 —— 父 Agent 不在线也能中断。
+ * @param childSessionId - 子会话。
+ * @param parentSessionId - 它的直接父会话。
+ */
+export async function interruptSubagent(childSessionId: string, parentSessionId: string): Promise<void> {
+    await rpcCall<unknown>('subagents.interruptByParent', {
+        childSessionId,
+        parentSessionId,
+        mode: 'continuable',
+    });
+}
 /** 切换模型 / 推理等级（上游 `session/selectModel`，SessionSelectModelRequest = ModelSelection + sessionId）。 */
 export async function selectModel(sessionId: string, provider: string, model: string, reasoningEffort?: string): Promise<void> {
     await rpcCall<{ selected: unknown }>('session.selectModel', {

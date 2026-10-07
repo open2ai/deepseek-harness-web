@@ -10,6 +10,7 @@ import { deriveTurnFacts, deriveTurnTokenUsage, type TurnLikeEvent } from '../of
 import { parseExitStatus } from '../official/exit-status';
 import { fileRefsOf, hasImageBlock, imageRefsOf, readToolResult, resultText, textOnly } from '../official/result-text';
 import { readSystemPrompt } from '../official/system-prompt';
+import { isInterruptionEvidenceChunk } from '../official/chunk-facts';
 import { toolStatusOf } from '../official/tool-status';
 import { turnEndFailure, type DshTurnFailure } from '../official/turn-end';
 import { createTurnProcessInput, deriveTurnProcess, filterGroupsForChain } from './turn-process';
@@ -310,8 +311,21 @@ export function buildRowsIncremental(
      * 它跨回合存在（一条插话属于当前回合，但它进的是 next-step 收件箱）。
      */
     const inboxFold = createInboxClaimFold();
+    /**
+     * 已经**出过行**的人类消息 id（整个窗口共用）：同一条消息的事件再来一次也不多建一行。
+     *
+     * 上游的人类消息节点是按 `message.id` upsert 的（键里就含它），所以"同一条消息只出一个节点"
+     * 是上游口径；插件这边行是按事件顺序建的，缺这道闸时重复投递会多出一行 —— 而那条行会落在
+     * 当前未定稿回答行之前，看起来就是"旧提问又出现了一次"（真机 2026-10-07）。
+     */
+    const seenUserMessageIds = new Set<string>();
     /** 本回合起始序号（turn/start 的 seq） */
     let turnStartSeq: number | undefined;
+    /**
+     * 本回合 `turn/start` 的**时刻**（epoch 毫秒）：左下角「深度求索中，用时 X」的时钟锚点。
+     * 上游那个时钟锚的是**回合开始时刻**而不是页面挂载时刻 —— 面板中途打开/切回来时才不会从 0 重计。
+     */
+    let turnStartMs: number | undefined;
     /** 本回合各步的文本：回合结束时定哪条是回答（正文）、其余进过程链 */
     const stepTexts = new Map<number | undefined, string>();
     /** 已经**固定到链上**的步 → 它那条文本项的 key（"还在链上"的**证据**，不是"曾经插过"的标记） */
@@ -363,6 +377,15 @@ export function buildRowsIncremental(
     };
     /** 本回合是否已收到结算（assistant/message）：回滚只在「该尝试期间无结算」时进行 */
     let sawMessage = false;
+    /**
+     * 「这一步有内容」的步集合（文本/推理/工具调用/图片…，判据在 `official/chunk-facts`）。
+     * 用途只有一个：回合关闭时，**最后走到的步没有定稿助手消息**的话，用它决定要不要合成一条
+     * 带中断标记的回答（上游在客户端合成中断回答时用的就是这条判据；正文末尾的「已停止」由此而来）。
+     * 只增不减 —— 被放弃的尝试**不清**（上游的块也留着：那半截内容正是"被中断"的证据）。
+     */
+    const stepHasContent = new Set<number>();
+    /** 已定稿（`assistant/message` append）的步集合：该步有结算时**不许**合成中断标记 */
+    const stepSettled = new Set<number>();
     /**
      * 本回合被**插话**切开的前段（其正文已显示在自己那条行里）。收尾时这些文本不得再当「过程文本」
      * 重复进最后一段的链，否则同一条正文会出现两遍。
@@ -447,6 +470,8 @@ export function buildRowsIncremental(
             text: '',
             done: false,
             ...(currentTurn === undefined ? {} : { turn: currentTurn }),
+            // 时钟锚点（回合开始时刻）随行下发：页面在**进行中**就要用它算「深度求索中，用时 X」
+            ...(turnStartMs === undefined ? {} : { turnStartMs }),
             chain: [],
             counts: { toolCallCount: 0, messageCount: 0, subagentCount: 0 },
         });
@@ -567,8 +592,7 @@ export function buildRowsIncremental(
     };
 
     /** 该步的链块自首项起是否已经出现工具（出现即「已能定位」→ 可以补插文本）。 */
-    const chainNeedsStepText = (step: number | undefined, firstIdx: number): boolean => {
-        const row = activeRow();
+    const chainNeedsStepText = (step: number | undefined, firstIdx: number): boolean => {        const row = activeRow();
         if (row === undefined) {
             return false;
         }
@@ -616,6 +640,32 @@ export function buildRowsIncremental(
             if (landsNow && liveTextStep !== step) {
                 clearActiveText();
             }
+        }
+    };
+
+    /**
+     * **同一个步里「先说话、再动手」：正文里那段话此刻就固定到链上。**
+     *
+     * 上游一个步就是一个回答节点，节点内的块按**块次序**渲染 —— `[reasoning, text, tool-call]` 里
+     * 那句话就在那个工具**之前**。插件把"当前这一步"的流式文本放在**正文**里（正文渲染在链下方），
+     * 于是同一步里「说明 → 调工具」的顺序会变成「工具 → 说明」：真机左右对照（**回答过程中**）看到的
+     * 就是这一条 —— 插件把说明排到工具行下面，网页端在同一位置是说明在上。
+     *
+     * 触发点 = **本步的过程成员（工具）刚落链之后**：那一刻 `chainNeedsStepText` 才算得准插入点
+     *（该步首个工具之前），补插成功后正文里那份必须撤掉 —— 否则同一段文字「链上一份 + 正文一份」。
+     *
+     * 与 `beginStep` 的分工：那条管「上一步说完了」（步切换时结算上一步），这条管「这一步还要动手」。
+     * 只有在正文确实属于**这一步**（`liveTextStep === step`）时才动 —— 文本在工具之后的常见形状
+     *（模型先调工具、再总结）走不到这里，正文照旧留在下方。
+     */
+    const settleLiveTextNow = (step: number | undefined): void => {
+        if (step === undefined || liveTextStep !== step) {
+            return;
+        }
+        settledStepText.add(step);
+        flushSettledStepText();
+        if (stepTextOnChain(step)) {
+            clearActiveText();
         }
     };
 
@@ -730,6 +780,7 @@ export function buildRowsIncremental(
                 chain[at] = { ...tool, status: 'running', argsRaw, step };
                 replaceActive({ ...row, chain });
                 flushSettledStepText();
+                settleLiveTextNow(step);
                 return;
             }
         }
@@ -751,6 +802,8 @@ export function buildRowsIncremental(
         });
         // 该步的工具落链了：先前「等过程成员出现再定稿」的步骤文本此刻可以补插（位置才准）
         flushSettledStepText();
+        // 同一步里「先说话、再动手」：那句话此刻固定到链上（工具之前），正文里那份撤掉
+        settleLiveTextNow(step);
     };
 
     /**
@@ -785,10 +838,13 @@ export function buildRowsIncremental(
         // 准备中的调用**也是过程节点**（上游那个 tool-call 节点从此刻就存在），故照常登记过程证据。
         // 提问工具（`ask_user_question` / `request_user_input`）**标记 `ask`**：它不参与"过程外置"
         // （web 的可见节点里没有提问），否则"只有提问"的回合折起后会多出一行 `向用户提出了问题`。
+        // **`prep: true`**：这条是"还没落地"的占位 —— 落地调用那条会另登一条（不带 `prep`），
+        // 于是回合收尾/重试时可以把这一类**整体撤掉**（见 `dropUnlandedPreparingTools`）。
         processInput.entries.push({
             kind: 'tool-call',
             seq,
             step,
+            prep: true,
             ...(name === 'ask_user_question' || name === 'request_user_input' ? { ask: true } : {}),
         });
         noteChainStep(step, row.chain.length);
@@ -801,6 +857,82 @@ export function buildRowsIncremental(
             }],
         });
         flushSettledStepText();
+        // 同一步里「先说话、再动手」：准备中的调用一落链，那句话就要在它**之前**（上游块次序）
+        settleLiveTextNow(step);
+    };
+
+    /**
+     * **丢掉还没落地的「准备中」调用**（只有名字的工具增量、等不到对应的落地调用）。
+     *
+     * 真机（2026-10-06 截图）：往上翻时多出一条只有图标 +「运行命令」、**没有任何摘要**的行，
+     * 网页端同一位置没有它。那条就是实时帧 `tool-call-delta` 落下的"准备中"节点 —— 这一次尝试
+     * 被插话/收束带走、落地调用（`tool/call`）从未到达，于是它**永远停在准备中**（`argsRaw` 为空 →
+     * 摘要位是空的）。上游那份"准备中"节点只活在流式期间：一结算就以 durable 内容为准，
+     * 没有对应块的准备中节点随之消失（历史重折也不会有它 —— 所以重载面板它就没了）。
+     *
+     * 收尾时一并撤掉**过程证据**里那条占位（`prep`）：留着会让"过程外置"的判据多算一次工具
+     * （控制锚前移、类别多一类），而落地调用那条另登了一条，撤掉占位不会丢真调用。
+     *
+     * @param step - 只清这一步（`llm/retry` 放弃了这一次尝试时用）；`undefined` = 全清（回合收尾）。
+     */
+    const dropUnlandedPreparingTools = (step?: number): void => {
+        const inScope = (itemStep: number | undefined): boolean => step === undefined || itemStep === step;
+        for (let i = 0; i < rows.length; i += 1) {
+            const row = rows[i];
+            if (row.kind !== 'assistant') {
+                continue;
+            }
+            const kept = row.chain.filter(
+                (c) => !(c.kind === 'tool' && c.status === 'preparing' && inScope(c.step))
+            );
+            if (kept.length === row.chain.length) {
+                continue;
+            }
+            // 计数同样要退回去（它随行下发；虽然页面现在自己按链算类别，事实不该虚高）
+            for (const c of row.chain) {
+                if (c.kind !== 'tool' || c.status !== 'preparing' || !inScope(c.step)) {
+                    continue;
+                }
+                if (c.name === 'subagent' || c.name.startsWith('subagent_')) {
+                    subagentCount -= 1;
+                } else {
+                    toolCallCount -= 1;
+                }
+            }
+            rows[i] = { ...row, chain: kept };
+        }
+        for (let i = processInput.entries.length - 1; i >= 0; i -= 1) {
+            const e = processInput.entries[i];
+            if (e.kind === 'tool-call' && e.prep === true && inScope(e.step)) {
+                processInput.entries.splice(i, 1);
+            }
+        }
+        // 链块索引表要跟着重算（删项后下标会前移）：只重算**活动行**那份 —— 那些下标只在活动行的
+        // 链上才被用（`textInsertAt` / `appendStepTexts`），早期段的步原本就不在活动链里。
+        const active = activeRow();
+        if (active !== undefined) {
+            for (const st of [...stepFirstChainIdx.keys()]) {
+                const positions: number[] = [];
+                active.chain.forEach((c, i) => {
+                    const itemStep =
+                        c.kind === 'tool' || c.kind === 'reasoning' || c.kind === 'text' || c.kind === 'context'
+                            ? c.step
+                            : undefined;
+                    if (itemStep === st) {
+                        positions.push(i);
+                    }
+                });
+                if (positions.length === 0) {
+                    // 这一段里已经没有它的项：索引留着只会凭空多出一个空块（`reorderChainByStep` 会为
+                    // 表里的键建组），而 `textInsertAt` 对缺项本来就有兜底
+                    stepFirstChainIdx.delete(st);
+                    stepLastChainIdx.delete(st);
+                } else {
+                    stepFirstChainIdx.set(st, positions[0]);
+                    stepLastChainIdx.set(st, positions[positions.length - 1]);
+                }
+            }
+        }
     };
 
     /**
@@ -866,6 +998,10 @@ export function buildRowsIncremental(
         if (step !== undefined) {
             // 步号读数：增量是最常带步号的证据（`step/start` 在历史快照里没有）
             currentStep = step;
+            // 「这一步有内容」的证据：回合被打断时靠它判"该不该合成被中断的回答"（见 `stepHasContent`）
+            if (isInterruptionEvidenceChunk(chunk)) {
+                stepHasContent.add(step);
+            }
         }
         // 段标识取**块**序号（chunk 自带，同一次推理的各增量共享它）；
         // 帧顶层的 index 是**帧序号**、逐帧递增，拿它判段会让每个增量各成一段。
@@ -1142,6 +1278,7 @@ export function buildRowsIncremental(
             closedSegmentTexts = [];
             segmentClosed = false;
             turnStartSeq = typeof event.seq === 'number' ? event.seq : undefined;
+            turnStartMs = timeOf(event);
             processInput = createTurnProcessInput();
             processInput.turnStartSeq = turnStartSeq;
             stepTexts.clear();
@@ -1379,6 +1516,20 @@ export function buildRowsIncremental(
             // 插话分类：这条消息是否属于本步从 next-step 收件箱取用的那一批（见 rows/inbox-claims）。
             // 只影响行的种类与 compactAnswer 锚点判定，不影响正文/附件读法。
             const messageId = typeof d['id'] === 'string' ? (d['id'] as string) : undefined;
+            // **同一条消息只出一行**（上游同款：人类消息的节点键就含 `message.id`，节点按它 upsert，
+            // 再投一次同一条不会多出一个节点）。这里挡的是"同一条消息的事件又来到本构建器一次"
+            //（窗口整表替换后重放、或某个来路把同一批记录又喂了一遍）：不挡的话它会再建一行，
+            // 而按下面的落位规则，那一行会贴在**当前未定稿的回答行之前** —— 真机 2026-10-07 的
+            // 「发新问题时最早那条提问又冒出来一次」就是这个形状。
+            if (messageId !== undefined) {
+                if (seenUserMessageIds.has(messageId)) {
+                    if (process.env['DSH_RAWLOG'] !== undefined) {
+                        console.log(`[dsh-raw] user/message seq=${String(event.seq)} 重复消息 id=${messageId}：已出过行，跳过`);
+                    }
+                    continue;
+                }
+                seenUserMessageIds.add(messageId);
+            }
             const steering = messageId !== undefined && inboxFold.claimed(messageId);
             // 人类锚点（提问 / 插话）进过程事实：`compactAnswer` 判「区间内有没有人插话」要用
             if (typeof event.seq === 'number') {
@@ -1548,6 +1699,10 @@ export function buildRowsIncremental(
             const facts = blockFacts(content);
             const seq = typeof event.seq === 'number' ? event.seq : undefined;
             const msgStep = typeof d['step'] === 'number' ? (d['step'] as number) : undefined;
+            // 这一步**已有定稿消息**：回合关闭时不再为它合成中断回答（有定稿消息时以结算消息的状态为准）
+            if (msgStep !== undefined) {
+                stepSettled.add(msgStep);
+            }
             turnMessages.push({
                 seq,
                 step: msgStep,
@@ -1709,6 +1864,14 @@ export function buildRowsIncremental(
                 seq: typeof event.seq === 'number' ? event.seq : undefined,
                 step: typeof d['step'] === 'number' ? (d['step'] as number) : undefined,
             });
+            // 被重试的那一步，**前一次尝试的内容作废**：上游重置该步的块，于是"这一步有没有内容"
+            // 只看重试之后累积出来的东西。不清的话，重试后什么都没产出也会被判成"有内容 → 中断"。
+            if (typeof d['step'] === 'number') {
+                stepHasContent.delete(d['step'] as number);
+                // 「准备中」那条同属被放弃的尝试：上游重置块之后它就不存在了 —— 不清就会留下
+                // 一条没有摘要的裸行（真机 2026-10-06：往上翻时多一条「运行命令」）
+                dropUnlandedPreparingTools(d['step'] as number);
+            }
             // 行：只有 `retry === 1` 能开链（窗口里缺首条 → 整链不渲染，与上游同）；其余只更新该行
             const retryId = typeof d['retryId'] === 'string' ? d['retryId'] : '';
             const retry = typeof d['retry'] === 'number' ? d['retry'] : undefined;
@@ -1799,6 +1962,10 @@ export function buildRowsIncremental(
                     rows[i] = { ...row, chain };
                 }
             }
+            // ⚠️ **必须在下面 `let row = activeRow()` 之前**：那之后整段收尾都在那个 **row 引用**上
+            // 拼链（`let chain = row.chain` → 写回），晚一步清就会**被那份陈旧 chain 覆盖回来**
+            //（实测：夹具里那条准备中项照样留在终局态）。
+            dropUnlandedPreparingTools();
             const reason = d['reason'] as { kind?: string } | undefined;
             const kind = reason?.kind;
             // 失败事实（code/message）照上游两处口径，收在 `official/turn-end.ts`：
@@ -1826,6 +1993,9 @@ export function buildRowsIncremental(
             }
             // 折叠事实：口径全在 `turn-process.ts`（上游 `latestAnswer` / `processSpec` 的镜像），
             // 这里只把回合边界补进输入再取结果。
+            //
+            // ⚠️ 顺序要紧：那条"还没落地的准备中"已经在上面清掉了（趁 row 引用还没被取走），
+            // 所以这里取到的折叠事实不会把它算进"过程外置"（控制锚前移、类别多一类）。
             processInput.turnEndSeq = typeof event.seq === 'number' ? event.seq : undefined;
             const processFacts = deriveTurnProcess(processInput);
             const answerStep = processFacts?.answerStep ?? undefined;
@@ -1930,12 +2100,30 @@ export function buildRowsIncremental(
             // 统一在这里排一次才能保证与网页端一致的交错（理由见 `reorderChainByStep`）。
             flushSettledStepText();
             chain = reorderChainByStep(activeRow()?.chain ?? chain);
+            /**
+             * **消息级中断标记的客户端合成**（上游在客户端合成的那一支）。
+             *
+             * 上游一个"步"一个助手节点：该步**没有定稿助手消息**（只有流式增量）而回合已关闭时，
+             * 只要这一步累积出过内容，就合成一条带中断标记的回答 —— 正文末尾因此出「已停止」。
+             * 结算消息自带标记的那一条在 `assistant/message` 分支就地读掉，这里只补它漏掉的那支。
+             *
+             * 缺这一支的表现（真机对照 web）：点停止后插件这一侧**什么都不出**，只剩回合控制行那句
+             * 「已停止」；web 在正文末尾还有一个「已停止」药丸。反过来也不能宽 —— 该步**有**结算消息时
+             * 一律不合成：没带标记就是**正常结算**，补一个上去会给跑完的回答挂上「已停止」。
+             *
+             * 判据用的「最后走到的步」= `currentStep`（`step/start` 与增量都推进它）；该步没有任何内容证据
+             * 时不合成（上游此时连回答节点都没有，凭空一个标记只会误导）。
+             */
+            const lastStep = currentStep;
+            const interruptedByClose =
+                lastStep !== undefined && !stepSettled.has(lastStep) && stepHasContent.has(lastStep);
             replaceActive({
                 ...row,
                 text: answerText,
                 chain,
                 done: true,
                 status: kind !== undefined && kind !== 'completed' ? kind : undefined,
+                ...(interruptedByClose ? { interrupted: true as const } : {}),
                 // 消息数 = 带文本的步数 **减 1**（去掉最终答复本身，答复另有正文区展示）——与既有口径一致
                 counts: {
                     toolCallCount,
@@ -1944,6 +2132,8 @@ export function buildRowsIncremental(
                 },
                 ...(stats !== undefined ? { stats } : {}),
                 ...(lastTimeMs !== undefined ? { timeMs: lastTimeMs } : {}),
+                // 时钟锚点（回合开始时刻）：行若在 `turn/start` 之前就建出来（容器行），这里补上
+                ...(turnStartMs === undefined ? {} : { turnStartMs }),
                 // 回答锚点：没有回答（报错/中断/末步在调工具）时不带，消费方据此隐藏「分叉」「反馈」
                 ...(replySeq === undefined ? {} : { seq: replySeq }),
                 ...(replyMessageId === undefined ? {} : { messageId: replyMessageId }),
@@ -1981,7 +2171,17 @@ export function buildRowsIncremental(
                                   return rest;
                               })()
                             : { ...processFacts, groups: ownGroups };
-                        rows[i] = { ...r, process: facts, counts: { toolCallCount, messageCount, subagentCount } };
+                        rows[i] = {
+                            ...r,
+                            process: facts,
+                            counts: { toolCallCount, messageCount, subagentCount },
+                            // **用时也是回合级的**（与 `counts`/`process` 同理）：终局态摘要行由**本回合首行**
+                            // 渲染（页面按可见行算归属），而这一行的 stats 只落在**末段**那条行上 —— 不补齐的话，
+                            // 被插话切开的回合里那行摘要只剩「已完成」、**丢掉「用时 X」**（真机左右对照：
+                            // 同一回合网页端有「已完成，用时 48分48秒」、插件只有「已完成」）。
+                            // 只补 `stats`，**不补 `timeMs`**：每条行末尾的时钟显示的是**自己那一段**最后一条消息的时刻。
+                            ...(stats === undefined ? {} : { stats }),
+                        };
                     }
                 }
             }

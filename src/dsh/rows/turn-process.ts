@@ -34,8 +34,13 @@ export type TurnProcessEntry =
      *
      * `ask` = 这是一次**提问工具**调用（`ask_user_question` / `request_user_input`）。
      * 它**照常计入"过程外置"**（上游判据只数可见节点，工具节点一律可见）。字段保留仅作事实标注。
+     *
+     * `prep` = 这条来自**带名字的工具增量**（"准备中"），**还没有落地调用**。它仍然计入过程证据
+     * （上游那个 tool-call 节点从"准备中"就存在），但**回合收尾/重试时必须撤掉**：
+     * 落地调用那条会另登一条（不带 `prep`），所以撤掉 `prep` 的全部条目不会丢真调用。
+     * 见 `build.ts` 的 `dropUnlandedPreparingTools`。
      */
-    | { kind: 'tool-call'; seq?: number; step?: number; ask?: boolean }
+    | { kind: 'tool-call'; seq?: number; step?: number; ask?: boolean; prep?: boolean }
     /** `tool/result`（只有 `append` 才算「其它」证据） */
     | { kind: 'tool-result'; seq?: number; append: boolean }
     /**
@@ -290,19 +295,26 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
     /**
      * **过程分组的收口循环**（两条路共用：这一轮有定稿回答 / 没有）。
      *
-     * 上游在遇到「带回答内容的步」时收口，该步自身成为一个独立可见节点；插件把中间步的文本留在链里
-     * （`12` §1.5 的适配），所以这里只产出**分界**：每一片 = 上一次收口之后到这一次收口之间的一段过程。
+     * 上游在遇到「带回答内容的步」时收口：那一刻把挂着的成员收成一片、该步自身成为**独立可见节点**；
+     * 收口之后到来的过程成员（该步自己的工具、后续步的思考与工具）**属于下一片**，直到下一次收口
+     * 或回合结束（上游走查末尾那句 `flush(followed)`）。
+     *
+     * ⚠️ **回答步也要收口，末尾那一截也要成片**（真机 2026-10-06 左右对照）：插件先前的循环在
+     * `answer.step` 处**收住**（"回答步本身不单独成片"）—— 于是**收口步之前那一截过程没有片**、
+     * 它们被页面按"比末片终点还晚的并进末片"塞回上一片。观感就是：网页端同一回合有两片
+     * （「执行了命令，已调用工具，已搜索代码」 + 「已读取文件并搜索代码」），插件只剩一片
+     * （「执行了命令，已搜索代码，已读取文件**等**」）—— 末片多出一类、末尾还多一个「等」。
+     *
      * 片级事实与回合级**同一套判据**（`memberSeqs` / `compactAnswerOf` / 定稿口径），只是区间换成片内。
      *
      * @param fromSeq - 第一片的起点（回合起点；没有回答时取控制锚 —— 上游同）。
-     * @param stopStep - 收到这一步为止（回答步本身不单独成片，它的正文就是行的正文）；`undefined` = 全扫。
      */
-    const buildGroups = (fromSeq: number, stopStep: number | undefined): DshRowGroup[] => {
+    const buildGroups = (fromSeq: number): DshRowGroup[] => {
         const out: DshRowGroup[] = [];
         let from = fromSeq;
         let fromStep: number | null = null;
         for (const step of stepOrder) {
-            if (step === undefined || (stopStep !== undefined && step >= stopStep)) {
+            if (step === undefined) {
                 break;
             }
             const s = steps.get(step);
@@ -334,6 +346,32 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
             from = anchor;
             fromStep = step;
         }
+        /**
+         * **末尾那一截**（最后一次收口之后的过程成员）：上游在走查结束时把它收成一片
+         * （`flush(followed)`）—— 没有它，这一截的项就没有归属，只能被并进上一片。
+         *
+         * 没有回答的回合（走 `answer === null` 那条）也走这里：上游对"无回答"没有特例。
+         * `toStep = null` = 开区间端点（页面按 `+∞` 处理），与「还没收口」同义。
+         */
+        const tailAnchor = memberSeqs.some((m) => m.seq > from);
+        if (tailAnchor) {
+            out.push({
+                key: `s${String(fromStep ?? 'start')}-end@${String(from)}`,
+                fromStep,
+                toStep: null,
+                facts: {
+                    // 这一片里没有回答步：四个"回答相关"字段按"没有"给（与无回答回合同形）
+                    answerAnchorSeq: null,
+                    answerStep: null,
+                    inlineReasoning: false,
+                    turnStarted: input.turnStartSeq !== undefined,
+                    controlAnchorSeq,
+                    processStartSeq: from,
+                    hasExternalProcess: true,
+                    compactAnswer: compactAnswerOf(null),
+                },
+            });
+        }
         return out;
     };
 
@@ -341,7 +379,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
         // ⚠️ **没有定稿回答的回合也要产出分组**：上游对"无回答"没有特例（同一句注释见下面 `inlineReasoning`
         // 那行）——「该步产出回答文本就收口」与"这一轮最终有没有定稿回答"无关。先前这里直接 return，
         // 于是整回合一个组都不出 → 页面退回"整回合单头"（真机对照：网页端有「已完成分析」，插件没有）。
-        const bareGroups = buildGroups(controlAnchorSeq, undefined);
+        const bareGroups = buildGroups(controlAnchorSeq);
         return {
             answerAnchorSeq: null,
             answerStep: null,
@@ -381,17 +419,17 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
     /**
      * **过程分组**（上游 step-group）：上游在遇到「带回答内容的步」（`reply()`）时收口，
      * 该步自身成为一个独立可见节点；插件把中间步的文本留在链里（`12` §1.5 的适配），
-     * 所以这里只产出**分界**：每一片 = 上一次收口之后到这一次收口之间的一段过程。
+     * 所以这里只产出**分界**：每一片 = 上一次收口之后到这一次收口之间的一段过程，
+     * **外加末尾那一截**（最后一次收口之后到回合结束 —— 上游走查末尾的 `flush(followed)`）。
      *
      * 片的判据与回合级**完全同一套**（`memberSeqs` / `compactAnswerOf` / 定稿口径），只是区间换成片内：
      *   · 片的回答锚点 = 收口那一步的定稿序号（缺则首条可见证据）；
      *   · 片的 `hasExternalProcess` = 片区间内除收口步外还有别的过程成员；
      *   · 片的 `inlineReasoning` = 收口那一步自带推理。
-     * **回答步本身不单独成片**（它的正文就是行的正文），故循环在 `answer.step` 处收住。
      */
     // 兜底再归一化一次：`answer.step` 只该是数字或 `undefined`（`null` 在上游 `answerOf` 已归一），
     // 这里按"非数字即未知"处理 —— 未知就**不收口**，照常按步扫下去。
-    const groups = buildGroups(processStartSeq, typeof answer.step === 'number' ? answer.step : undefined);
+    const groups = buildGroups(processStartSeq);
 
     return {
         answerAnchorSeq: answer.seq,

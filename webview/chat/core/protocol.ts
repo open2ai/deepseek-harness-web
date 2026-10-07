@@ -149,6 +149,16 @@ export type HostToViewMessage =
   // 排队消息（输入框上方的队列卡）：**整表替换**，`items` 为空即没有排队消息（卡片整块不渲染）。
   // 与「行」不同源：队列只在服务端的收件箱里、不进日志，它来自队列流的投影。
   | { type: 'queue'; sessionId?: string; items?: QueueItemView[] }
+  // **提交台账**（宿主侧每次提交的本地回显 + 它的退休时刻，与上游 `SessionSnapshot.pendingSubmissions` 同构）：
+  //   · `pending` —— **整表**：还在等结算的提交（位置由宿主按"当时在不在跑 + 投递模式"推导）；
+  //   · `retired` —— **增量**：自上一帧以来退休的（`admitted` 已入档 / `queued` 队列接下 / `failed` 失败或被放弃）。
+  // 页面据此撑住"提交之后、回合真正开跑"那一拍的「处理中」，并收掉 `queued` 的本地回显（交给队列卡）。
+  | {
+      type: 'submissions'
+      sessionId?: string
+      pending?: Array<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>
+      retired?: Array<{ rpcId: string; outcome: 'admitted' | 'queued' | 'failed' }>
+    }
   // 队列动作失败（编辑 / 删除 / 转插话）：宿主只给动作与错误码，文案由页面按动作选。
   // 两种竞态（条目已被取走 / 回合已不在跑）宿主**不发**这一帧 —— 那表示「刷新即可」，不是错误。
   | { type: 'queueActionFailed'; op: 'edit' | 'remove' | 'steer'; code?: string }
@@ -227,6 +237,20 @@ export type HostToViewMessage =
       sessionId?: string
       /** 本会话是否有一轮**正在跑**（显式事实：页面据此决定「停止」按钮可用，不从行推导） */
       turnActive?: boolean
+      /**
+       * **子会话事实**（宿主下发；普通会话**不带这个键**）。页面据此判三件事（见 `core/stop-control.ts`）：
+       * 主钮能不能让出「停止」、要不要另挂一个独立 Stop、输入区要不要被"父离线"锁住。
+       */
+      subagent?: {
+        /** 直接父会话（有它 = 这个会话本身是子会话）。 */
+        parentSessionId: string
+        /** `continuable` = 可继续（才有独立 Stop 与父离线锁）。 */
+        mode: string
+        /** 父 Agent 是否可用；缺省 = 还没读到。 */
+        parentAvailable?: boolean
+        /** 列表事实是否读到过（决定"父不可用"要不要下结论）。 */
+        factsReady?: boolean
+      }
       /** 更早的历史还没进窗口（窗口分页事实）：列表顶端据此出「加载更早」。 */
       historyHasMore?: boolean
       /** 「加载更早」这一页是否在飞（宿主侧的事实，页面按钮据此禁用）。 */

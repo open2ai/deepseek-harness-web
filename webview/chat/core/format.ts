@@ -173,6 +173,11 @@ export function toolIconOfTool(name: string): string {
     todo_write: 'checklist',
     // goal / schedule / 子代理协调 / 后台任务 / lsp：按上游详情图标的**语义归类**挑 codicon 近似
     //（上游是自绘图标，这里只追「类」不追像素 —— codicon 是近似，不是逐像素对应）。
+    //
+    // ⚠️ **子智能体/队友这一族（`subagent` / `list_agents` / `send_message` / `interrupt_agent` /
+    // `wait_agent` / `spawn_teammate` / `list_subagent_models`）在工具行里不查这张表**：
+    // 它们渲染的是**内联的上游图形**（`components/chain/ToolIcons.ts`）—— 用户反馈过 org-chart
+    // 那个 codicon 与网页端不是一个东西。表里这几条只作为**别的表面**（拿不到 SVG 的地方）的兜底。
     create_goal: 'target',
     get_goal: 'target',
     update_goal: 'target',

@@ -16,6 +16,8 @@ import {
     createSession,
     sendPrompt,
     forkSession as forkSessionRpc,
+    cancelSession,
+    interruptSubagent,
     listMessageFeedback,
     putMessageFeedback,
     deleteMessageFeedback,
@@ -85,7 +87,8 @@ import {
 } from '../dsh';
 import { sessionDisplayTitle } from '../dsh/official/session-title';
 import { initialContinuity, judgeAssistantFrame } from '../dsh/stream-continuity';
-import { foldTurnState, openFromTurnBoundary } from '../dsh/turn-state';
+import { foldTurnState, openFromTurnBoundary, windowHasOpenTurn } from '../dsh/turn-state';
+import { stopTargetOf, type DshSubagentAddress } from '../dsh/stop-target';
 import { liveChunkSeq } from '../dsh/official/live-chunk-seq';
 import { expandAssistantStream } from '../dsh/official/assistant-stream';
 
@@ -1128,6 +1131,22 @@ export class DshService {
                 return; // 期间换过会话：这次读数作废
             }
             this.applyTurnBoundary(proj['turnBoundary']);
+            /**
+             * 权威说「在跑」时补两件事（真机 2026-10-06：「网页端还在跑，插件打开后整轮已经结束」）：
+             *
+             * ① **开安全网轮询** —— 否则别处（网页端 / 另一个面板）把它停掉时，插件这边没人再读权威读数，
+             *    按钮与状态行就停在"结束"上；
+             * ② **本窗口里没有未闭合回合 → 换一份权威窗口**（`requestRebaseline`）：这一份是旧的
+             *    （刚打开面板时的快照、或断线重连前留下的那一份），不换的话整轮都会显示成"已完成"。
+             *    限次（与"无正文自愈"共用预算），避免与服务端互相踢。
+             */
+            if (this.turnOpenFromHost === true) {
+                this.startTurnWatch();
+                if (windowHasOpenTurn(this.streamEvents) === false && this.reseedCount < 3 && this.followHandle !== undefined) {
+                    this.reseedCount += 1;
+                    this.requestRebaseline('权威说在跑，但本窗口里没有未闭合回合');
+                }
+            }
         } catch {
             // 保持上次结论
         }
@@ -2639,6 +2658,9 @@ export class DshService {
         // 于是分叉出来的会话一落地就掉进「未分组」（真机现象）——与当初「新建会话」那次是同一个坑。
         // 源会话自己就没归属（未分组）时**不动**：那不是搬家，是"跟着源走"。
         await this.bindForkChild(sessionId, childId);
+        // 子会话事实（谁是它的父 + 父在不在）：刚分叉出来的子会话马上就会用上 —— 它在跑的时候
+        // 「停止」要走父级中断，不能等下一次列表刷新才知道自己的父是谁。
+        await this.refreshSubagentFacts();
         // 标题由**宿主**升号（分叉请求里的 `increaseTitle`）——这里只把结果读回来给提示用；
         // 读不到就只提示"已分叉"，**不再自己算名字**（客户端算号会与宿主打架，且看不到兄弟会话）。
         let title: string | undefined;
@@ -2659,9 +2681,109 @@ export class DshService {
         return { sessionId: childId, ...(title === undefined ? {} : { title }) };
     }
 
+    /** 直接父地址表：`childSessionId` → 地址（来源与上游同：父会话自有的子目录投影）。 */
+    private subagentAddresses = new Map<string, DshSubagentAddress>();
+    /** 父 Agent 可用性（列表 summary 的 `agentAvailable`）；缺项 = 还没读到。 */
+    private subagentParentAvailable = new Map<string, boolean>();
+    /** 列表事实是否读到过（没读到就不下"父不可用"的结论）。 */
+    private subagentFactsReady = false;
+
     /**
-     * 把分叉出来的子会话登记进**源会话所在的工作区**（源会话没归属时不动）。
+     * 刷新**子会话事实**：谁是谁的子会话 + 父 Agent 是否可用。
      *
+     * 上游的两条来源：① 父会话自有的 `subagentCatalog` 投影（条目 `{id, mode, …}`，客户端据它拼出
+     * `{parentSessionId, childSessionId, mode}`）；② 列表 summary 的 `agentAvailable` 当"父是否可用"。
+     * 插件**不另开订阅**：`session/list` 的每一项本来就带自己的投影值与可用性，一次调用就够
+     * （与上游"子会话经 Host 列表到达、地址从目录投影读"同口径）。
+     *
+     * 失败只记日志：这只是停止分流用的辅助事实，读不到就退回"没有地址"那条路（`session.cancel`）。
+     */
+    async refreshSubagentFacts(): Promise<void> {
+        try {
+            const list = await this.call<{
+                items?: Array<{
+                    sessionId?: string;
+                    agentAvailable?: boolean;
+                    projections?: { values?: Record<string, unknown> };
+                }>;
+            }>('session.list', {});
+            const addresses = new Map<string, DshSubagentAddress>();
+            const available = new Map<string, boolean>();
+            for (const item of list.items ?? []) {
+                if (typeof item.sessionId !== 'string') {
+                    continue;
+                }
+                if (typeof item.agentAvailable === 'boolean') {
+                    available.set(item.sessionId, item.agentAvailable);
+                }
+                const catalog = item.projections?.values?.['subagentCatalog'];
+                if (!Array.isArray(catalog)) {
+                    continue;
+                }
+                for (const entry of catalog) {
+                    const row = entry as { id?: unknown; mode?: unknown };
+                    if (typeof row.id !== 'string') {
+                        continue;
+                    }
+                    addresses.set(row.id, {
+                        parentSessionId: item.sessionId,
+                        childSessionId: row.id,
+                        mode: typeof row.mode === 'string' ? row.mode : 'unknown',
+                    });
+                }
+            }
+            this.subagentAddresses = addresses;
+            this.subagentParentAvailable = available;
+            this.subagentFactsReady = true;
+        } catch (e) {
+            console.warn(`[dsh-subagent] 读取子会话事实失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+    }
+
+    /**
+     * 当前会话的子会话事实（页面据此判主钮能不能让出「停止」、要不要另挂独立 Stop、输入区是否被锁）。
+     * @param sessionId - 目标会话。
+     * @returns 地址（没有 = 普通会话）与父可用性（`undefined` = 还不知道）。
+     */
+    subagentFactsOf(sessionId: string | undefined): {
+        address?: DshSubagentAddress;
+        parentAvailable?: boolean;
+    } {
+        if (sessionId === undefined) {
+            return {};
+        }
+        const address = this.subagentAddresses.get(sessionId);
+        if (address === undefined) {
+            return {};
+        }
+        const parentAvailable = this.subagentParentAvailable.get(address.parentSessionId);
+        return { address, ...(parentAvailable === undefined ? {} : { parentAvailable }) };
+    }
+
+    /** 列表事实是否读到过（页面据此决定"父不可用"要不要下结论）。 */
+    subagentFactsReadyNow(): boolean {
+        return this.subagentFactsReady;
+    }
+
+    /**
+     * 停止当前这一轮：**普通会话走 `session.cancel`，子会话走父级中断**（分流判据见 `stop-target.ts`）。
+     *
+     * 与上游同一个 `Session.cancel()`：有父地址就走 `subagents.interruptByParent(child, parent,
+     * 'continuable')`（持久父地址权威，父不在线也能中断），否则退回 `session.cancel`。
+     * @param sessionId - 要停的会话（缺省 = 当前会话）。
+     */
+    async cancelTurn(sessionId?: string): Promise<void> {
+        const sid = sessionId ?? (await this.getSession());
+        const target = stopTargetOf(sid, this.subagentAddresses.get(sid));
+        if (target.method === 'subagents.interruptByParent') {
+            await interruptSubagent(target.params['childSessionId'] as string, target.params['parentSessionId'] as string);
+            return;
+        }
+        await cancelSession(sid);
+    }
+
+    /**
+     * 把分叉出来的子会话登记进**源会话所在的工作区**（源会话没归属时不动）。     *
      * 为什么要有这一步：`session.fork` 只复制历史与 cwd，**不会**写工作区成员表；而「未分组」的判据
      * 就是「不在任何工作区的成员表里」——不登记就会分叉完立刻掉进未分组。
      * 失败只记日志：分叉本身已经成功，归属没写上不该把它算成失败（用户可再点开该会话补登记）。

@@ -9,6 +9,7 @@ import { html } from 'htm/preact'
 import { useState } from 'preact/hooks'
 import type { DshTurnProcessItem, ChatStore } from '../../core/store/chat'
 import { toolTitle, toolIconOfTool, resultFirstLine } from '../../core/format'
+import { toolGlyphOf } from './ToolIcons'
 import { toolStateLabel, ToolState } from '../../core/states'
 import { filePathOf, terminalCardModel, relativizeToCwd } from '../../core/terminal'
 import { webCardModel } from '../../core/web-card'
@@ -107,7 +108,15 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   const openPath = failureLine === null ? filePathOf(item.name, item.argsRaw) : undefined
   const openLineRaw = (item.meta as { offset?: unknown } | undefined)?.offset
   const openLine = typeof openLineRaw === 'number' && Number.isInteger(openLineRaw) && openLineRaw > 0 ? openLineRaw : undefined
-  const failureStyled = failureLine !== null && failureLine !== ''
+  // 摘要位的**色调跟着行状态走**（上游 ToolRow：`state === 'error' && css.errorSummary`、
+  // `state === 'stopped' && css.stoppedSummary`）—— 判据是**行状态**，不是"摘要文字是不是结果首行"。
+  // ⚠️ **非零退出 / 被信号终止的 shell 也要着错误色**：那种调用本身 `isError: false`（退出状态是结果数据），
+  // 上面 `rowState` 已按终端卡口径覆盖成 `error` —— 文字必须一起变红（真机反馈：「插件运行命令有红色点，
+  // 后面的文字怎么没标红色呢，上游的都是红色的」）。文字本身仍走 `failureLine ?? description ?? summary`
+  // 那条链：只有真失败（isError）才把摘要换成结果首行，非零退出仍是模型写的那句描述。
+  const summaryTone = rowState === 'error' ? 'error' : rowState === 'stopped' ? 'stopped' : null
+  // 行首图标二选一：这一族有**上游图形**就用它（内联 SVG，见 `ToolIcons.ts`），其余仍走 codicon 近似
+  const glyph = toolGlyphOf(item.name)
 
   // 展开体的门：**准备中的行不给展开**（上游 README：准备中节点渲染成一条不可展开的行）
   const head = html`<${preparing ? 'div' : 'button'} class="chain-row-head" data-state=${preparing ? 'running' : rowState}
@@ -118,7 +127,9 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
     ${preparing ? null : html`<span class=${'codicon chain-chev ' + (open ? 'codicon-chevron-down' : 'codicon-chevron-right')}></span>`}
     ${dotState !== null
       ? html`<span class=${'chain-tool-dot is-' + dotState} data-state=${dotState} aria-hidden></span>`
-      : html`<span class="chain-tool-ico codicon codicon-${toolIconOfTool(item.name)}"></span>`}
+      : glyph !== undefined
+        ? html`<span class="chain-tool-ico is-upstream" aria-hidden>${glyph}</span>`
+        : html`<span class="chain-tool-ico codicon codicon-${toolIconOfTool(item.name)}"></span>`}
     <span class="chain-tool-title">${item.title ?? toolTitle(item.name)}</span>
     ${!open && headSummary
       ? html`<span class="chain-sep" aria-hidden></span>${openPath !== undefined
@@ -127,7 +138,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
                 e.stopPropagation()
                 store.openFile(openPath, openLine, cwd)
               }}>${headSummary}</button>`
-          : html`<span class=${'chain-row-preview' + (failureStyled ? ' is-error' : '')}>${headSummary}</span>`}`
+          : html`<span class=${'chain-row-preview' + (summaryTone === 'error' ? ' is-error' : summaryTone === 'stopped' ? ' is-stopped' : '')}>${headSummary}</span>`}`
       : null}
   </${preparing ? 'div' : 'button'}>`
 

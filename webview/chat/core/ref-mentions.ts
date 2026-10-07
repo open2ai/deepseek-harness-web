@@ -4,8 +4,9 @@
 // 引用行；上游也是把 mention 作为文本节点发出去）。只有按文本解析，**历史恢复的行**才能和
 // 刚发出的那条长得一样；否则历史里会退化成光秃秃的 `@rel/path` 文本。
 //
-// 只认三种 token（与 core/trigger/at.ts 发出的形状一致），且必须在**行首或空白之后**才开始 ——
-// 否则 `foo@bar.com` 这类邮箱会被误当成引用。
+// 只认三种 token（与 core/trigger/at.ts 发出的形状一致：文件 `@rel/path` / `@"my file.txt"`，
+// **目录 `@dir/` / `@"my dir/`（引号保持打开）**，会话 `@[label](dsh-session:…)`），
+// 且必须在**行首或空白之后**才开始 —— 否则 `foo@bar.com` 这类邮箱会被误当成引用。
 import type { RefChip } from './store/types'
 
 export interface RefMention {
@@ -20,8 +21,15 @@ export type RefSegment = { text: string } | { mention: RefMention }
 
 /** `@[label](dsh-session:<b64url>)`：会话引用（label 可能为空）。 */
 const SESSION_RE = /^@\[([^\]]*)\]\(dsh-session:([A-Za-z0-9_-]+)\)/
-/** `@"含空格的路径"` */
-const QUOTED_RE = /^@"([^"]+)"/
+/** `@"含空格的路径"`（**闭合**：文件；用户手打的闭合串也走这条） */
+const QUOTED_RE = /^@"([^"\n]+?)"/
+/**
+ * `@"含空格的目录/`（**引号保持打开**）：上游 `formatFileMention` 对目录就是这种形状
+ * （开着才能继续下钻），`core/trigger/at.ts` 用的是同一种形状，于是注入 prompt 的目录 token 也是它。
+ * 边界取「到行尾」：发送时每条引用 token 自占一段（`core/store/outbox.ts` 用空行拼接），
+ * 且这里**只认以 `/` 结尾**的那一支 —— 手打的那种没闭合、又不指向目录的 `@"…` 仍按普通文本对待。
+ */
+const QUOTED_OPEN_DIR_RE = /^@"([^"\n]*\/)(?=\n|$)/
 /**
  * 普通 `@rel/path`（含目录：以 `/` 结尾）。
  *
@@ -66,7 +74,7 @@ export function splitRefMentions(text: string): RefSegment[] {
         i += session[0].length
         continue
       }
-      const quoted = QUOTED_RE.exec(rest)
+      const quoted = QUOTED_RE.exec(rest) ?? QUOTED_OPEN_DIR_RE.exec(rest)
       if (quoted !== null) {
         const p = quoted[1] as string
         flush()

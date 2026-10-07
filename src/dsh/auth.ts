@@ -192,6 +192,9 @@ const FLAT_ARGS_METHODS = new Set<string>([
     // 【dsh 0.2.0 · 迟到回答】补答「限时提问」的调用：远端签名是**多个命名形参**
     //（agent / callId / answer），必须平铺；包一层 request 会被网关拒（同 goals/* 的教训）。
     'userQuestions/answer',
+    // 【停止子会话】父级中断的远端签名是**三个命名形参**（childSessionId / parentSessionId / mode），
+    // 必须平铺（同上：包一层 request 会被网关拒）。
+    'subagents/interruptByParent',
 ]);
 
 export function hasAuthCookie(port: number): boolean {

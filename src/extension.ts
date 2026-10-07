@@ -10,6 +10,7 @@ import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
 import { RowDiffer } from './dsh/rows/diff';
+import { createSubmitLedger, placementOf } from './dsh/submissions';
 import {
     applyNativeTitlebarContext,
     TITLEBAR_MODE,
@@ -34,15 +35,90 @@ function logRows(line: string): void {
     rowsLog?.appendLine(`${new Date().toLocaleTimeString()}  ${line}`);
 }
 
+/**
+ * **提交台账**（本面板每次提交的本地回显 + 它的退休时刻）：与上游 `SessionSnapshot.pendingSubmissions`
+ * 同构，规则全在 `dsh/submissions.ts` 的文件头。**权威在宿主**：页面不再自己推断"这条回显还会不会来"。
+ *
+ * 为什么要它：页面判忙/闲与宿主判忙/闲不是同一份事实（真机 2026-10-06 的事故），由宿主统一登记
+ * 投递位置与退休，页面只消费快照 —— 那条"永远没人认领的本地行"就不可能存在了。
+ */
+const submitLedger = createSubmitLedger();
+/** 把台账的增量快照推给所有聊天 webview（只在有变化时推：它是小帧，但没必要每帧都发）。 */
+const pushSubmissions = (sessionId: string | undefined): void => {
+    const snapshot = submitLedger.takeSnapshot();
+    if (snapshot.pending.length === 0 && snapshot.retired.length === 0) {
+        return;
+    }
+    postToChats({ type: 'submissions', sessionId, pending: snapshot.pending, retired: snapshot.retired });
+};
+/**
+ * 行帧里那三个**子会话字段**（页面判定停止控件与"父离线锁"用的事实）。
+ *
+ * 没有子会话事实时**一个字段都不写**（普通会话的行帧与接入前逐字相同 —— 几十套逐字节比对的行守卫
+ * 都建立在这上面）。
+ */
+const subagentFrameFields = (
+    sessionId: string | undefined
+): { subagent?: { parentSessionId: string; mode: string; parentAvailable?: boolean; factsReady: boolean } } => {
+    const facts = dsh.subagentFactsOf(sessionId);
+    if (facts.address === undefined) {
+        return {};
+    }
+    return {
+        subagent: {
+            parentSessionId: facts.address.parentSessionId,
+            mode: facts.address.mode,
+            ...(facts.parentAvailable === undefined ? {} : { parentAvailable: facts.parentAvailable }),
+            factsReady: dsh.subagentFactsReadyNow(),
+        },
+    };
+};
 // 渲染源的唯一通路：宿主把**行**下发给页面，页面据此渲染（旧指令通路已退役，见 docs/design/08 §13）。
 // **只发变动的行**（§3.3）：长会话整表是 13 MB 量级，而每帧真正变的只有个位数行 —— 详 `dsh/rows/diff.ts`。
 const rowDiffer = new RowDiffer<{ key: number }>();
+/**
+ * 上一帧发给页面的**会话号**：换会话时页面会因 `sessionId` 变了而**丢掉自己的行缓存**
+ * （见 `webview/chat/core/store/reducer.ts` 的 `assembleRows`），所以那一帧必须是**整表** ——
+ * 否则新页面拿到的是一份"相对上一份缓存"的增量，而它手上根本没有那份缓存。
+ */
+let rowsSession: string | undefined;
 dsh.onRows = (rows, turnActive) => {
     // 带上会话标识：页面靠它判断「本地的乐观行是不是这个会话的」——
     // 不带的话切会话时上一个会话的乐观行会被当成未认领而留下，processing 恒真（一直「深度求索中」）。
     // 带上 turnActive：**是否在跑是本轮的显式事实**，页面从「行」推导不出来（见 dshService.turnActive）。
     // 窗口分页事实（hasMore/loading/events）与行同帧：列表顶端的「加载更早」按钮只读它，不自己猜。
     // `sessionOpenError` 同帧下发（**整表语义**：没有失败时明确给 `null`，页面才好清掉上一条横幅）。
+    const sessionId = dsh.getSessionId();
+    if (sessionId !== rowsSession) {
+        rowsSession = sessionId;
+        rowDiffer.requestFull();
+        // 换会话：台账把旧会话未结算的回显按 failed 退休（上游 disposal 同口径）
+        submitLedger.useSession(sessionId);
+        // 换会话：重新读"谁是谁的子会话 + 父在不在"（子会话事实只影响停止分流与输入区锁定，
+        // 读失败不影响渲染）；读到之后再推一帧，页面才不会一直用上一份事实判按钮
+        void dsh.refreshSubagentFacts().then(() => {
+            if (rowsSession === sessionId) {
+                dsh.pushCurrentRows();
+            }
+        });
+    }
+    // 入档认领①：日志里出现了带同一 `rpcId` 的用户消息 → 那次提交的回显退休（上游 observed 退休同口径）。
+    // 判据取**宿主下发的行**（它是日志的回显），所以"没有 `rpcId` 的行"走下面的文案兜底。
+    const admittedIds: string[] = [];
+    const admittedTexts: string[] = [];
+    for (const row of rows) {
+        if (row.kind !== 'user') {
+            continue;
+        }
+        const user = row as { rpcId?: unknown; text?: unknown };
+        if (typeof user.rpcId === 'string') {
+            admittedIds.push(user.rpcId);
+        } else if (typeof user.text === 'string') {
+            admittedTexts.push(user.text);
+        }
+    }
+    submitLedger.admitById(admittedIds);
+    submitLedger.admitByText(admittedTexts);
     const openError = dsh.sessionOpenFailure();
     const { payload } = rowDiffer.diff(rows as { key: number }[]);
     // 节流预算按**实发**字节算（差分期顺手就有；不必再序列化整表，见 dshService.setSentPayloadBytes）
@@ -51,13 +127,21 @@ dsh.onRows = (rows, turnActive) => {
         type: 'rows',
         ...payload,
         rows: payload.rows as unknown[] | undefined,
-        sessionId: dsh.getSessionId(),
+        sessionId,
         turnActive,
+        // 子会话事实（页面据此判主钮能否让出「停止」、要不要另挂独立 Stop、输入区是否被父离线锁住）：
+        // 地址来自父会话自有的子目录投影，可用性来自列表 summary（见 dshService.refreshSubagentFacts）
+        ...subagentFrameFields(sessionId),
         historyHasMore: dsh.historyHasMore(),
         historyLoading: dsh.historyLoading(),
         historyEvents: dsh.windowEventCount(),
         sessionOpenError: openError ?? null,
     });
+    // **行帧必须先于退休帧**（真机 2026-10-07「发送后对话区闪了一下」）：上面的 `admitById/admitByText`
+    // 是从**这一帧的行**里认出来的，所以承接那条消息的宿主行就在刚发出去的 `rows` 里；若先把
+    // `submissions`（带 `admitted` 退休）发出去，页面会先丢掉本地回显、而宿主那行还没到 → 那条提问
+    // **消失一帧**、下一帧才回来 = 闪。两帧顺序反过来（页面侧还有按 `rpcId`/同文案认领的那道去重兜底）。
+    pushSubmissions(sessionId);
 };
 // 任务清单（输入框上方的常驻条）：与行同源、同一处派生，页面按整表替换；`null` = 没有清单。
 dsh.onTodos = (todos) => {
@@ -67,6 +151,11 @@ dsh.onTodos = (todos) => {
 // 来自队列流的投影（见 dshService.ensureControl）。与行一样是整表语义：页面收到即替换。
 dsh.onQueue = (sessionId, items) => {
     postToChats({ type: 'queue', sessionId, items: toQueueViews(items) });
+    // 台账也要看收件箱：`queued` 的条目一被队列接下就退休它的回显（交给队列卡，上游同口径）；
+    // **曾经在收件箱里、现在不见了、又没入档** → 那次提交不会再有回显了，退休为 failed（真机那个形状）。
+    submitLedger.useSession(sessionId);
+    submitLedger.observeInbox(items);
+    pushSubmissions(sessionId);
 };
 // 上下文占用（发送按钮左侧的环）：单独一条轻帧 —— 投影值很小，不重推整串 chatInfo
 dsh.onContext = (sessionId, value) => {
@@ -723,6 +812,10 @@ function setupChatWebview(
     const stopTurn = (): void => {
         clearPendingAsk();
         gen.n++; // 使进行中的流失效
+        // 台账：**还没入档的这次提交**随"放弃"一起退休（上游：被放弃的回显立即退休，未结算按 failed）。
+        // 只退休 `transcript` 那一类（空闲直发）：排队/插话的回显归收件箱管，它们的去向由队列流决定。
+        submitLedger.fail(undefined, 'transcript');
+        pushSubmissions(dsh.getSessionId());
         void (async () => {
             const sid = await dsh.getSession().catch(() => undefined);
             if (sid === undefined) {
@@ -730,7 +823,10 @@ function setupChatWebview(
                 return;
             }
             try {
-                await dsh.call('session.cancel', { sessionId: sid });
+                // **普通会话走 `session.cancel`，子会话走父级中断**（分流判据见 `dsh/stop-target.ts`）：
+                // 子会话一律发 `session.cancel` 会被服务端拒（`session/agent-busy`），
+                // 界面表现就是「停止按钮永远无效」——那条真机反馈的根因。
+                await dsh.cancelTurn(sid);
                 logRows(`停止：已请求取消 session=${sid}`);
                 // 取消被接受 = 这一轮不再跑。立刻把「在跑」这个事实推下去，
                 // 不必等服务端补发 `turn/end`（那段时间里页面看不出变化）。
@@ -740,13 +836,18 @@ function setupChatWebview(
                 const msg = e instanceof Error ? e.message : String(e);
                 // 取消失败必须说出来：否则界面上只表现为「点了没反应」，原因无从查起。
                 logRows(`停止：取消失败 ${code ?? '(无码)'} ${msg}`);
+                // 呈现面**照上游**：失败写进会话的 prompt 错误位（上游 `promptError = {op:'stop', error}`），
+                // 也就是**对话区**那一处；插件对应的是通知行（tone=error），不再是 VS Code 通知 ——
+                // 通知会脱离聊天上下文，用户还容易漏掉"为什么没停"。
                 if (code === 'session/agent-busy') {
-                    // 子会话的取消不走 `session.cancel`（服务端要求走子代理投递路径）：给出可行动的话术。
-                    void vscode.window.showWarningMessage(
-                        '这个会话是分叉出来的子会话，不能单独停止。请在它的源会话里停止，或等它自己结束。'
-                    );
+                    // 子会话的取消不走 `session.cancel`（服务端要求走父级中断路径）：给出可行动的话术。
+                    postToChats({
+                        type: 'notice',
+                        tone: 'error',
+                        text: '这一轮停不下来：这个会话是分叉出来的子会话，它的父会话不在可用状态。请到源会话里停止，或等它自己结束。',
+                    });
                 } else {
-                    void vscode.window.showWarningMessage(`未能停止本轮：${msg}${code === undefined ? '' : `（${code}）`}`);
+                    postToChats({ type: 'notice', tone: 'error', text: `未能停止本轮：${msg}${code === undefined ? '' : `（${code}）`}` });
                 }
             }
         })();
@@ -801,6 +902,16 @@ function setupChatWebview(
     webview.onDidReceiveMessage((msg) => {
         if (msg.type === 'ready') {
             readyChats.add(webview);
+            /**
+             * **这个页面手上没有任何行缓存 → 下一帧必须整表。**
+             *
+             * 差分器的基线是"上一个页面收到过什么"（它只有一个实例，见 `rowDiffer` 的注释），而
+             * 页面那边是**按 `key` 覆盖自己的缓存**再按 `rowKeys` 拼（`store/reducer.ts` 的 `assembleRows`）。
+             * 两者一错位就是：新页面收到 `rowDelta: []` + 一串 `rowKeys` → 缓存空 → 拼出**零行** →
+             * 对话区空白（真机：侧栏看的好好的，点「移动到编辑器」后新面板里会话没了；
+             * 侧栏视图被重建时同样如此）。
+             */
+            rowDiffer.requestFull();
             void (async () => {
                 try {
                     await dsh.ensureRunning();
@@ -880,6 +991,14 @@ function setupChatWebview(
                     const submitId = typeof msg.rpcId === 'string' ? msg.rpcId : undefined;
                     // 投递方式：页面按「忙时键位」选好（空闲恒 queue）
                     const mode: DshPromptMode = msg.mode === 'steer' ? 'steer' : 'queue';
+                    // **本地回显先登记**（上游 `beginSubmission` 也是在提示词之前同步登记）：位置由
+                    // **宿主自己**的在跑事实 + 投递模式推导 —— 页面那份 `processing` 是推导值，竞态下不可信
+                    //（真机 2026-10-06：页面以为空闲、宿主这边还在跑 → 这次提交进了收件箱，回显永远认领不到）。
+                    if (submitId !== undefined) {
+                        submitLedger.useSession(dsh.getSessionId());
+                        submitLedger.begin(submitId, placementOf(dsh.isTurnActive(), mode), typeof msg.text === 'string' ? msg.text : '');
+                        pushSubmissions(dsh.getSessionId());
+                    }
                     // 诊断：与 buildRows 的 `user/message … rpcId=…` 对照，能直接断定标识配不配得上
                     console.warn(`[dsh-send] rpcId=${submitId ?? '(页面未给)'} mode=${mode}`);
                     // 忙时提交：**只提交、不等这一轮** —— 正在跑的那一轮由常驻订阅渲染，
@@ -891,6 +1010,9 @@ function setupChatWebview(
                         } catch (e) {
                             // 失败只标掉队列卡里那条本地条目：**不走**下面那条对话区失败路径 ——
                             // 它会把正在跑的回答行定稿成错误（那一轮不是这次提交的）
+                            // 台账同口径：带标识的提交失败 → 立即退休（本地回显不该继续挂着）
+                            submitLedger.fail(submitId);
+                            pushSubmissions(dsh.getSessionId());
                             post({
                                 type: 'chatError',
                                 scope: 'queue',
@@ -926,6 +1048,9 @@ function setupChatWebview(
                     // 而这里走 `chatError` 的是**服务端还没有回合**的失败（没有 turn/end → 也没有失败行可挂）。
                     // 不用 `chatDone`：旧通路退役后继续发会被页面静默丢弃（既没有错误提示，输入区还卡在处理中）。
                     const message = e instanceof Error ? e.message : String(e);
+                    // 台账：带标识的提交失败 → 立即退休（回显不该继续挂着；上游同口径）
+                    submitLedger.fail(typeof msg.rpcId === 'string' ? msg.rpcId : undefined);
+                    pushSubmissions(dsh.getSessionId());
                     post({ type: 'chatError', message, rpcId: typeof msg.rpcId === 'string' ? msg.rpcId : undefined });
                 }
             })();

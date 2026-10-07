@@ -115,6 +115,10 @@
 
   /* 过程链行内件 */
   .chain-tool-ico { font-size: 12px; color: var(--vscode-descriptionForeground, #999); flex: none; }
+  /* 行首图标走**上游内联图形**时（见 `components/chain/ToolIcons.ts`）：SVG 自带 width/height（14），
+     这里只把它摆正 —— 不动 codicon 那一档的字号。 */
+  .chain-tool-ico.is-upstream { display: inline-flex; align-items: center; }
+  .chain-tool-ico.is-upstream svg { display: block; }
   .chain-tool-title { font-size: 11.5px; font-weight: 600; color: var(--vscode-foreground, #ddd); }
   /* ① 行首状态点（上游 StateDot）：只在异常态取代变体图标，正常/进行中仍显图标。
      行尾不再有状态角标——上游整行只有这一个标记位。
@@ -211,6 +215,9 @@
   /* 真失败行（isError）的摘要位装着结果文本首行 → 上行错误色（上游 ToolRow `.errorSummary` 同义）。
      注意与行首红点不同源：这条只在 isError 时挂，非零退出的行仍是描述色。 */
   .chain-row-preview.is-error { color: var(--vscode-errorForeground, #f14c4c); }
+/* 被中断（stopped）的摘要位：上游 `.stoppedSummary` 的琥珀色。判据同样是**行状态**（见 ToolRow 的
+   `summaryTone`）—— 非零退出的 shell 走 `.is-error`（红），被中断的走这一档（琥珀）。 */
+.chain-row-preview.is-stopped { color: var(--vscode-editorWarning-foreground, #cca700); }
 
   /* 工具通用卡的「输入 / 输出」分区（ioCard：标签 + 内容两列网格）。
      输入=调用参数(pretty JSON)，输出=调用结果；两段之间一条 hairline。 */

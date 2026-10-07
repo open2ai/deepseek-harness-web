@@ -26,6 +26,11 @@
        免得依赖 webview 的 `color-mix` 支持。深色档默认，浅色档见下。 */
     --dsh-deep-diving: rgb(85, 129, 208);
     --dsh-deep-diving-shimmer: rgb(139, 180, 251);
+    /* 用户气泡底色：**上游有专属的一档**（浅 `--dsw-static-deepseek-50` rgb(237,243,254) /
+       暗 `--dsw-static-neutral-bluish-850` rgb(44,44,46)），VS Code 没有对应 token。
+       原先借 `--vscode-input-background`：浅色主题下它和编辑器底色同为白 —— 气泡整个看不见，
+       看着就像"文字浮在左半边、右边空一大截"（真机 2026-10-07）。这里按上游那两档写死。 */
+    --dsh-bubble: rgb(44, 44, 46);
   }
   body.vscode-light {
     --dsh-hairline: rgba(0, 0, 0, 0.1);
@@ -33,11 +38,15 @@
     /* deepseek-500 70% 混 blue-950 / 30% 混 blue-950（上游浅色两档） */
     --dsh-deep-diving: rgb(52, 94, 186);
     --dsh-deep-diving-shimmer: rgb(36, 61, 128);
+    /* 上游浅色档的 bubble 色（见 `:root` 那段说明） */
+    --dsh-bubble: rgb(237, 243, 254);
   }
   body.vscode-high-contrast,
   body.vscode-high-contrast-light {
     --dsh-hairline: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.4));
     --dsh-hairline-strong: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.4));
+    /* 高对比主题不写死颜色：气泡底交给语义变量，保证与前景色的对比度 */
+    --dsh-bubble: var(--vscode-input-background, var(--vscode-editor-background, #000000));
   }
 
   * { box-sizing: border-box; }
@@ -212,7 +221,11 @@
   .msg.assistant .avatar { background: var(--vscode-badge-background, #3a3a3a); color: var(--vscode-foreground, #ddd); }
   .msg .col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   /* 差异化：发送者(user)内容窄、贴合右侧；回复(assistant)满宽、随对话区自适应 */
-  .msg.user .col { max-width: 78%; align-self: flex-end; }
+  /* `align-items: flex-end` **不能省**（上游 `.userStack` 同款）：列里的附件行最大到 2×240，
+     它会把这一列的宽度顶到 78% 上限，而拉伸对齐下**气泡会跟着铺满那一列** ——
+     一句话的提问就变成「左边一小段字、右边一大片空白」（真机 2026-10-07 截图）。
+     贴右对齐后每个孩子各自收缩：气泡随文字宽、附件行随卡片宽，两者的右边缘都贴内容列。 */
+  .msg.user .col { max-width: 78%; align-self: flex-end; align-items: flex-end; }
   /* 助手列**撑满可用宽度**：上面 `.msg` 的 `align-items: flex-start` 是给用户气泡用的，
      套到助手行上会让整列按内容收缩 —— 于是控制行那条贯穿细线只有文字那么长（真机反馈"横线怎么那么短"）。
      上游同结构的做法是只让用户行 `align-items: flex-end`，助手行按默认 stretch 撑满。 */
@@ -223,8 +236,10 @@
   /* 消息区标题/正文前的内联 codicon（与文本同排的小图标，如 warning/question） */
   .codicon.inline-ico { font-size: 12px; margin-right: 4px; vertical-align: -1px; }
   .msg.user .body {
-    background: var(--vscode-input-background, #252526); border-radius: 10px;
+    background: var(--dsh-bubble); border-radius: 10px;
     padding: 8px 10px; white-space: pre-wrap; word-break: break-word;
+    /* 长文本在**本列**的宽度上折行（列已被 78% 上限约束）：少了它，贴右对齐下长句不折行、整行溢出 */
+    max-width: 100%;
   }
   .msg.assistant .body { white-space: normal; word-break: break-word; }
   .msg.user .body .user-text { white-space: pre-wrap; }
@@ -490,16 +505,42 @@
   .popup.hidden { display: none; }
   .popup .popup-title { font-size: 11px; opacity: 0.7; padding: 2px 6px 4px; }
   .popup .optgroup-label { font-size: 11px; opacity: 0.6; padding: 4px 6px 2px; }
-  /* @ 下钻的顶部路径条：工作区 › 目录…，下方细线分隔列表 */
+  /* @ 下钻的顶部路径条：`工作区 › 目录 › …`，下方细线分隔列表。对齐上游：**折行**排布
+     （段多/名长就换行，不再整条省略号），每段是一个可点回上层的按钮，当前层只是标签；
+     段间是细线 chevron 图标（不是文字 ›）。整条钉在弹窗外壳顶部、只有 .trigger-list 滚，
+     故 `flex: none` 不能少 —— 少了它会被候选列表的溢出压成几像素（2026-10-07 真机事故）。 */
   .trigger-path {
-    font-size: 11px;
-    color: var(--vscode-descriptionForeground, #999);
-    padding: 2px 8px 5px;
-    border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.14));
+    flex: none;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+    padding: 2px 3px 5px;
     margin-bottom: 3px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.14));
+  }
+  /* 一段＝一个返回目标（上游 `.crumb`）：长名各自省略、不整条截断；40% 上限免得一段吃掉整行 */
+  .trigger-crumb {
+    flex: 0 1 auto; max-width: 40%;
+    overflow: hidden; padding: 1px 5px; border: none; border-radius: 4px;
+    background: transparent; color: var(--vscode-descriptionForeground, #999);
+    cursor: pointer; font-family: inherit; font-size: 11px; line-height: 16px;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .trigger-crumb:hover {
+    background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.25));
+    color: var(--vscode-foreground, #ddd);
+  }
+  /* 当前所在的层是标签、不是可点项（上游 `.crumbCurrent`：无底色、不指示可点） */
+  .trigger-crumb.current,
+  .trigger-crumb.current:hover {
+    background: transparent; color: var(--vscode-foreground, #ddd); cursor: default;
+  }
+  .trigger-sep {
+    flex: none; font-size: 12px; line-height: 16px;
+    color: var(--vscode-descriptionForeground, #999); opacity: 0.8;
+  }
+  /* 候选列表自己滚（同 .spicker-list）：外壳不滚，顶上那条路径条才能一直留在可见区 */
+  .trigger-list {
+    display: flex; flex-direction: column; gap: 1px;
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
   }
   .popup .popup-fail {
     font-size: 11px; color: var(--vscode-errorForeground, #f14c4c);
@@ -652,8 +693,7 @@
     flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-size: 11px; opacity: 0.72;
   }
-  /* 发送区（上下文环 + 发送钮）：同组右对齐 —— auto 外边距挂在组上，
-     不能挂在 #send 上（那样环会被留在左边、离发送钮很远） */
+  /* 发送区（发送钮）：右对齐 —— auto 外边距挂在组上 */
   .send-group { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; flex: none; }
   #send {
     width: 24px; height: 24px; border-radius: 50%; border: none;
@@ -669,20 +709,41 @@
   #send:disabled { opacity: 0.4; cursor: default; }
   #send.stop { background: var(--vscode-errorForeground, #f14c4c); }
 
-  /* 上下文占用环（发送按钮左侧）：环 + 自己的明细弹窗。数据缺失时整个环不渲染（见 components/ContextMeter）。 */
-  .ctx-meter { position: relative; display: inline-flex; flex: none; }
-  .ctx-trigger {
-    width: 24px; height: 24px; padding: 0; border: none; border-radius: 50%;
-    background: none; color: var(--vscode-descriptionForeground, #999);
-    cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  /* 输入框**外面、底部**那一行：统计 / 用量 pill + 上下文占用环（宿主页面把占用环放在输入卡
+     **下方**那一行 —— 不是卡片里；出处与行号见 `details/upgrade/10` §8）。
+     方位沿用本插件原先那一行的排版：**靠左**、与输入条同一起点（左右内距 12、下方 3），
+     行内**两枚 pill 在前、占用环在后**，两者间隔 12（宿主那一行也是 12）。里面都没东西时整行收起。 */
+  .composer-dock {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+    padding: 1px 12px 3px; max-width: 100%;
   }
-  .ctx-trigger:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); color: var(--vscode-foreground, #ddd); }
+  .composer-dock:empty { display: none; }
+
+  /* 环 + 百分比 + 自己的明细弹窗。**两个数（已用/窗口）都拿到才渲染**，见 components/ContextMeter。 */
+  .ctx-meter { position: relative; display: inline-flex; flex: none; }
+  /* 触发器是**胶囊**（环 + 读数并排），照上游 `.trigger`：inline-flex/gap 6/左右内距 8/圆角/无边框。
+     字号取插件自己的次级档（12px），不搬上游的 13px —— 本面板整体字号比网页端紧一档。 */
+  .ctx-trigger {
+    display: inline-flex; align-items: center; gap: 6px; flex: none;
+    padding: 1px 8px; border: none; border-radius: 5px;
+    background: none; color: var(--vscode-descriptionForeground, #999);
+    font-family: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
+    line-height: 20px; white-space: nowrap;
+    cursor: pointer;
+  }
+  .ctx-trigger:hover,
+  .ctx-trigger[aria-expanded='true'] {
+    background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22));
+    color: var(--vscode-foreground, #ddd);
+  }
   .ctx-trigger svg { display: block; }
+  .ctx-reading { color: inherit; }
   .ctx-track { fill: none; stroke: var(--dsh-hairline-strong); stroke-width: 2px; }
   .ctx-fill { fill: none; stroke: currentColor; stroke-width: 2px; stroke-linecap: round; }
-  /* 明细弹窗：向上展开、右边缘对齐自己那个环（输入区在窗口底部，向下会被状态栏截断） */
+  /* 明细弹窗：从**输入框下面那一行**向上展开、左边缘对齐自己（这一行靠左，弹窗自然向右铺；
+     上游也是向上开，见 `details/upgrade/10` §8）。 */
   .ctx-pop {
-    position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 100;
+    position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 100;
     box-sizing: border-box;
     /* 宽度**自适应内容**：默认比固定 264 窄，数据长（更大的 token 数、更长的文案）时跟着长；
        上限钉在视口内 —— 既不写死宽度，也不允许顶出面板。行内数值不省略（见 .ctx-row）。 */
@@ -796,14 +857,8 @@
     color: var(--vscode-descriptionForeground, #999);
     font-size: 11px; line-height: 18px;
   }
-  /* 状态小药丸：包裹文字、常驻背景（随主题变量深浅适配，无需 hover） */
-  .status-badge {
-    display: inline-block; width: fit-content; max-width: 100%;
-    margin: 3px 0 0; padding: 0 7px; border-radius: 8px;
-    font-size: 10px; line-height: 1.6; color: var(--vscode-descriptionForeground, #999);
-    border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.35));
-    background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2)));
-  }
+  /* （`.status-badge` 已删：那是插件自造的"按终止原因取值的角标"，上游同一位置只有正文末尾的
+     `.answer-stopped` 药丸 */
   /* 回合尾部：本轮文件改动 + 交付文件（位置在回答正文之后、动作条之前） */
   .turn-deliverables { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
   /* 本轮文件改动（上游 `ChangedFiles` 的形态）：**一张卡片** —— 头部（标题 + 折叠）+ 竖排文件名列表
@@ -1103,7 +1158,7 @@
     font-size: 12px; cursor: pointer; padding: 2px 5px; border-radius: 4px; line-height: 1;
   }
   .msg-actions button .codicon { font-size: 13px; display: block; line-height: 1; }
-  /* 分叉图标已换成自绘 svg（见 ThumbIcons.ts）：尺寸显式给，与同排 codicon 一致 */
+  /* 分叉图标是上游同形的线稿 svg（见 ThumbIcons.ts）：尺寸显式给，与同排 codicon 一致 */
   .msg-actions button svg { width: 13px; height: 13px; display: block; }
   /* hover 高亮背景(工具类按钮的悬停选中感) */
   .msg-actions button:hover {
@@ -1128,11 +1183,13 @@
   .msg-actions .tm-btn:hover { background: rgba(255,255,255,0.08); color: var(--vscode-foreground, #ddd); }
   .msg-actions .tm-btn.active { color: var(--vscode-foreground, #ddd); background: rgba(128,128,128,0.25); }
 
-  /* 输入框下方的会话级信息：两张**互相独立**的卡（会话统计 / Token 用量）。
-     一条 pill 一个维度，各自点开自己的明细卡 —— 并成一行长文本既读不出重点、窄面板下还会被整体省略。 */
+  /* 会话统计 / Token 用量两枚 pill —— **在输入框外面、底部那一行里**（与上下文占用环同一行、
+     排在它**前面**）。一条 pill 一个维度，各自点开自己的明细卡 —— 并成一行长文本既读不出重点、
+     窄面板下还会被整体省略。这一层不再自带左右内距/外边距：方位与两项之间的 12px 由
+     `.composer-dock` 统一给（宿主页面也一样：统计 pill 自己只管一行 pill，落位由那一行决定）。 */
   .stats-cards {
     position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px;
-    padding: 1px 12px 3px; font-size: 12px; line-height: 18px;
+    font-size: 12px; line-height: 20px;
     color: var(--vscode-descriptionForeground, #888);
   }
   .stats-cards:empty { padding: 0; }
@@ -1490,7 +1547,7 @@
   /* 已记录的一侧要**常显**（不靠 hover 才看得见），否则用户看不出自己评过 */
   .fb-btn.active { color: var(--vscode-foreground, #ddd); background: rgba(128,128,128,0.25); }
   .fb-btn .codicon { font-size: 13px; display: block; }
-  /* 拇指已换成自绘 svg（见 ThumbIcons.ts，字形与上游一致）：尺寸显式给，保持原来的 13px 占位 */
+  /* 拇指是**上游同形的线稿 svg**（见 ThumbIcons.ts：未评描边、已评加填充）：尺寸显式给，保持原来的 13px 占位 */
   .fb-btn svg { width: 13px; height: 13px; display: block; }
   .fb-dialog {
     margin: 0 14px 4px; padding: 12px 14px;

@@ -55,7 +55,8 @@ export const DEFAULT_CHAT_PREFS: DshChatPrefs = {
     busyEnter: 'queue',
     settledReasoningPreview: true,
     liveProcessDetail: true,
-    stepGrouping: 'history',
+    // 与 `stepGroupingOf(undefined)` 一致：桌面端默认 → collapsed（进行中的回合也有可展开的分组头）
+    stepGrouping: 'collapsed',
 };
 
 /** `settings/describe` 里一个命名空间（只取本模块关心的两段）。 */
@@ -86,17 +87,17 @@ export function transcriptViewOf(raw: unknown): DshTranscriptView {
 }
 
 /**
- * 工作步骤展示 → 上游策略表的 `stepGrouping` 列（过程分组头的覆盖范围）。
+ * 上游策略表的 `stepGrouping` 列（0.2.0 起）：过程分组头的覆盖范围（「collapsed」所有回合 /
+ * 「history」仅已关闭回合 / 「none」不分组）。上游唯一的消费点是分组头的显示判据。
  *
- * 与 `transcriptViewOf` / `policyOf` 同源同表，逐档对应 `presentation-policy.ts` 的 `POLICIES`：
- *   `compact` / `standard` → `collapsed`（所有回合都有可折叠的分组头，含进行中的回合）
- *   `detailed`             → `history`（只有**已关闭**的回合有；进行中平铺、无分组头）
- *   `verbose`              → `none`（根本不分组，过程行平铺）
- *   旧值 `normal`/`expanded`、缺失、非法 → `detailed` 口径（0.2.0 起上游把三者都读作 `detailed`，
- *   非 Desktop Web 的客户端默认也是 `detailed`）→ `history`。
+ * 逐档：`compact` / `standard` → `collapsed`（所有回合都有可折叠的分组头，含进行中）；
+ * `detailed` → `history`（只有已关闭回合有）；`verbose` → `none`（不分组）。
+ * `standard` 与 `detailed` 在前两个门相同、只在这一列不同 —— 这正是插件此前「两档看不出区别」的原因。
  *
- * 注意：`standard` 与 `detailed` 在**前两个门**上相同，只在这一列上不同 —— 这正是插件此前
- * 「两档看不出区别」的原因（缺的就是这一列）。
+ * **默认值对齐上游桌面端**（= `standard` → `collapsed`）：字段无 schema 默认、缺失时由客户端决定，
+ * 桌面端选 `standard`、非桌面 Web 选 `detailed`。本插件是桌面客户端（VS Code），缺失/非法时按 `standard`
+ * 走 → `collapsed`，于是**进行中的回合也有可展开/收起的分组头**（真机左右对照 2026-10-06：
+ * 「web 端在跑时有箭头可展开收起，插件只有已完成」—— 缺了这个默认，进行中的那一轮不分组头）。
  * @param raw - 该字段的用户段原值
  * @returns 分组覆盖范围
  */
@@ -107,7 +108,12 @@ export function stepGroupingOf(raw: unknown): DshStepGrouping {
     if (raw === 'verbose') {
         return 'none';
     }
-    return 'history';
+    // 显式的 detailed，以及 0.2.0 读作 detailed 的旧值 normal/expanded → history（只有已关闭回合有分组头）
+    if (raw === 'detailed' || raw === 'normal' || raw === 'expanded') {
+        return 'history';
+    }
+    // 缺失/非法：按桌面端默认（standard）→ collapsed
+    return 'collapsed';
 }
 
 /** 性能与用量：只有精确 `compact` 才是简洁，其余（缺失/非法）一律上游默认 `detailed`。 */

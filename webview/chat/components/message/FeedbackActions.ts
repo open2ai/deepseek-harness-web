@@ -22,7 +22,7 @@ export function FeedbackActions({ store, messageId }: { store: ChatStore; messag
       ${icon(active)}
     </button>`
   }
-  // 字形用上游自绘路径（见 ThumbIcons.ts）：已评切实心，指针离开后仍看得出评过
+  // 字形照搬上游 artwork（见 ThumbIcons.ts）：未评线稿、已评实心，指针离开后仍看得出评过
   return html`<span class="fb-actions">
     ${button('positive', '好的回答', '取消标记', (filled) => html`<${ThumbUpIcon} filled=${filled} />`)}
     ${button('negative', '有问题的回答', '取消标记', (filled) => html`<${ThumbDownIcon} filled=${filled} />`)}

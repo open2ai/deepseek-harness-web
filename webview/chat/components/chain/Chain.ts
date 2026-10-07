@@ -47,7 +47,7 @@ export { chainRenderPlan, reasoningLive }
 
 type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
 
-export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; soleRow?: boolean }) {
+export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; soleRow?: boolean; stoppedPill?: unknown }) {
   const chain = row.chain
   // 上游显示偏好（控制已完成轮次的过程内容）；未知/未到 = compact，即接入前的固有形态
   const compact = store.transcriptView.value === 'compact'
@@ -248,8 +248,13 @@ export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; st
    * 为什么不能每条行各渲染一个：被插话切成多段行时，控制行会重复出现（真机现象是同一个回合
    * 底下连着两块「已完成 / 已完成分析」）。归属必须跟着**可见**内容走 —— 一条只有不可见注入的行
    * 不能把整个回合的控制块抢走。
+   *
+   * ⚠️ **空链也照出**（不再要求 `chain.length > 0`）：出现条件就是「回合已关闭」（上游控制节点
+   * `turn/status === 'closed'` 即渲染，与有没有过程内容无关）。空链的回合有两种 —— 请求期就失败的、
+   * 以及一次工具/思考都没有的纯文本回合 —— 上游这两种都看得见这一行。原先空链不出，等于把那两种回合的
+   * 「已完成 / 已停止 / 处理失败」整格抹掉（真机对照 web 的差异之一）。
    */
-  const doneLine = chain.length === 0 || !ownsHead
+  const doneLine = !ownsHead
     ? null
     : doneStatusText(row.done, row.status, typeof wallSecOf === 'number' ? wallSecOf * 1000 : undefined)
   /**
@@ -266,14 +271,15 @@ export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; st
    */
   const alwaysOpen = row.interrupted === true || row.status === 'aborted' || row.status === 'error'
   /**
-   * 可点 = `foldable && hasContent && !alwaysOpen`（上游 `TurnProcessNodeView` 的三项）。
+   * 可点 = `foldable && hasContent && !alwaysOpen`（上游那三项，**没有第四项**）。
    *
-   * ⚠️ `foldable` 里含 **`answerAnchorSeq !== null`**（上游 `windowReady` 的一环）：**没有回答锚点的回合
-   * 一律不给箭头** —— 折叠动作的落点就是锚点世代，没有锚点可点。漏了这一条的表现是"箭头在、点了没反应"
-   * （真机 47 行，见 `tmp/_foldclick.probe.mjs`）。
+   * ⚠️ **2026-10-07 撤掉一条插件自造的第四项**：这里原来还挂着 `answerAnchorSeq !== null`
+   *（当时的理由：「折叠动作的落点就是锚点世代，没有锚点可点」）。对着上游源码复核后确认那是**插件
+   * 多出来的门** —— 上游那三项里没有任何"回答锚点"的要求，非锚点的回合**照样给 chevron**；
+   * 而 `outerFold` 的落点本来就是 `answerStep ?? 0`（数字恒有），点击并不需要锚点。
+   * 少这一条的真机表现（左右对照图）：**网页端「已完成，用时 45秒 ⌄」有箭头，插件没有**。
    */
-  const canCollapse =
-    row.done && compact && hasProcessContent && row.process?.answerAnchorSeq !== null && !alwaysOpen
+  const canCollapse = row.done && compact && hasProcessContent && !alwaysOpen
   const toggleDone = (): void => {
     if (turn === undefined || !canCollapse) {
       return
@@ -299,8 +305,8 @@ export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; st
       </div>`
 
   // ⚠️ 空链的返回**必须**在所有 hook 之后（见上面 hook 区的注释）。
-  // 例外：**回合一条链都没有**时（请求期就失败的那种回合，宿主只补出一条容器行），
-  // 这一行仍要出**控制行**（「处理失败」/「已停止」就在那一格）—— 那是回合级事实，不挂在链上。
+  // 「回合一条链都没有」（请求期就失败、或纯文本回合）**不是**整个不渲染的理由：控制行照出
+  //（「处理失败」/「已停止」就在那一格），只有"既没有链、又不归我承控制行"时才真的什么都不画。
   if (chain.length === 0 && doneLine === null) {
     return null
   }
@@ -340,15 +346,19 @@ export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; st
 
   // **按片**：每片走子组件（各自的头/明细/计时/滚动边），边界文本渲染在相邻两片**之间**（永远可见）。
   // **各片头 + 明细都在 `.chain-body` 里**（外层折起时一起藏 —— 与 web 折起态一致）；终局行在外。
+  // 「已停止」药丸（`stoppedPill`）**只挂最后一片的明细末尾**（上游那个药丸长在该步自己的正文块上，
+  // 而这一步没有正文时那个块本身就是这一片的成员 → 落在分组框里面；见 `AssistantRow` 的分派）。
   if (grouped) {
+    const lastGroupAt = groupPlan.entries.reduce((at, entry, index) => (entry.kind === 'group' ? index : at), -1)
     return html`<div class="chain">
       ${doneRow}
       <div class="chain-body" ref=${outerRef}>
-        ${groupPlan.entries.map((entry) =>
+        ${groupPlan.entries.map((entry, index) =>
           entry.kind === 'group'
             ? html`<${ProcessGroup} key=${entry.key} row=${row} store=${store}
                 group=${{ key: entry.key, facts: entry.facts }} items=${entry.items}
                 outerHidden=${outer.hidden}
+                tail=${index === lastGroupAt ? stoppedPill : null}
                 prefs=${{ compact, grouping: store.stepGrouping?.value, liveProcessDetail: store.liveProcessDetail?.value }} />`
             : html`<div class="chain-proc-text" key=${entry.item.key}>${entry.item.text}</div>`)}
       </div>
@@ -360,7 +370,7 @@ export function Chain({ row, store, ownsHead, soleRow }: { row: AssistantRow; st
     ${doneRow}
     <div class="chain-body" ref=${outerRef}>
       ${head}
-      ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: row.done, store })}
+      ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: row.done, store, tail: stoppedPill })}
     </div>
   </div>`
 }

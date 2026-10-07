@@ -320,9 +320,12 @@ export function MessageList({ store }: { store: ChatStore }) {
           <div class="turn-anchor" data-turn=${turnAttr}>${body}</div>
         </${RowBoundary}>`
       })}
-      ${store.processing.value ? html`<${TurnStatus} />` : null}
-      ${/* pending 插话气泡：排在列表与「生成中」之后（上游同序）——它们还没进日志，没有锚点序号 */ ''}
+      ${/* pending 插话气泡：排在**所有行之后、「生成中」状态行之前** —— 上游的次序就是先整张行表、
+           再 pending 行、最后才是运行指示，故气泡在状态行之上。反过来放（气泡在状态行下面）会让
+           「刚发出去那条」跑到「深度求索中…」底下，与上游位置相反。
+           它们还没进日志，没有锚点序号，所以只能落在这里，不能塞进 `messages`。 */ ''}
       <${PendingSteeringList} items=${store.pendingSteering.value} />
+      ${store.processing.value ? html`<${TurnStatus} store=${store} />` : null}
       ${errorCount > 0
         ? html`<div class="render-error-bar">
             <span class="codicon codicon-warning" aria-hidden="true"></span>

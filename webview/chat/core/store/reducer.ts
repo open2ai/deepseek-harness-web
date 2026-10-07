@@ -140,6 +140,11 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       case 'queue':
         queue.applyQueue(m.sessionId, (m.items ?? []) as QueueItemView[])
         break
+      // 提交台账（整表 pending + 增量 retired）：页面据此撑住"提交→开跑"那一拍的「处理中」、
+      // 收掉 `queued` 的本地回显、并把已退休未入档的标成未提交成功（见 messages.applySubmissions）
+      case 'submissions':
+        messages.applySubmissions(m.pending ?? [], m.retired ?? [])
+        break
       case 'queueActionFailed':
         queue.showActionFailure(m.op, m.code)
         break
@@ -196,7 +201,9 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         // 宿主下发的行（阶段 4，见 docs/design/08 §11）：渲染源切到宿主侧
         // **只发变动的行**（§3.3）：`rowDelta` + `rowKeys` 在这里拼回整表 —— 等价性是硬约束
         //（守卫 `tmp/_rows.diff.test.mjs` 逐前缀比对两种口径），拼装逻辑只此一处。
-        messages.applyHostRows(assembleRows(m), m.sessionId, m.turnActive)
+        // 拼一次整表：`applyHostRows` 与下面的 `noteDurable` 必须看**同一份**（见那处的注释）
+        const assembled = assembleRows(m)
+        messages.applyHostRows(assembled, m.sessionId, m.turnActive, m.subagent)
         // 窗口分页事实（「加载更早」按钮的门与进行态）：跟同一帧下发，页面只做镜像
         // `sessionOpenError` 同帧（整表语义：`null` = 没有失败，用来清掉上一条横幅）
         messages.applyHistory({
@@ -208,7 +215,11 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         // 队列卡的本地「发送中」也按提交标识认领：这次提交可能落在对话流（空闲）或队列（忙时），
         // 两条路都以同一个 `rpcId` 回显 —— 只认队列帧的话，竞态下会有一条「发送中」永远挂着。
         // 同时记下「日志里已落账」的标识：pending 插话气泡据此去重（队列帧可能比行帧慢一帧）。
-        queue.noteDurable(userRpcIdsOf(m.rows))
+        // 判据必须是**拼好的整表**（`assembled`），不是帧上的 `m.rows`：差分帧（`rowDelta` + `rowKeys`，
+        // 也就是常态）根本没有 `rows` 字段 —— 拿 `m.rows` 只会得到空集合，于是每次差分都把这份
+        // 「日志里已落账」的名单清空：插话气泡的去重恒不生效，一条旧提问的气泡就永远挂在列表末尾
+        //（真机 2026-10-07：发新问题时，最早那条提问又出现在「思考 / 深度求索中」上方）。
+        queue.noteDurable(userRpcIdsOf(assembled))
         // 反馈是**按会话**的：会话一变就丢弃上一会话的评价，否则标记会串到新会话的行上
         feedback.onSession(m.sessionId)
         // 本轮已结束（宿主说不在跑）→ 仍挂着的提问不可能还有效，收起弹窗。

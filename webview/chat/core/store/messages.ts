@@ -6,6 +6,7 @@ import type { ChatHost } from '../host'
 import type { ImageAttachment, AttachmentRef } from '../protocol'
 import { formatMsgClock } from '../format'
 import type { DshStreamRow } from '../../../../src/dsh/rows/types'
+import type { SubagentFacts } from '../stop-control'
 import { toChatRows } from './host-rows'
 import type { ChatRow, ChatStore, RefSnap } from './types'
 
@@ -15,7 +16,9 @@ export interface MessagesSlice {
     | 'messages'
     | 'view'
     | 'processing'
+    | 'runAnchorMs'
     | 'turnRunning'
+    | 'subagentFacts'
     | 'scrollPend'
     | 'historyHasMore'
     | 'historyLoading'
@@ -35,6 +38,16 @@ export interface MessagesSlice {
   pushApproval(approvalId: string, description: string, toolName?: string, displayReason?: Record<string, string>): void
   /** 追加一条用户行（本地乐观行：发出即显示，等宿主行回显后由提交标识认领）。 */
   addUser(text: string, imgs?: ImageAttachment[], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void
+  /**
+   * 宿主**提交台账**的帧（`submissions`）：整表的待结算提交 + 自上一帧以来退休的那些。
+   *
+   * 与上游 `SessionSnapshot.pendingSubmissions` 同构：位置由宿主推导、退休由宿主判定 —— 页面只消费。
+   * 于是「处理中」不再有一条"没人回收的本地乐观行"的腿（真机 2026-10-06 的卡死来路）。
+   */
+  applySubmissions(
+    pending: ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>,
+    retired: ReadonlyArray<{ rpcId: string; outcome: string }>
+  ): void
   /** 开启（或复用）当前进行中的 assistant 行。 */
   beginAssistant(prompt?: string): void
   /** 取一个列表内唯一行 key。 */
@@ -49,7 +62,7 @@ export interface MessagesSlice {
   resetRows(): void
   /** 接受宿主下发的行（阶段 4）：映射后写入列表，并保留本地尚未被回显认领的乐观行。
    *  `sessionId` 用于判归属：会话一变，上一个会话的乐观行必须丢弃（否则 processing 恒真）。 */
-  applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean): void
+  applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void
   /** 更早的历史还没有进窗口（宿主给的窗口事实）：列表顶端据此出「加载更早」。 */
   historyHasMore: Signal<boolean>
   /** 「加载更早」是否在飞：按钮据此禁用并换成进行时文案。 */
@@ -99,12 +112,62 @@ export interface MessagesSlice {
 /** 本地时刻串（实时上送用；历史恢复走事件自带时刻）。 */
 const nowTime = (): string => formatMsgClock(Date.now())
 
+/**
+ * 本地回显**既没被宿主行认领、也不在提交台账里**时，最多还留多久（毫秒）。
+ *
+ * 为什么要有这条上限：本地乐观行本来靠两条权威事实回收 —— 宿主行里的 `rpcId`（入档回显）与台账的
+ * 退休增量。两条都没有的旧回显原先**无限期留着**，而它又会被插到「未定稿回答行之前」，
+ * 于是每一轮跑起来就重新冒出来一次（真机 2026-10-07：最早那条提问又出现在「思考 / 求索中」上方）。
+ * 台帐帧在提交后几个毫秒内就到，所以这个宽限期只兜"这条回显谁也不认识"的情形：
+ * 真入档的消息由宿主那条行表示，没入档的由台账标 `failed`，都不是这里丢的。
+ */
+const UNKNOWN_ECHO_GRACE_MS = 10_000
+
+/**
+ * 宿主行表里**同一条提交标识只留一行**（页面的最后一道闸）。
+ *
+ * 为什么放在页面这一层：宿主已经按消息 id 挡了一道（见 `src/dsh/rows/build.ts`），但页面拿到的是
+ * 拼装后的整表 —— 窗口整表替换、行缓存与差分帧交错这些来路都在宿主与页面之间，多一道廉价的闸
+ * 比在真机上再看到一次"提问重复"划算。同一 `rpcId` 的两行内容必然相同（它就是那一次提交的回显），
+ * 而**用户真的连发两条同文案**时两条的 `rpcId` 不同、不受影响。
+ */
+function dropDuplicateUserRows(rows: ChatRow[]): ChatRow[] {
+  const seen = new Set<string>()
+  const out: ChatRow[] = []
+  for (const row of rows) {
+    if (row.kind === 'user' && row.rpcId !== undefined) {
+      if (seen.has(row.rpcId)) {
+        if (typeof console !== 'undefined') {
+          console.warn(`[chat] 宿主行里同一条提交标识出现两次（rpcId=${row.rpcId}）：只留第一行`)
+        }
+        continue
+      }
+      seen.add(row.rpcId)
+    }
+    out.push(row)
+  }
+  return out
+}
+
 export function createMessages(host: ChatHost): MessagesSlice {
   const messages = signal<ChatRow[]>([])
   const view = computed<'welcome' | 'chat'>(() => (messages.value.length === 0 ? 'welcome' : 'chat'))
   const processing = signal(false)
+  /**
+   * 「深度求索中，用时 X」的时钟锚点 = **正在跑的那一回合的开始时刻**（宿主下发 `turnStartMs`）。
+   *
+   * 为什么不用「组件挂载时刻」：那是插件原先的做法，面板中途打开/切回本会话时会**从 0 重新计**，
+   * 与网页端（锚回合开始时刻）差出好几秒。锚点未知时保持 `undefined` —— 状态行按上游只显示
+   * 「深度求索中」（不带时长）。
+   */
+  const runAnchorMs = signal<number | undefined>(undefined)
   /** 宿主权威的「一轮在跑」：只喂停止/插话门控。 */
   const turnRunning = signal(false)
+  /**
+   * 「宿主谁也不认识这条本地回显」的起点时刻（`rpcId` → epoch ms）：只由宽限期那条路读写
+   *（见 `UNKNOWN_ECHO_GRACE_MS`），行被认领/退休后随即清掉，不会无界增长。
+   */
+  const unknownEchoAt = new Map<string, number>()
   const scrollPend = signal(0)
   /** 更早的历史还没进窗口（宿主事实，见 `src/api/dshService.ts` 的窗口分页）。 */
   const historyHasMore = signal(false)
@@ -112,6 +175,22 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const historyEvents = signal(0)
   /** **打开历史失败**（上游 `openState === 'error'` 的 `openError`）：列表顶端横幅读它。 */
   const sessionOpenError = signal<{ message: string; code?: string } | undefined>(undefined)
+  /**
+   * **待结算的提交**（宿主台账的镜像：与上游 `SessionSnapshot.pendingSubmissions` 同构）。
+   *
+   * 页面不再自己推断"这条本地行还会不会来" —— 位置（`transcript` / `queued` / `steering`）与退休
+   * 都由宿主判定（见 `src/dsh/submissions.ts`）：`queued` 交给队列卡表示、`steering` 留到入档、
+   * `transcript` 在"提交之后、回合真正开跑"那一拍撑住「处理中」（上游 `awaitingFirstTurn` 的等价物）。
+   * 于是「处理中」不再有一条"没人回收的本地乐观行"的腿（真机 2026-10-06 的卡死来路）。
+   */
+  const pendingSubmissions = signal<ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>>([])
+  /**
+   * **子会话事实**（宿主随行帧下发；普通会话是 `undefined`）。页面据此判停止控件与"父离线锁"（见
+   * `core/stop-control.ts`）—— 判定在页面、事实在宿主，与插件其它地方同一分工。
+   */
+  const subagentFacts = signal<SubagentFacts | undefined>(undefined)
+  /** 台账**刚退休**的那几条（增量；页面据此收掉本地行并区分"消失 / 未提交成功"）。 */
+  const retiredSubmissions = signal<ReadonlyArray<{ rpcId: string; outcome: string }>>([])
   /** 回合级折叠展开态（见 core/process-fold）：key 是**会话内**回合号，换会话必须清 */
   const turnFoldOpen = signal<ReadonlyMap<number, boolean>>(new Map<number, boolean>())
   const setTurnFoldOpen = (turn: number, open: boolean): void => {
@@ -216,7 +295,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * 只有一种例外：本地已出、但尚未被回显认领的**乐观行**要留住（否则刚发出去的消息会一闪而没）。
    * 认领判定用提交标识：宿主行里已有同标识 → 已被认领；没有 → 还没回显，保留在末尾。
    */
-  function applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean): void {
+  function applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
     // 会话变了 → 列表里那些「本地已出、尚未被回显认领」的乐观行属于**上一个会话**，必须丢掉：
     // 留着会让 pending 恒非空 → processing 恒真（一直「深度求索中」，停止按钮还对着别人的行）。
     // 上游的做法更彻底（乐观态挂在**会话**上、不混进时间线），这里先按会话归属把它清掉。
@@ -226,6 +305,15 @@ export function createMessages(host: ChatHost): MessagesSlice {
       if (rowsSessionId !== undefined && rowsSessionId !== sessionId) {
         messages.value = []
         processing.value = false
+        runAnchorMs.value = undefined
+        // 本地乐观行的台账镜像属于**上一个会话**：换会话必须清
+        pendingSubmissions.value = []
+        retiredSubmissions.value = []
+        // 宽限期那张表同理（键是 `rpcId`，属于上一个会话）
+        unknownEchoAt.clear()
+        // 子会话事实也属于上一个会话：先清掉，等宿主把新的那一份随行帧发来（否则会拿旧会话的
+        // "这是子会话"去判新会话的主钮）
+        subagentFacts.value = undefined
         turnRunning.value = false
         // 回合号是**会话内**编号：换会话后同一个号会指到别的回合，折叠展开态必须一起清
         turnFoldOpen.value = new Map<number, boolean>()
@@ -240,7 +328,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
       }
       rowsSessionId = sessionId
     }
-    const host = toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : [])
+    const host = dropDuplicateUserRows(toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : []))
     const claimed = new Set(
       host
         .filter((r): r is Extract<ChatRow, { kind: 'user' }> => r.kind === 'user')
@@ -309,6 +397,66 @@ export function createMessages(host: ChatHost): MessagesSlice {
       return false
     })
     /**
+     * **本地在等这条腿由宿主台账说了算**（真机 2026-10-06 的卡死来路）。
+     *
+     * 上游的规则是：回显的**位置**（`transcript` / `queued` / `steering`）在提交那一刻由**会话**推导，
+     * 并由会话在四个时刻退休（入档 / 队列接受 / 失败或被放弃 / 销毁）。页面原先靠"`rpcId` 认领 + 同文案
+     * 兜底"两条路回收本地行，缺"这条永远不会来了"那一条 → 页面判忙/闲与宿主不一致时（竞态），
+     * 本地行永远认领不到，`processing` 被一条没人回收的腿撑住：一直「深度求索中」（且没有时长锚点）、
+     * 停止按钮点了也没反应（`session.cancel` 对"本来没有在跑的回合"是空操作）。
+     *
+     * 现在：台账下发的 `retired` 是**权威的退休事件**（`admitted` → 宿主那条行已经在列表里；
+     * `queued` → 队列卡接管；`failed` → 标「未提交成功」），页面只消费，不再推断。
+     */
+    /** 台账刚退休的那几条（`rpcId` → 去向）：决定本地行是"消失"还是"标未提交成功"。 */
+    const justRetired = new Map<string, string>()
+    for (const entry of retiredSubmissions.value) {
+      justRetired.set(entry.rpcId, entry.outcome)
+    }
+    const retired = pendingKept.flatMap((r): Array<Extract<ChatRow, { kind: 'user' }>> => {
+      if (r.rpcId === undefined) {
+        return [r]
+      }
+      if (pendingSubmissions.value.some((p) => p.rpcId === r.rpcId)) {
+        // 台账里还挂着：`queued` 交给队列卡表示（对话区这条退休）；`transcript` / `steering` 留着
+        const entry = pendingSubmissions.value.find((p) => p.rpcId === r.rpcId)
+        return entry?.placement === 'queued' ? [] : [r]
+      }
+      const outcome = justRetired.get(r.rpcId)
+      if (outcome === undefined) {
+        // 台账没交代它（帧还没到，或宿主没登记过）→ 先留着：宁可多留一会儿，也不要把正常提交标成失败。
+        // **但只留一个宽限期**（见 `UNKNOWN_ECHO_GRACE_MS`）：无限期留着的话，一条宿主行表早就不含它
+        // （入档那条行已经在加载窗口之外）、台账早已把它的退休增量吐完的旧回显，会在**每一轮**
+        // 「未定稿回答行之前」重新插出来 —— 真机 2026-10-07：发新问题时最早那条提问又冒出来一次。
+        const since = unknownEchoAt.get(r.rpcId)
+        if (since === undefined) {
+          unknownEchoAt.set(r.rpcId, Date.now())
+          return [r]
+        }
+        if (Date.now() - since < UNKNOWN_ECHO_GRACE_MS) {
+          return [r]
+        }
+        if (typeof console !== 'undefined') {
+          console.warn(`[chat] 本地回显既没被宿主行认领、也不在提交台账里（rpcId=${r.rpcId}）：超过 ${String(UNKNOWN_ECHO_GRACE_MS)}ms，丢弃`)
+        }
+        return []
+      }
+      if (outcome === 'failed') {
+        return [{ ...r, failed: true }]
+      }
+      // `admitted` / `queued`：回显退休（宿主那条行、或队列卡已经在表示它）
+      return []
+    })
+    // 宽限期那张表的**清理**：只保留这一帧还在等认领的那些 id（行一被认领/退休/丢弃就随之删掉）
+    if (unknownEchoAt.size > 0) {
+      const waiting = new Set(pendingKept.map((r) => r.rpcId).filter((id): id is string => id !== undefined))
+      for (const id of [...unknownEchoAt.keys()]) {
+        if (!waiting.has(id)) {
+          unknownEchoAt.delete(id)
+        }
+      }
+    }
+    /**
      * **本地独有行**：宿主行里根本不会有的那些 —— 审批卡、斜杠结果/错误提示。
      *
      * 为什么必须在这里挑出来：本函数是**整表替换**（`messages.value = ...`），而 `merged` 只是宿主行、
@@ -326,20 +474,53 @@ export function createMessages(host: ChatHost): MessagesSlice {
     )
     messages.value = [
       ...(openAssistantAt === -1
-        ? [...merged, ...pendingKept]
-        : [...merged.slice(0, openAssistantAt), ...pendingKept, ...merged.slice(openAssistantAt)]),
+        ? [...merged, ...retired]
+        : [...merged.slice(0, openAssistantAt), ...retired, ...merged.slice(openAssistantAt)]),
       ...localOnly,
     ]
-    // 「处理中」三个来源：本地还有**在等回显**的乐观行 / **宿主说本轮在跑** / 最后一条回答行尚未定稿。
-    // **不能**看「末行」：用户消息回显后、回答行还没建的一瞬末行是用户行，
-    // 按末行判会把处理中算成 false —— 按钮中途变回「发送」并禁用（真机：停止点不动）。
-    // 提交失败的行（failed）留在列表里但**不算在等**：它永远不会被回显认领。
-    const waiting = pendingKept.filter((r) => r.failed !== true)
+    // 提交失败的行（`failed`）留在列表里可读，但**不参与「处理中」** —— 那一栏只看下面三条腿。
     const lastAssistant = [...messages.value].reverse().find((r) => r.kind === 'assistant')
+    /**
+     * 「处理中」的**三条腿**（后两条是宿主的权威事实，前一条是"提交了但回合还没开跑"那一拍）：
+     *   ① 台账里还有**待结算的空闲直发**（`placement === 'transcript'`）—— 上游用 `awaitingFirstTurn`
+     *      表达同一件事：点击提交当帧就该显示「深度求索中」，不必等 `turn/start`；
+     *   ② 宿主说本轮在跑（`turnActive`）；
+     *   ③ 末条回答行还没定稿。
+     * **不再有"本地乐观行还没被认领"这条腿** —— 那条腿没人回收时会把「处理中」永远撑住（真机 2026-10-06）。
+     */
+    const pendingTranscript = pendingSubmissions.value.some((p) => p.placement === 'transcript')
     processing.value =
-      waiting.length > 0 || turnActive === true || (lastAssistant !== undefined && !lastAssistant.done)
+      pendingTranscript || turnActive === true || (lastAssistant !== undefined && !lastAssistant.done)
+    /**
+     * 时钟锚点：最后一条**未定稿**的回答行上的回合开始时刻（上游 `runningStartTime` 同义 ——
+     * 它取"打开中回合的 `turn.start.time`"）。行定稿（回合关闭）后清掉，状态行也就随之收摊。
+     * 拿不到（提交后第一条行还没到）保持 `undefined`：状态行只写「深度求索中」，不起算。
+     */
+    runAnchorMs.value =
+      lastAssistant !== undefined && !lastAssistant.done && lastAssistant.turnStartMs !== undefined
+        ? lastAssistant.turnStartMs
+        : undefined
     // 停止/插话只认宿主权威：processing 会在回答中被推导成 false
     turnRunning.value = turnActive === true
+    // 子会话事实：与行同帧下发（普通会话不带这个键 → 清成 undefined，别留着上一个会话的）
+    subagentFacts.value = subagent
+  }
+
+  /**
+   * 宿主**提交台账**的帧（`submissions`）：整表的待结算提交 + 自上一帧以来退休的那些。
+   *
+   * 与上游 `SessionSnapshot.pendingSubmissions` 同构：位置由宿主推导、退休由宿主判定。页面拿它做三件事：
+   *   ① 撑住"提交之后、回合真正开跑"那一拍的「处理中」（只要还有 `transcript` 待结算）；
+   *   ② 把 `queued` 的**本地回显从对话区收掉**（由队列卡表示）—— 上游 `placement === 'queued'` 整类排除；
+   *   ③ 把已经退休、又没入档的本地行标成「未提交成功」（不再有"永远在等"的行）。
+   * 会话切换 / reset 时整表清空（回显只属于当前会话）。
+   */
+  function applySubmissions(
+    pending: ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>,
+    retired: ReadonlyArray<{ rpcId: string; outcome: string }>
+  ): void {
+    pendingSubmissions.value = pending
+    retiredSubmissions.value = retired
   }
 
   /**
@@ -431,6 +612,11 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const resetRows = (): void => {
     messages.value = []
     processing.value = false
+    runAnchorMs.value = undefined
+    pendingSubmissions.value = []
+    retiredSubmissions.value = []
+    unknownEchoAt.clear()
+    subagentFacts.value = undefined
     turnRunning.value = false
     turnFoldOpen.value = new Map<number, boolean>()
     groupFoldOpen.value = new Map<string, boolean>()
@@ -448,7 +634,9 @@ export function createMessages(host: ChatHost): MessagesSlice {
       messages,
       view,
       processing,
+      runAnchorMs,
       turnRunning,
+      subagentFacts,
       scrollPend,
       historyHasMore,
       historyLoading,
@@ -463,6 +651,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
     openFile,
     applyHostRows,
     failSubmission,
+    applySubmissions,
     applyHistory,
     loadOlder,
     historyHasMore,

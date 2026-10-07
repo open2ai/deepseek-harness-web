@@ -37,8 +37,9 @@ type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
  * @param props.group - 宿主下发的这一片（稳定 key + 该片自己的过程事实）。
  * @param props.items - 该片内的链项（已按链序）。
  * @param props.prefs - 页面级偏好。
+ * @param props.tail - 明细体末尾的附加内容（「已停止」药丸那一路，见 `plan.ts` 的 `chainDetailBody`）。
  */
-export function ProcessGroup({ row, store, group, items, prefs, outerHidden = false }: {
+export function ProcessGroup({ row, store, group, items, prefs, outerHidden = false, tail }: {
   row: AssistantRow
   store: ChatStore
   group: Pick<DshRowGroup, 'key' | 'facts'>
@@ -46,6 +47,8 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
   prefs: ChainPagePrefs
   /** 外层（整条过程区）此刻是否折起 —— 折起时本片要跟着关掉（上游 `ChatGroupSeat` 同） */
   outerHidden?: boolean
+  /** 明细体末尾的附加内容（可选；只有最后一片会收到） */
+  tail?: unknown
 }) {
   const turn = row.turn
   // ⚠️ 两个 ref 必须**在 `setOpen` 之前**声明：`setOpen` 是闭包、点的时候才跑，但引用在渲染那一刻
@@ -168,6 +171,6 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
 
   return html`<div class="chain-group" data-group-key=${group.key}>
     ${head}
-    ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: row.done, store })}
+    ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: row.done, store, tail })}
   </div>`
 }
