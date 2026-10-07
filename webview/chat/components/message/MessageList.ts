@@ -273,12 +273,34 @@ export function MessageList({ store }: { store: ChatStore }) {
         : null}
       ${placed.map(({ row, tailNotices }, i) => {
         const latest = i === placed.length - 1
+        /**
+         * 用户行的"时刻/复制常显"判据与回答行**不是同一条**（真机 2026-10-07：新会话发出第一条后
+         * **那一行闪了一下**）。
+         *
+         * 上游对用户消息用的是**兄弟规则**：后面还有用户/插话消息 → 悬停才出；**没有**（= 最新那条提问）
+         * → 常显。它只看"后面还有没有用户消息"，**不受回答行出现的影响**。
+         *
+         * 插件原先两条都借用"整表最后一行"：发出第一条时它是最后一行 → 常显；宿主的回答行一到，
+         * 最后一行变成回答行 → 那一行的时刻/复制**当场淡出** —— 就是那一下闪。
+         */
+        const lastUserAt = (() => {
+          for (let at = placed.length - 1; at >= 0; at -= 1) {
+            // 插件把插话渲染成独立的 pending 气泡（不是行），所以这里只认用户行；
+            // 但**在途的插话**要按上游一样算成"后面还有一条用户/插话消息"（见下面的 `steeringPending`）
+            if (placed[at]?.row.kind === 'user') return at
+          }
+          return -1
+        })()
+        // 上游那条兄弟规则把 `steering`（插话）也算作"后面还有消息"：插话在途时，上一条提问
+        // 就该退回"悬停才出"。插件把在途插话画成 pending 气泡（排在列表末尾），所以这里单独看它一眼。
+        const steeringPending = store.pendingSteering.value.length > 0
+        const userLatest = i === lastUserAt && !steeringPending
         // 每条行各包一层错误边界：`key` 放在边界上（边界自己也是行级 vnode），
         // 内部再按行 key 分层，保证「换行」与「重试换子树」两件事互不干扰。
         const body = (() => {
           switch (row.kind) {
             case 'user':
-              return html`<${UserRow} key=${row.key} row=${row} store=${store} latest=${latest} />`
+              return html`<${UserRow} key=${row.key} row=${row} store=${store} latest=${userLatest} />`
             case 'context':
               // 已被上面的可见性过滤挡掉（到这里只剩含工具增删块的注入行）；类型上仍可能出现，故保留分支
               return html`<${ContextInjectionRow} key=${row.key} row=${row} />`

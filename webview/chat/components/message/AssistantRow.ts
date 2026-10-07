@@ -67,8 +67,6 @@ export function AssistantRow({ row, store, latest, turnTail, ownsHead, soleRow, 
          没有可反馈/可分支的 messageId，画出来只会误导。 */ ''}
     ${row.done && row.seq !== undefined ? RowMeta({
       time: row.time,
-      // 回答消息的时刻在**末尾**（与用量同一格），用户消息才在开头 —— 见 `meta.ts` 的 `clockSide`
-      clockSide: 'end',
       copyable: !!row.text,
       onCopy: () => store.copy(row.text),
       // 「在新对话中分支」：只有**当前对话的最后一条**、已定稿、且**本轮正常收在正文上**才能分叉。

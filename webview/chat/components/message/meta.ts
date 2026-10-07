@@ -7,6 +7,9 @@
 // **时刻的位置分两端**（上游那个 `clock` 形参）：用户消息在**开头**（`start`）、回答消息在**末尾**
 //（`end`，且与用量同一格：用量在前、时刻在后）。插件的用户行与回答行共用这一个组件，所以要由调用方说。
 //
+// ⚠️ **但本插件有意不跟这一条**（维护者定案 2026-10-07）：宿主是**窄侧栏**，末尾那一格（用量 + 时刻）
+// 内容最长时会被挤到**第二行**（真机截图：图标一行、`15:09` 单独一行）。所以时刻**一律留在最前面**。
+//
 // 分叉按钮**不可用时也必须能悬停**：原生 `disabled` 不派发 hover/focus，提示根本弹不出来
 //（上游为此专门用 `aria-disabled` + `data-unavailable`，并在旁边放一个只读给读屏的原因 span）。
 // 这里同口径：不挂 `onClick` 兜住点击，`title`/`aria-label` 给提示，`aria-describedby` 指到原因 span。
@@ -22,7 +25,6 @@ export function RowMeta({
   branchReasonId,
   extraActions,
   trailingActions,
-  clockSide = 'start',
 }: {
   time?: string
   onCopy?: () => void
@@ -36,19 +38,11 @@ export function RowMeta({
   extraActions?: unknown
   /** 尾部动作：落在动作区**最末**（用量/用时） */
   trailingActions?: unknown
-  /**
-   * 时刻落在动作区的哪一端（上游那个 `clock` 形参）：用户消息 `start`、回答消息 `end`。
-   *
-   * ⚠️ 插件此前一律画在开头 —— 回答行的左右对照因此差一位（真机 2026-10-07：上游是
-   * `[复制][反馈][分叉][用量][时刻]`，插件是 `[时刻][复制][反馈][分叉][用量]`）。
-   */
-  clockSide?: 'start' | 'end'
 }) {
   const available = branchable === true
   // 不可用时也要说清**为什么**：一个点不动的按钮比没有按钮更让人以为是坏了
   const branchLabel = available ? '在新对话中分支' : '仅可从已完成轮次的最后一条消息分支'
-  const clock = html`<span class="time">${time ?? ''}</span>`
-  return html`<div class="msg-meta">${clockSide === 'start' ? clock : null}<span class="msg-actions">
+  return html`<div class="msg-meta"><span class="time">${time ?? ''}</span><span class="msg-actions">
     <button data-act="copy" title="复制" disabled=${!copyable} onClick=${onCopy}><span class="codicon codicon-copy"></span></button>
     ${extraActions}
     ${onBranch === undefined ? null : html`<button data-act="branch" title=${branchLabel} aria-label="在新对话中分支"
@@ -58,6 +52,6 @@ export function RowMeta({
     ${onBranch === undefined || available || branchReasonId === undefined
       ? null
       : html`<span id=${branchReasonId} class="visually-hidden">${branchLabel}</span>`}
-    ${clockSide === 'end' ? html`<span class="end-info">${trailingActions}${clock}</span>` : trailingActions}
+    ${trailingActions}
   </span></div>`
 }

@@ -60,6 +60,12 @@ export function Deliverables({ row, store }: { row: AssistantRow; store: ChatSto
    * 标题 = `已编辑 {total} 个文件`（**恰好一个文件时**是 `已编辑 {name}`），下面**竖排**行
    * （`display` 相对路径 + 右侧 `+x/-y` 行数，二进制/超大给固定词），超过 `COLLAPSED_ROWS` 行折叠成
    * `全部 {n} 个文件`。计数与文件清单**一律取 Host 的摘要**，不自己数（数出来就会与卡上的标题打架）。
+   *
+   * ⚠️ **恰好一个文件时，那一格本身必须是可点的**（真机 2026-10-07：维护者问「只有一个已编辑文件时
+   * 插件无法在编辑区打开吗」）。上游那一支把**表头本身**渲染成 `<button onClick={() => openReview(0)}>`
+   *（图标 + `已编辑 {name}` + 增删计数），点它打开这一处改动的**评审视图**；插件没有那个评审面，
+   * 等价动作就是**在编辑区打开这个文件**（与多文件时每一行的动作一致）。此前插件这一格是纯 `<span>`，
+   * 点了没有任何反应 —— 单文件时整张卡**一个可点的东西都没有**。
    */
   const files = summary?.files ?? []
   const changesFoldable = files.length > COLLAPSED_ROWS
@@ -73,9 +79,17 @@ export function Deliverables({ row, store }: { row: AssistantRow; store: ChatSto
             ? html`<div class="dv-changes-head">
                 <span class="dv-changes-title">已编辑 ${String(summary.total)} 个文件</span>
               </div>`
-            : html`<div class="dv-changes-head">
+            : html`<button type="button" class="dv-changes-head dv-changes-head-open" title=${single.display}
+                onClick=${() => open(single.path)}>
                 <span class="dv-changes-title">已编辑 ${baseName(single.path)}</span>
-              </div>`}
+                <span class="dv-changes-counts">
+                  ${single.binary === true
+                    ? html`<span class="dv-changes-kind">二进制</span>`
+                    : single.oversized === true
+                      ? html`<span class="dv-changes-kind">过大</span>`
+                      : html`<span class="dv-added">+${String(single.added)}</span><span class="dv-deleted">-${String(single.deleted)}</span>`}
+                </span>
+              </button>`}
           ${single === undefined
             ? html`<ul class="dv-changes-list">
                 ${shownFiles.map((f) => html`<li key=${f.path}>

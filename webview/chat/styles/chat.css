@@ -210,6 +210,14 @@
   #messages[data-dsh-following-tail] { overflow-anchor: none; }
   .msg-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   #messages.hidden { display: none; }
+  /**
+   * 折起的过程区（终局态摘要行那颗箭头负责开关）：`hidden="until-found"` 的**语义显式写出来**。
+   *
+   * 为什么要显式写：这段行为原先**只靠宿主 Chromium 的 UA 样式**（`content-visibility: hidden`）。
+   * 一旦宿主/主题注入的规则碰到这块，属性还在、**界面纹丝不动** —— 表现就是「箭头点了没反应」
+   *（真机 2026-10-07）。显式声明后：折起 = 整区不渲染，且**仍可被 Ctrl+F 命中唤出**（`beforematch`）。
+   */
+  .chain-body[hidden] { content-visibility: hidden; }
   .msg { display: flex; gap: 10px; align-items: flex-start; }
   .msg .avatar {
     width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
@@ -877,6 +885,9 @@
     font: inherit; text-align: left; color: var(--vscode-foreground, #ddd);
     cursor: default;
   }
+  /* 恰好一个文件时，这一格是**可点的**（上游那一支把表头本身做成按钮）：在编辑区打开这个文件 */
+  .dv-changes-head-open { cursor: pointer; border-radius: 4px; }
+  .dv-changes-head-open:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.16)); }
   .dv-changes-title { flex: 1 1 auto; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dv-changes-list {
     list-style: none; margin: 0; padding: 0 10px 6px;
@@ -1138,11 +1149,19 @@
   /* 消息时间 + 操作：最新一条回答常显；历史(非最新)默认隐藏、悬停显示 */
   .msg-meta {
     display: flex; align-items: center; gap: 6px; font-size: 11px;
-    color: var(--vscode-descriptionForeground, #888); opacity: 0; transition: opacity 0.15s;
+    color: var(--vscode-descriptionForeground, #888); transition: opacity 80ms ease;
   }
   /* 发送者消息：时间/复制等右对齐（贴气泡右缘，头像一侧） */
   .msg.user .msg-meta { justify-content: flex-end; }
-  .msg:hover .msg-meta { opacity: 1; }
+  /**
+   * 悬停才出的那一档**只在支持悬停的设备上生效**（上游同款 `@media (hover: hover)` 包裹）：
+   * 触屏设备没有 hover，套上就会让早期用户行的时间/复制**永远看不见** —— 上游的做法是
+   * 「没有 hover 的设备上每一行都常显」。
+   */
+  @media (hover: hover) {
+    .msg:not(.latest) .msg-meta { opacity: 0; }
+    .msg:hover .msg-meta { opacity: 1; }
+  }
   .msg.latest .msg-meta { opacity: 1; }
   /* 用量/用时弹窗打开时保持动作区常显（TurnStats 打开会给所在 .msg 加 meta-open，防闪烁/消失） */
   .msg.meta-open .msg-meta { opacity: 1; }

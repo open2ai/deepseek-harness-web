@@ -1,4 +1,4 @@
-﻿// 输入区切片：文本、图片、附件、@ 引用贴片，以及不经由消息行的宿主直通动作
+// 输入区切片：文本、图片、附件、@ 引用贴片，以及不经由消息行的宿主直通动作
 // （取消 / 复制 / 选文件 / 执行斜杠命令）。不依赖 messages 信号。
 import { signal } from '@preact/signals'
 import type { ChatHost } from '../host'
@@ -49,8 +49,34 @@ export function createComposer(host: ChatHost): ComposerSlice {
     if (text.value === t) text.value = ''
     host.post({ type: 'slashRun', text: t })
   }
+  /**
+   * 复制一段文本。**两条路都要走**（真机 2026-10-07：「复制按钮点了没反应」）：
+   *
+   * ① 先试**浏览器剪贴板**（上游那条路：`navigator.clipboard.writeText`）—— 在 webview 里通常可用，
+   *    且不依赖宿主的往返；拿不到（非安全上下文）或被拒（权限 / iframe 策略）时，
+   * ② **退回宿主**那条（`{type:'copy'}` → VS Code 的剪贴板 API）。
+   *
+   * ⚠️ **不能只留宿主那条**：宿主那条只要有一环失效（webview 未聚焦、宿主侧写入被拒），页面这边
+   * 就完全静默 —— 按钮看着能点、内容却进不了剪贴板。两条并用时，任一条成功即成功。
+   */
   const copy = (c: string): void => {
-    if (c) host.post({ type: 'copy', text: c })
+    if (!c) return
+    const viaHost = (): void => {
+      host.post({ type: 'copy', text: c })
+    }
+    const nav = typeof navigator === 'undefined' ? undefined : (navigator as Navigator)
+    const writeText = nav?.clipboard?.writeText
+    if (typeof writeText !== 'function') {
+      viaHost()
+      return
+    }
+    void writeText.call(nav?.clipboard, c).then(
+      () => undefined,
+      // 浏览器那条被拒（未聚焦 / 权限）：退回宿主，别让用户看到"点了没反应"
+      () => {
+        viaHost()
+      }
+    )
   }
   const pickFile = (): void => {
     host.post({ type: 'pickFile' })

@@ -274,6 +274,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
         chain: [],
         counts: { toolCallCount: 0, messageCount: 0, subagentCount: 0 },
         bodyStarted: false,
+        // 本地占位：整表推行时必须被显式保留（见 `applyHostRows` 的 `localPlaceholder`）
+        local: true,
       })
       idx = messages.value.length - 1
     } else if (prompt) {
@@ -303,7 +305,22 @@ export function createMessages(host: ChatHost): MessagesSlice {
       // 只在**确实换过会话**时丢弃：首次还没有归属，不算「换会话」
       // （否则页面刚打开就发消息的话，第一次下发会把那条乐观行清掉）。
       if (rowsSessionId !== undefined && rowsSessionId !== sessionId) {
-        messages.value = []
+        /**
+         * ⚠️ **本轮正在跑**（`turnActive === true`）时**不整表清空**：
+         *
+         * 换了会话、而新会话这一帧就说"在跑"，几乎只可能是**在新会话里刚发出第一条** ——
+         * 那一刻整表清空会把刚画上的**本地在途行**（乐观提问 + 本地占位回答）一起抹掉，而宿主那两帧
+         * 还没到 → 会话区**空一拍再长回来**。真机现象（2026-10-07）：「新会话首次发送，会话区会闪一下」。
+         *
+         * 只清**宿主行**；本地在途行留给既有的两条回收路（`rpcId` 认领 + 提交台账退休，含 10s 宽限），
+         * 所以不会发生"上一条会话的残行留下把 processing 撑住"那件事。
+         */
+        const midTurn = turnActive === true
+        messages.value = midTurn
+          ? messages.value.filter(
+              (r) => (r.kind === 'user' && r.rpcId !== undefined) || (r.kind === 'assistant' && r.local === true)
+            )
+          : []
         processing.value = false
         runAnchorMs.value = undefined
         // 本地乐观行的台账镜像属于**上一个会话**：换会话必须清
@@ -472,10 +489,23 @@ export function createMessages(host: ChatHost): MessagesSlice {
     const localOnly = messages.value.filter(
       (r) => r.kind === 'approval' || r.kind === 'notice'
     )
+    /**
+     * ⚠️ **本地占位回答行一律不保留**（2026-10-07 回退：宁可"闪一下"，也不能多出一条正文）。
+     *
+     * 曾经为了让"新会话首次发送"不闪，把发送当帧那条本地占位回答行在整表重建时**显式保留**。
+     * 代价太大：那条行在页面侧是"当前未定稿行"，一旦它活过宿主已经代表这一轮的那一帧，
+     * **同名正文就会出现两遍**（真机 2026-10-08：左侧两段「修仙的我写…」，一段带裸 `**`、一段是渲染后的）。
+     * 逐条核对过：宿主建出来的行里**根本没有**第二段那种正文 ⇒ 多出来那条是**页面自己留的**。
+     *
+     * 结论：占位行只活在"发送当帧 → 宿主第一帧"这一拍（宿主一到就由它代表），
+     * 闪一下是可接受的**观感**代价，正文重复是不可接受的**数据**错误。
+     */
+    const localPlaceholder: ChatRow[] = []
     messages.value = [
       ...(openAssistantAt === -1
         ? [...merged, ...retired]
         : [...merged.slice(0, openAssistantAt), ...retired, ...merged.slice(openAssistantAt)]),
+      ...localPlaceholder,
       ...localOnly,
     ]
     // 提交失败的行（`failed`）留在列表里可读，但**不参与「处理中」** —— 那一栏只看下面三条腿。

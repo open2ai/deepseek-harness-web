@@ -2175,6 +2175,20 @@ export function buildRowsIncremental(
                             ...r,
                             process: facts,
                             counts: { toolCallCount, messageCount, subagentCount },
+                            /**
+                             * **终止状态也是回合级的**（真机 2026-10-08 左右对照：同一回合、同一段正文，
+                             * 网页端控制行是「已停止」、插件是「已完成，用时 xx秒 ⌃」）。
+                             *
+                             * `status`（`turn/end.reason.kind`）与消息级 `interrupted` 原先只写在
+                             * `turn/end` 当时那条 **active 行**上 —— 那一行是回合的**末段**；而终局态摘要行
+                             * 由**本回合首行**渲染（页面按可见行算归属）⇒ 被插话/分段切开的回合里，
+                             * 首行那份摘要拿不到终止原因，只能按"正常收官"渲染。
+                             * 上游一个回合只有一个控制节点，天然没有这个形状。
+                             *
+                             * 与下面 `stats` 同一条理由、同一处补齐：**回合级事实要发给本回合每一条行**。
+                             */
+                            ...(kind !== undefined && kind !== 'completed' ? { status: kind } : {}),
+                            ...(interruptedByClose ? { interrupted: true as const } : {}),
                             // **用时也是回合级的**（与 `counts`/`process` 同理）：终局态摘要行由**本回合首行**
                             // 渲染（页面按可见行算归属），而这一行的 stats 只落在**末段**那条行上 —— 不补齐的话，
                             // 被插话切开的回合里那行摘要只剩「已完成」、**丢掉「用时 X」**（真机左右对照：
