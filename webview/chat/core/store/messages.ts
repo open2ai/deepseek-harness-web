@@ -3,6 +3,7 @@
 // 与列表渲染 diff，各自从 1 计数即可。
 import { computed, signal, type Signal } from '@preact/signals'
 import type { ChatHost } from '../host'
+import { isVisibleChatRow } from '../chat-visibility'
 import type { ImageAttachment, AttachmentRef } from '../protocol'
 import { formatMsgClock } from '../format'
 import type { DshStreamRow } from '../../../../src/dsh/rows/types'
@@ -151,7 +152,25 @@ function dropDuplicateUserRows(rows: ChatRow[]): ChatRow[] {
 
 export function createMessages(host: ChatHost): MessagesSlice {
   const messages = signal<ChatRow[]>([])
-  const view = computed<'welcome' | 'chat'>(() => (messages.value.length === 0 ? 'welcome' : 'chat'))
+  /**
+   * 「欢迎页 / 对话区」的判据：**可见行**一条都没有 = 新会话（出欢迎页那三行提示词）。
+   *
+   * 为什么不是 `messages.value.length === 0`（「切换权限、模型之后，新会话区域的
+   * 提示词被清空了」）：切权限走的是 `/permission <preset>` 斜杠命令，会话日志里因此多出
+   * `command/run` + `command/done` 一对事件，宿主照实把它建成一条 `command` 行（见
+   * `src/dsh/rows/build.ts`：上游是在**渲染**时剔 `name === 'permission'`，数据层照旧留着）。
+   * 按**原始行表**长度算：这条**根本不会显示**的命令行就把空会话顶成"有内容" → 欢迎页卸载，
+   * 而 `MessageList` 又把它按可见性滤掉 → 会话区**一片空白**（看起来就是提示词被清空了）。
+   *
+   * 判据因此与渲染层同一份（`core/chat-visibility.ts` 的 `isVisibleChatRow`，也是
+   * `MessageList` 过滤用的那一个）——上游次序本来就是**先过滤可见节点、再算**
+   *（`orderedVisibleChatNodes()` 的 `filter(isVisibleChatNode)`）：一条可见行都没有的会话
+   * 在聊天区**一条行都不占**，那就该是欢迎页。同理受益的还有「只有 system-prompt /
+   * 普通 context 注入」这类空会话。
+   */
+  const view = computed<'welcome' | 'chat'>(() =>
+    messages.value.some((row) => isVisibleChatRow(row)) ? 'chat' : 'welcome'
+  )
   const processing = signal(false)
   /**
    * 「深度求索中，用时 X」的时钟锚点 = **正在跑的那一回合的开始时刻**（宿主下发 `turnStartMs`）。
