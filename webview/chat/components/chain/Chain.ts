@@ -37,7 +37,7 @@ import {
 import { activityGlyph, chevronGlyph } from './ProcessIcons'
 import { ShimmerText } from './ShimmerText'
 import { ProcessGroup } from './ProcessGroup'
-import { chainDetailBody, chainRenderPlan, HIDDEN_UNTIL_FOUND, outerFold, reasoningLive } from './plan'
+import { chainDetailBody, chainProcText, chainRenderPlan, HIDDEN_UNTIL_FOUND, outerFold, reasoningLive } from './plan'
 import { doneStatusText } from '../../core/run-status'
 
 // 两项纯判据的实现在 `./plan`（Chain 与 ProcessGroup 共用同一份）；这里**原样再导出**：
@@ -360,7 +360,7 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
                 outerHidden=${outer.hidden}
                 tail=${index === lastGroupAt ? stoppedPill : null}
                 prefs=${{ compact, grouping: store.stepGrouping?.value, liveProcessDetail: store.liveProcessDetail?.value }} />`
-            : html`<div class="chain-proc-text" key=${entry.item.key}>${entry.item.text}</div>`)}
+            : chainProcText(entry.item))}
       </div>
     </div>`
   }

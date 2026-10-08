@@ -90,12 +90,15 @@
   .chain-done-chev { flex: none; display: inline-flex; align-items: center; }
   .chain-done-chev svg { width: 12px; height: 12px; display: block; }
   /* 非回答步的输出文本（过程文本）：上游是独立的回答节点，插件一回合只开一条行 → 放进过程链显示。
-     用正文色与正常行高，避免它被当成「次要信息」而看不出那是模型当时说的话。 */
+     用正文色与正常行高，避免它被当成「次要信息」而看不出那是模型当时说的话。
+     内容走 **markdown**（`components/chain/plan.ts` 的 `chainProcText`，与回答正文同一渲染器），
+     所以字号/行高取**正文那一档**（13px / 1.6，基础排版在 `chat.css` 的 markdown 段里，
+     那里每条规则都带 `.chain-proc-text`）—— 两端同一段话的排版逐项相同。 */
   .chain-proc-text {
-    white-space: pre-wrap; word-break: break-word;
+    white-space: normal; word-break: break-word;
     padding: 3px 8px; margin: 1px 0;
     color: var(--vscode-foreground, #ddd);
-    font-size: 12px; line-height: 1.5;
+    font-size: 13px; line-height: 1.6;
   }
   /* 思考全文框：**纯文本**（上游 `thinkBody` 同款：pre-wrap + break-word，`**` 等标记原样显示、不解析）。
      展开时标题行 sticky 吸附在顶部，保证折叠开关一直可达（插件便利，上游无此条）。

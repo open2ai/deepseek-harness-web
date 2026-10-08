@@ -388,9 +388,25 @@ export function buildRowsIncremental(
     const stepSettled = new Set<number>();
     /**
      * 本回合被**插话**切开的前段（其正文已显示在自己那条行里）。收尾时这些文本不得再当「过程文本」
-     * 重复进最后一段的链，否则同一条正文会出现两遍。
+     * 重复进链，否则同一条正文会出现两遍。
+     *
+     * ⚠️ **收的是前段"显示过的全部文本"，不只是正文那一份**（2026-10-08 修，真机左右对照）：
+     * 流式期间「先说明、再调工具」会把那句话说**固定到链上**并把正文清空（`settleLiveTextNow`），
+     * 于是切段时 `cur.text` 是空串、真正显示过的那份**在链上** —— 只收 `cur.text` 等于没收，
+     * 后段收尾时 `toChain` 又把这一步的文本补进后段的链，同一段话前后各显示一次。
      */
     let closedSegmentTexts: string[] = [];
+    /**
+     * 这段文本是不是**前段已经显示过**的（正文或链上的过程文本）—— 后段一律不得再插一次。
+     *
+     * 四个调用点各自的**实测**分量（2026-10-08 在 200 个真实会话上按调用/命中计数，见
+     * `tmp/_probe.closedsegment.mjs` 的对照实验）：挡住重复的是**收尾那两处**
+     *（`flushSettledStepText` 与 `toChain`）；关掉它们，13 个被插话切开的回合里 6 个立刻恢复
+     * "同一段话前后各一份"（链上文本项 854 → 963）。另外两处是**次序兜底**：`appendStepTexts`
+     * 那处够不着（上游判据 `stepTextOnChain` 先短路）、`assistant/message` 那处要"插话晚于该步结算"
+     * 才轮到它 —— 都留着，但别把它们当成主力。
+     */
+    const isClosedSegmentText = (text: string): boolean => text !== '' && closedSegmentTexts.includes(text);
     /**
      * 插话把当前回答行**收束**了：后续增量要另开一行 —— 由此得到与上游一致的节点顺序
      * 「前段回答 → 插话 → 后段回答」。没有它，插话只能被塞进整条回答行的前面或后面。
@@ -538,7 +554,7 @@ export function buildRowsIncremental(
         }
         let chain = row.chain;
         for (const text of texts) {
-            if (text === '') {
+            if (text === '' || isClosedSegmentText(text)) {
                 continue;
             }
             // 位置规则见 `textInsertAt`：插在**本步工具之前**（模型先说明、再动手），不越过步边界
@@ -625,7 +641,9 @@ export function buildRowsIncremental(
             const text = stepTexts.get(step) ?? '';
             // 已登记的步即便仍被 `liveTextStep` 指着也算「说完」：它是在步切换时登记的，
             // 那一刻正文已经换到下一步（`liveTextStep` 随后就被赋成新步）。
-            if (stepTextOnChain(step) || text === '') {
+            // 前段显示过的文本（`isClosedSegmentText`）同样跳过：本行不是显示它的那一段，
+            // 补插进来只会在后段再显示一遍同一段话（行模型里"补插"与 `toChain` 是两条来路，都要挡）。
+            if (stepTextOnChain(step) || text === '' || isClosedSegmentText(text)) {
                 continue;
             }
             const first = stepFirstChainIdx.get(step);
@@ -1571,6 +1589,14 @@ export function buildRowsIncremental(
                     if (cur.text !== '') {
                         closedSegmentTexts.push(cur.text);
                     }
+                    // 前段**链上已经显示过**的过程文本同样要记下来：那一步的文本被
+                    // `settleLiveTextNow` 固定到链上时正文已被清空，只收 `cur.text` 会漏掉它，
+                    // 后段收尾就会把同一段话再补进自己的链（真机：前后两个分组框里各显示一次）。
+                    for (const item of cur.chain) {
+                        if (item.kind === 'text' && item.text !== '') {
+                            closedSegmentTexts.push(item.text);
+                        }
+                    }
                     segmentClosed = true;
                     // 进行中的尝试属于刚收束的那一段：放弃它的回滚基线一并作废
                     //（留着会把前段的正文写进后段行；宁可少撤一次半截，也不串段）
@@ -1739,7 +1765,7 @@ export function buildRowsIncremental(
                 noteStepText(msgStep, text);
                 // 已被插话切开的前段行已经显示过这条文本：不再写进当前（后段）的正文，否则内容串段
                 // （正常事件顺序下前段的结算先到、插话后到，这里是兜底）
-                if (!closedSegmentTexts.includes(text)) {
+                if (!isClosedSegmentText(text)) {
                     replaceActive({ ...row, text });
                 }
             }
@@ -2037,7 +2063,7 @@ export function buildRowsIncremental(
                     continue;
                 }
                 // 被插话切开的前段：那条行已经显示了这段正文，不能再当过程文本重复进链（否则同一段出现两遍）
-                if (closedSegmentTexts.includes(t)) {
+                if (isClosedSegmentText(t)) {
                     continue;
                 }
                 // 流式期间已经把它固定到链上了（**按 key 核实**，不是查"插过没有"的标记）：不再补一次
@@ -2061,11 +2087,22 @@ export function buildRowsIncremental(
              *
              * **同时摘掉 `appendedStepText` 里那条记录** —— 它记的是"这一步的文本还在链上"的证据，
              * 取走之后就不再成立了；留着会让后面误以为"已在链上"而跳过补插（就是「文字整段消失」那个坑）。
+             *
+             * ⚠️ **取走必须就地写回行**（2026-10-08 修，真机左右对照：停下来的回合同一段正文出现两遍）：
+             * 这里改的只是**局部变量** `chain`，而下面还有两处**重新从行上取链**
+             *（`toChain` 之后的 `activeRow()?.chain` 与 `reorderChainByStep`）—— 取回的仍是**带回答文本**的
+             * 那条链，于是这一步白做、`replaceActive` 又把重复的那份写回去。同一段文字在
+             * 「链里（`.chain-proc-text`）+ 正文（`.md`）」各一份 —— 两处都渲染 markdown（2026-10-08 起），
+             * 所以看着就是**同一段粗体文字连着出现两遍**。
+             * 同时把该步从 `settledStepText` 里撤掉：它已经归正文，留着会让 `flushSettledStepText`
+             * 按"该步有工具 → 可以补插"把这段文本**塞回链里**（同一个重复的另一条来路）。
              */
             if (answerText !== '' && answerStep !== undefined) {
                 const at = chain.findIndex((c) => c.kind === 'text' && c.step === answerStep && c.text === answerText);
                 if (at !== -1) {
                     chain = chain.slice(0, at).concat(chain.slice(at + 1));
+                    replaceActive({ ...(activeRow() ?? row), chain });
+                    settledStepText.delete(answerStep);
                     // `appendedStepText` 是"这一步的文本还在链上"的**证据**，取走之后就不再成立。
                     // 不留悬空的旧 key：那条 key 已经不指向任何链项，后面 `stepTextOnChain` 会判成"不在链上"
                     // 而补插一次（重复），或者反过来误判成"在链上"而漏插（整段消失）。重核一遍最稳。

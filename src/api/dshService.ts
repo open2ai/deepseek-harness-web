@@ -1293,7 +1293,7 @@ export class DshService {
         }
         this.legacyHostReported = true;
         console.warn(`[dsh] 当前 dsh 版本过旧：${detail}`);
-        void vscode.window.showWarningMessage('dsh 版本过低，请升级至 dsh-0.1.7-rc.2 及以上后重启服务。');
+        void vscode.window.showWarningMessage('dsh 版本不匹配：请参考插件适配的 dsh 版本，升级 dsh 后重启服务。');
     }
 
     /** 当前会话的队列整表（页面就绪、动作回帧后补发）。 */

@@ -7,6 +7,7 @@ import { html } from 'htm/preact'
 import type { Ref } from 'preact'
 import type { ChatStore, DshTurnProcessItem } from '../../core/store/chat'
 import { isVisibleContextItem } from '../../core/chat-visibility'
+import { renderMd } from '../../core/markdown'
 import type { ScrollEdges } from '../../core/scroll-edges'
 import { ContextInjectionRow } from '../message/ContextInjectionRow'
 import { ReasoningRow } from './ReasoningRow'
@@ -62,6 +63,28 @@ export function chainRenderPlan<T extends DshTurnProcessItem>(
 }
 
 /**
+ * 链上说明文字那一项的元素（`.chain-proc-text`）—— **整回合路径与按片路径共用这一份**。
+ *
+ * 内容走 **markdown**（`renderMd`，与回答正文同一份实现）：上游链上这些文字是 `AssistantBlock`
+ * 里的 **text 块**，在 `AssistantMarkdown` 里一律交给 `MarkdownText` 渲染（连 `groupPart === 'reasoning'`
+ * 的那一支也一样，只有 **reasoning 块**才走 `ReasoningRow` 的纯文本体）→ 网页端 `**加粗**` 出粗体，
+ * 而插件此前把整段当纯文本插进 DOM，真机现象是**同一段话在网页端是粗体、在插件里 `**` 原样显示**
+ *（2026-10-08 真机左右对照）。所以这里必须解析，**不能**照思考行那条"上游是纯文本"的口径办。
+ *
+ * 用整段渲染而不是流式分块（`MdStream`）：链上文字只在**这一步说完**时落到链上，之后不再增长
+ *（`settleLiveTextNow` 一路），没有"每帧重解"的问题。
+ *
+ * ⚠️ 思考行的展开体**不归这里**：上游 `thinkBody` 就是纯文本（`**` 原样显示），
+ * 见 `ReasoningRow`（守卫钉在 `tmp/_reasoning.plain.dom.test.mjs`）。
+ *
+ * @param item - 链上的说明文字项（`kind === 'text'`）。
+ */
+export function chainProcText(item: { key: number; text: string }): unknown {
+  return html`<div class="chain-proc-text" key=${item.key}
+    dangerouslySetInnerHTML=${{ __html: renderMd(item.text) }}></div>`
+}
+
+/**
  * 把一个链项渲染成 vnode（`null` = 该项按可见性规则不显示）。
  *
  * @param item - 链上的一项。
@@ -91,8 +114,9 @@ export function chainItemNode(
   }
   if (item.kind === 'text') {
     // 非回答步的说明文字（上游那些是**独立的回答节点**，永远可见）：折叠时由 `chainRenderPlan`
-    // 保留在明细里（与工具交错的原位），片间边界也用它渲染同一个元素/样式。
-    return html`<div class="chain-proc-text" key=${item.key}>${item.text}</div>`
+    // 保留在明细里（与工具交错的原位），片间边界也用它渲染同一个元素/样式。内容按 markdown 解析，
+    // 判据与理由见 `chainProcText`。
+    return chainProcText(item)
   }
   return html`<${ToolRow} key=${item.key} item=${item} store=${ctx.store} />`
 }

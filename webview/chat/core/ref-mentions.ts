@@ -31,14 +31,19 @@ const QUOTED_RE = /^@"([^"\n]+?)"/
  */
 const QUOTED_OPEN_DIR_RE = /^@"([^"\n]*\/)(?=\n|$)/
 /**
- * 普通 `@rel/path`（含目录：以 `/` 结尾）。
+ * 普通 `@rel/path`（含目录：以 `/` 结尾；**也含绝对路径**，Windows 盘符 `e:/…` 与 `/…` 都算）。
  *
  * 排除「不可能出现在路径里、却常紧跟在引用后面」的标点（中英文句读与括号引号）—— 否则
  * `@src/a.ts，改一下` 会把中文正文整段吞进 token（中文之间通常没有空格，不排除就切不开）。
  * `.` 必须保留（`a.ts` 就靠它）。
+ *
+ * ⚠️ **`:` 必须放行**：上游的 `@`-token 边界是
+ * **空白**（`activeAtToken` 取 `[^\s]*`），盘符里的冒号是**路径正文**；插件为了处理中文标点改成
+ * "排除若干标点"，早期把 `:` 也列了进去 → 绝对路径 `@E:\…\xxx.md` 被切成 `@E`，贴片短名成了 `E`。
+ * 句末的 `:`/`;` 由 `TRAILING` 剥掉，所以放行不会把句读粘进 token。
  */
-const PLAIN_RE = /^@([^\s@,;:!?()\[\]{}"'<>|*，。；：！？、）】》」』]+)/
-/** 句末句读（`@src/a.ts.` 里那个句号属于正文）：剥到 token 末尾为止。 */
+const PLAIN_RE = /^@([^\s@,;!?()\[\]{}"'<>|*，。；！？、）】》」』]+)/
+/** 句末句读（`@src/a.ts.` 里那个句号属于正文）：剥到 token 末尾为止（`:`/`;` 也在此列，见 `PLAIN_RE`）。 */
 const TRAILING = /[,.;:!?，。；：！？、）】》」』]+$/
 
 /** 路径末段（去掉尾部 `/` 后取最后一段，`/` 与 `\\` 都算分隔符）；空则回退原串。 */
@@ -46,6 +51,18 @@ function baseName(p: string): string {
   const trimmed = p.replace(/[\\/]+$/, '')
   const seg = trimmed.split(/[\\/]/).pop() ?? ''
   return seg === '' ? p : seg
+}
+
+/**
+ * 两种引号态 + 普通路径**共用**的收尾：剥掉句末句读再取短名。
+ *
+ * 引号态也要剥：`@"a b.txt"，然后` 里那个中文逗号在引号**之外**、不会进 `QUOTED_RE`，
+ * 但 `@"a b.txt"` 后面紧跟 `:` 这种"引号内是路径、句读在引号外"的形状会由正则边界兜住；
+ * 这里统一走一遍是为了让**短名与 token 用的是同一份清洗后的路径**，不出现"token 带句读、短名不带"。
+ */
+function mentionOf(raw: string): { token: string; label: string; kind: RefMention['kind'] } {
+  const path = raw.replace(TRAILING, '')
+  return { token: `@${path}`, label: baseName(path), kind: path.endsWith('/') ? 'directory' : 'file' }
 }
 
 /**
@@ -76,22 +93,20 @@ export function splitRefMentions(text: string): RefSegment[] {
       }
       const quoted = QUOTED_RE.exec(rest) ?? QUOTED_OPEN_DIR_RE.exec(rest)
       if (quoted !== null) {
-        const p = quoted[1] as string
         flush()
-        out.push({ mention: { token: quoted[0], label: baseName(p), kind: p.endsWith('/') ? 'directory' : 'file' } })
+        const m = mentionOf(quoted[1] as string)
+        out.push({ mention: { ...m, token: quoted[0] } })
         i += quoted[0].length
         continue
       }
       const plain = PLAIN_RE.exec(rest)
       if (plain !== null) {
         // 去掉紧跟的句读：`@src/a.ts，` 里的逗号是正文，不该进 token（进了就与快照对不上、短名也变脏）
-        const p = plain[1] as string
-        const path = p.replace(TRAILING, '')
-        if (path !== '') {
-          const token = `@${path}`
+        const m = mentionOf(plain[1] as string)
+        if (m.label !== '') {
           flush()
-          out.push({ mention: { token, label: baseName(path), kind: path.endsWith('/') ? 'directory' : 'file' } })
-          i += token.length
+          out.push({ mention: m })
+          i += m.token.length
           continue
         }
       }
