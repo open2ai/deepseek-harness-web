@@ -15,8 +15,13 @@ import { MdStream, renderMd } from '../../core/markdown'
  * markdown 渲染体。
  * @param text - markdown 原文
  * @param streaming - 是否还在流式（走块级增量；定稿走整段一次，可自愈跨块的参考式链接/脚注）
+ *
+ * 代码块工具栏（复制 / 换行开关）的交互**不在这里** —— 它是 `document` 级的一次委托
+ *（`core/code-toolbar.ts`，在 `chat.ts` 装配）。原因：`renderMd()` 有 5 个调用点，
+ * 各渲染点自己挂会漏（历史实现就只在正文挂了，另外 4 处的按钮点了没反应）。
  */
 export function MessageBody({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const streamRef = useRef<MdStream | null>(null)
   const streamed = useMemo(() => {
     if (!streaming) return null
@@ -26,9 +31,9 @@ export function MessageBody({ text, streaming = false }: { text: string; streami
   // 定稿：整段渲染一次（幂等，只在 text 变时重算）
   const settled = useMemo(() => (streaming ? null : renderMd(text)), [text, streaming])
   if (settled !== null) {
-    return html`<div class="md"><div dangerouslySetInnerHTML=${{ __html: settled }}></div></div>`
+    return html`<div class="md" ref=${rootRef}><div dangerouslySetInnerHTML=${{ __html: settled }}></div></div>`
   }
-  return html`<div class="md">
+  return html`<div class="md" ref=${rootRef}>
     ${(streamed ?? []).map((b) => html`<div key=${b.key} dangerouslySetInnerHTML=${{ __html: b.html }}></div>`)}
   </div>`
 }

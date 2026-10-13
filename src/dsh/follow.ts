@@ -2,7 +2,7 @@
 //
 // 与「一轮一条」的 waitTurn（stream.ts）的区别：它**不随本轮 turn/end 关闭** ——
 //   停止之后服务端补发的补记事件（如工具的取消结果）、以及别处（浏览器 / 另一面板）
-//   驱动同一会话的事件，都靠它收到。见 docs/design/08 §8「事件层专项分析」。
+//   驱动同一会话的事件，都靠它收到。
 import { openMuxStream } from './api';
 import { HISTORY_PAGE, snapshotRecordsToEvents, toRawEvent, type RawEvent } from './session';
 

@@ -7,10 +7,12 @@ import {
   compactionExpandable,
   compactionSummaryText,
 } from '../../core/compaction-copy'
-import type { ChatRow } from '../../core/store/types'
+import type { ChatStore, ChatRow } from '../../core/store/types'
 import { MessageBody } from './MessageBody'
 
-export function CompactionRow({ row }: { row: Extract<ChatRow, { kind: 'compaction' }> }) {
+/** `store` 仍在 props 里（调用方统一传），但本行不再需要它：
+ *  代码块工具栏的复制走 `document` 级委托（`core/code-toolbar.ts`），不再逐组件传 `copy`。 */
+export function CompactionRow({ row }: { row: Extract<ChatRow, { kind: 'compaction' }>; store: ChatStore }) {
   const [expanded, setExpanded] = useState(false)
   const expandable = compactionExpandable(row)
   const open = expandable && expanded

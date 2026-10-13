@@ -40,7 +40,7 @@ export interface DshChatPrefs {
      * · `settledReasoningPreview` —— 已定稿的思考行**在标题旁预览首行**（`compact` 关，其余三档开）；
      * · `liveProcessDetail` —— 进行中显示过程细节（`compact`/`verbose` 关，`standard`/`detailed` 开）；
      * · `stepGrouping` —— 过程分组头的覆盖范围（`compact`/`standard` = 所有回合、`detailed` = 仅已关闭回合、
-     *   `verbose` = 不分组）。插件已按它实现「进行中回合要不要出分组头」（见 `webview/chat/core/process-fold.ts`）。
+     * `verbose` = 不分组）。插件已按它实现「进行中回合要不要出分组头」。
      */
     readonly settledReasoningPreview: boolean;
     readonly liveProcessDetail: boolean;
@@ -150,7 +150,7 @@ function userOf(namespaces: readonly DshSettingsNamespace[], ns: string): Record
  * | verbose  | false | none      | false | true  |
  *
  * 插件已对齐 `foldCompletedTurns`（→ `transcriptView`）、后两列（→ 思考行预览/进行中细节）与
- * `stepGrouping`（→ 分组头覆盖范围，见 `stepGroupingOf` 与 `webview/chat/core/process-fold.ts`）；
+ * `stepGrouping`（→ 分组头覆盖范围，见 `stepGroupingOf`）；
  * 四档因此各有可辨别的行为，`standard` 与 `detailed` 的差别在**进行中回合**是否出分组头。
  */
 function policyOf(raw: unknown): { settledReasoningPreview: boolean; liveProcessDetail: boolean } {

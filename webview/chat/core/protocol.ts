@@ -176,7 +176,7 @@ export type HostToViewMessage =
        * `{}`（没有当前目标，或还没读到 —— 这两种在 wire 上同形，页面按投影的阶段再分）。
        *
        * 它**不是投影**（那个值从不落盘、故意不放进投影），另有一条来路（见宿主
-       * `src/dsh/goal-activation.ts`）。跟投影**同一帧**下发是有意的：页面要拿它跟投影里的
+       * ）。跟投影**同一帧**下发是有意的：页面要拿它跟投影里的
        * 活跃目标按 `(id, revision)` 对账，对不上就当作"还不知道" —— 分两帧到就会错配。
        */
       goalActivation?: { id?: string; revision?: number; activation?: 'armed' | 'disarmed' }
@@ -221,13 +221,47 @@ export type HostToViewMessage =
       /** 上游四档策略门：过程分组头的覆盖范围（`collapsed` 所有回合 / `history` 仅已关闭回合 / `none` 不分组） */
       stepGrouping?: 'collapsed' | 'history' | 'none'
     }
-  // 宿主下发的「行」（阶段 4 切渲染源后页面据此渲染；开关关闭时不下发，见 docs/design/08 §11）。
-  // 形状为宿主侧的行模型（`src/dsh/rows/types.ts`），页面消费时做一次映射。
+  // 保结构事件帧（节点模型的**唯一输入**）：宿主把窗口原文下发，页面据此建节点模型。
+  | {
+      type: 'chatEvents'
+      sessionId?: string
+      turnActive?: boolean
+      /** 保结构事件原文（DshStreamEvent[]）。 */
+      events?: unknown[]
+      /**
+       * **窗口被整份替换过**的标记（2026-10-12 加，配合页面侧的"归一化缓存 + 断点续折"）。
+       *
+       * 为什么需要：页面侧为了不每帧重折 130 万条事件，缓存了"归一化结果 + 折叠断点"，
+       * 而它的失效判据只能看**头 seq 与长度**。宿主 `HistoryWindow.replace()`（重开订阅的首帧快照、
+       * ）换来的新快照**可能同头同长而内容不同**（压缩落定、消息替换）——
+       * 那种情况页面看不出来。所以由宿主在**每次 replace 时**清掉这个标记，
+       * 让页面显式知道"这份缓存不能再信"。
+       *
+       * 缺省（`undefined`）语义 = **没换过**：`append` / `prepend` 都只增不减，缓存可以续用。
+       */
+      replaced?: boolean
+      /** 与 `rows` 帧同款的子会话事实（普通会话不带）。 */
+      subagent?: {
+        parentSessionId: string
+        mode: string
+        parentAvailable?: boolean
+        factsReady: boolean
+      }
+      historyHasMore?: boolean
+      historyLoading?: boolean
+      historyEvents?: number
+      /** 整表语义：`null` = 没有失败。 */
+      sessionOpenError?: { message: string; code?: string } | null
+      /** 已取回的回合改动摘要（`seq` → 摘要对象）。 */
+      changesSummary?: Record<string, unknown>
+    }
+  // 宿主下发的「行」（切渲染源后页面据此渲染；开关关闭时不下发）。
+  // 形状为宿主侧的行模型，页面消费时做一次映射。
   | {
       type: 'rows'
       rows?: unknown[]
       /**
-       * **本帧变了/新增的行**（§3.3 的"只发变动的行"）：与 `rowKeys` 一起给。
+       * **本帧变了/新增的行**（"只发变动的行"）：与 `rowKeys` 一起给。
        * 页面按 `key` 覆盖缓存，再按 `rowsKeys`（原文 `rowKeys`）重排 —— 结果与整表逐字节等价。
        */
       rowDelta?: unknown[]
@@ -317,8 +351,6 @@ export type ViewToHostMessage =
   | { type: 'chatFork'; atSeq?: number }
   | { type: 'copy'; text: string }
   | { type: 'approvalResponse'; approvalId: string; allow: boolean }
-  // 消息反馈（👍/👎）：list = 读全表（首次交互时懒加载）；rate = 写入/替换；retract = 撤回。
-  // ifVersion 是**观察到的现值版本**（null = 首次评价），服务端据此做 CAS。
   | {
       type: 'feedback'
       op: 'list' | 'rate' | 'retract'
@@ -345,6 +377,28 @@ export type ViewToHostMessage =
   | { type: 'attachmentReq'; attachmentId: string }
   // 在编辑器区打开一个文件（相对路径由宿主按 cwd 解析）；line 为 1 起的行号
   | { type: 'openFile'; path: string; line?: number; cwd?: string }
+  /**
+   * **按附件 id 在编辑区打开一个图片附件**。
+   *
+   * 为什么单独一条：用户发出去的图片在会话里只有**内容寻址的 `attachmentId`**
+   *（事件里没有本地路径），而 `openFile` 要的是路径。宿主收到后按 id 取字节、落到临时文件、
+   * 再交给 VS Code 的图片预览打开（`vscode.open`，见 `openFileInEditor` 的图片分流）。
+   *
+   * 与上游同形：上游图片预览也是"点开看全尺寸"（`MessageImage.tsx` 的 `ImageLightbox`），
+   * 插件把"打开"的落点放在**编辑器区**（在 VS Code 里更顺手，与行摘要那条同口径）。
+   */
+  | { type: 'openAttachment'; attachmentId: string; name?: string }
+  /**
+   * **把一段还没有附件 id 的字节在编辑区打开**（2026-10-12 新增）。
+   *
+   * 谁需要：**刚发出去、还没进日志的图片**（本地乐观行）。那条行上的图只有粘贴/拖进来的 base64
+   *（`row.images[].data`），既没有本地路径、也没有 `attachmentId`，于是 `openFile` 与 `openAttachment`
+   * 两条都走不通。宿主收到后按同一套收尾落盘（`~/.dsh/attachments-view/`）再用编辑器打开。
+   *
+   * ⚠️ 一旦该消息进了日志（收到宿主行），渲染就换成 `imageRefs` 那条路（带 id）——
+   * 这条只是"日志到达之前"的过渡路径，别在别处复用。
+   */
+  | { type: 'openAttachmentBytes'; data: string; mediaType?: string; name?: string }
   // 文件上送：webview 只给路径，字节由宿主读并上传；key 由 webview 生成（多文件并发对得上）
   | { type: 'fileUploadReq'; key: string; path: string }
   // 自绘标题栏专属

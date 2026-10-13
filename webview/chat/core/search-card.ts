@@ -98,7 +98,10 @@ export function searchCardModel(item: {
   output?: string
   status: string
   meta?: unknown
+  parentCallId?: string
 }): SearchCard | null {
+  // 嵌套调用（上游）：退让到通用卡
+  if (item.parentCallId !== undefined) return null
   if (item.status !== 'ok') return null
   const args = parseArgs(item.argsRaw)
   if (args === null) return null

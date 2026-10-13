@@ -8,7 +8,7 @@ import { html } from 'htm/preact'
 import { useEffect, useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
 import { searchLabels, searchCopyText, searchMatchCount, type SearchCard as SearchCardData } from '../../core/search-card'
-import { headTail, foldLabels } from '../../core/fold'
+import { CHAT_SEARCH_MAX_LINES, FOLD_ARIA, headTail, foldLabels } from '../../core/fold'
 
 /** 扁平化后的展示行：文件头 / 匹配行 / 路径行。 */
 type Row =
@@ -44,7 +44,7 @@ export function SearchCard({ card, store }: { card: SearchCardData; store: ChatS
       ? labels.matchesSummary(shown, card.total, files, card.truncated)
       : labels.pathsSummary(shown, card.total, card.truncated)
   const empty = shown === 0
-  const { head, tail, hidden, capped } = headTail(rows, undefined, expanded)
+  const { head, tail, hidden, capped } = headTail(rows, CHAT_SEARCH_MAX_LINES, expanded)
 
   const copy = (): void => {
     store.copy(searchCopyText(card))
@@ -81,7 +81,7 @@ export function SearchCard({ card, store }: { card: SearchCardData; store: ChatS
       : html`<div class="search-body">
           ${head.map((r, i) => rowNode(r, String(i)))}
           ${capped
-            ? html`<button type="button" class="search-expand" onClick=${toggleExpand} aria-expanded=${expanded}>
+            ? html`<button type="button" class="search-expand" onClick=${toggleExpand} aria-expanded=${expanded} aria-label=${expanded ? FOLD_ARIA.search.collapse : FOLD_ARIA.search.expand(hidden)}>
                 ${expanded ? fold.collapse : fold.expandRest(hidden)}
               </button>`
             : null}

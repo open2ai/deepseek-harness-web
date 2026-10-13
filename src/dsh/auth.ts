@@ -12,7 +12,7 @@
 //   1. RPC 信封：POST /api/<method>，body { type:'client-request', rpcId, method, payload }，
 //      应答 { type:'server-response', rpcId, result:{ ok, value|error } }。
 //   2. 方法名：namespace/method（斜杠）。本文件内点号只是“别名”，经 wireMethodName() 换算；
-//      上游 @Remote 别名表（哪些方法走斜杠端点）见 docs/design/04 的方法契约表。
+//      上游 @Remote 别名表（点号别名 → 斜杠端点）见 `ARGS_KEY_BY_METHOD` 与调用点。
 //   3. 载荷：payload:{ args:{ <形参名>: 请求对象 } }；形参名默认 request，例外见 ARGS_KEY_BY_METHOD。
 //   4. 鉴权：/api 与 WS 都需浏览器鉴权 cookie（authUrl?token → dsh-auth-*），旧回环信任已取消。
 //   5. 流式 remote（session/follow、workspace/follow、session/control、$events）只能走 WebSocket

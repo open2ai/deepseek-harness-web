@@ -11,11 +11,27 @@ import type { DshTurnProcessItem } from './store/types'
 import { processDisclosure } from './process-fold'
 import {
     closedProcessTitle,
+    closedTitleOfCounts,
     headActivity,
     liveProcessDetailOf,
     liveProcessTitle,
+    liveTitleOfSummary,
     type ProcessActivity,
 } from './step-process-title'
+
+/**
+ * **这一片自己的收口态**（上游 `ChatGroupSeat` 的 `data.closed` = 片收口 || 回合关闭）。
+ *
+ * 判据只此一份：`processGroupView` 与片组件（展开预定位、标题微光）都从它取，
+ * 免得两处各写一遍再漂开。片事实里没有 `closed` 时（旧宿主 / 无片形态）退回回合级 `done`。
+ *
+ * @param facts - 片事实（`DshRowGroupFacts`；可能没有 `closed`）。
+ * @param done - 回合是否已关闭（缺省口径）。
+ */
+export function sliceClosedOf(facts: { closed?: unknown } | undefined, done: boolean): boolean {
+    const closed = facts?.closed
+    return typeof closed === 'boolean' ? closed : done
+}
 
 export interface ProcessGroupViewInput {
     /** 本回合是否已定稿（上游 `turnClosed`） */
@@ -40,6 +56,13 @@ export interface ProcessGroupViewInput {
 }
 
 export interface ProcessGroupView {
+    /**
+     * **这一片自己收口了没**（上游 `data.closed` = 组收口 || 回合关闭）。
+     *
+     * 组件侧也要它：上游的标题稳定延迟只在**未收口**时生效（`useStableLiveProcessTitle({...}, !data.closed)`），
+     * 收口那一刻标题要**立刻**换成已收口文案。
+     */
+    closed: boolean
     /** 有没有折叠头（每片各判一次） */
     folded: boolean
     /** 明细是否可见 */
@@ -56,10 +79,32 @@ export interface ProcessGroupView {
  */
 export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView {
     const { items, done } = input
-    const label = done ? closedProcessTitle(items) : liveProcessTitle(items)
+    /**
+     * ⚠️ **看的是这一片自己的 `closed`，不是回合的 `done`**（上游 `ChatGroupSeat`：
+     * `data.closed ? processTitle(...) : ...live...`，而 `data.closed` = 组收口 || 回合关闭）。
+     *
+     * 真机 2026-10-10（左右对照、同一会话、回合还在跑）：网页端那一行是**已收口**的片 →「向用户提出了问题」，
+     * 插件显示「正在分析请求」。成因就是这里用了回合级 `done`（false，回合还在跑），于是拿**进行时**文案
+     * 去渲染一个**已经收口**的片（它没有运行中的工具 → 落到 `thinking` 兜底）。
+     * 片事实里没有 `closed` 时（旧宿主 / 无片形态）退回回合级 `done`。
+     */
+    const closed = sliceClosedOf(input.facts as { closed?: unknown } | undefined, done)
+    /**
+     * **这一片自己的活动汇总**（上游 `data.summary`）—— 片头的 label/detail/icon 全都该读它
+     *（`ChatGroupSeat.tsx:103/108/113`）。它与「按链项现算」那份的差别是**口径**：
+     * 运行中那个按 **time** 取、计数**递归 `subCalls`**、没有运行中工具时退回**运行中那一步**的思考。
+     * 片事实里没有它（老宿主 / 无片形态）才退回链序那份。
+     */
+    const summary = (input.facts as { summary?: { counts: Array<{ kind: string; count: number }>; running?: string; runningDetail?: string; preparing?: boolean } } | undefined)?.summary
+    const label = summary === undefined
+        ? (closed ? closedProcessTitle(items) : liveProcessTitle(items))
+        : (closed ? closedTitleOfCounts(summary.counts) : liveTitleOfSummary(summary))
     const liveDetail =
-        !done && input.liveProcessDetail !== false ? liveProcessDetailOf(items) : ''
+        !closed && input.liveProcessDetail !== false
+            ? (summary === undefined ? liveProcessDetailOf(items) : (summary.runningDetail ?? ''))
+            : ''
     return {
+        closed,
         folded: processDisclosure({
             done,
             process: input.facts,
@@ -68,9 +113,6 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             open: input.open,
             // 每片自带头（上游"每个分组 seat 一个头"）
             ownsHead: true,
-            // 这一片自己的 seat：窗口门里"有回答锚点"那一条**只属于回合级**（分组头开合的是这一片的明细，
-            // 不需要锚点）—— 少了它，没有回答步的那一片（停下来的回合只留一条思考）分组头不出现
-            groupSeat: true,
             turnStarted: input.turnStarted,
         }).head,
         detail: processDisclosure({
@@ -80,10 +122,12 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             grouping: input.grouping,
             open: input.open,
             ownsHead: true,
-            groupSeat: true,
             turnStarted: input.turnStarted,
         }).detail,
         title: liveDetail === '' ? label : `${label} · ${liveDetail}`,
-        activity: headActivity(items, done),
+        // 上游 `data.closed ? summary.counts[0]?.kind ?? 'thinking' : live.activity`
+        activity: summary === undefined
+            ? headActivity(items, closed)
+            : ((closed ? summary.counts[0]?.kind : summary.running) as ProcessActivity | undefined) ?? 'thinking',
     }
 }

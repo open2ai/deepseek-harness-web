@@ -87,7 +87,9 @@ function webSources(value: unknown): WebSource[] | null {
  * 从 tool item 派生 web 卡；仅定稿(ok)且 meta 合法时返回，否则 null。
  * @param item - tool item（name/argsRaw/meta/status）。
  */
-export function webCardModel(item: { name: string; argsRaw?: string; meta?: unknown; status: string }): WebCard | null {
+export function webCardModel(item: { name: string; argsRaw?: string; meta?: unknown; status: string; parentCallId?: string }): WebCard | null {
+  // 嵌套调用（上游）：退让到通用卡
+  if (item.parentCallId !== undefined) return null
   if (item.status !== 'ok') return null
   const tool = validWebTool(item.name)
   if (tool === null) return null

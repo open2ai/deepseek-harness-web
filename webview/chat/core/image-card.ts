@@ -123,7 +123,7 @@ function fullyRendered(content: unknown[]): boolean {
  * @returns 图片卡；形状不符返回 null
  */
 export function imageCardModel(
-  item: { name: string; status: string; argsRaw?: string; meta?: unknown; blocks?: unknown },
+  item: { name: string; status: string; argsRaw?: string; meta?: unknown; blocks?: unknown; parentCallId?: string },
   cwd?: string
 ): ImageCard | null {
   if (item.status !== 'ok') return null
@@ -131,7 +131,10 @@ export function imageCardModel(
   const args = parseArgs(item.argsRaw)
   const filePath = args?.['file_path']
   if (typeof filePath !== 'string' || filePath.trim() === '') return null
-  const path = imageMeta(item.meta)?.path
+  // 展示路径：根调用落在持久化的 `meta.path` 上；**嵌套调用不持久化 meta**，
+  // 回退用它自己的 `file_path` 参数（上游 的 `metaPath ?? (parentCallId ? filePath : null)`）。
+  // 根调用 meta 坏形/缺失时**不**回退 —— 那时宁可退让到通用卡，也不拿模型手写的路径当已解析路径。
+  const path = imageMeta(item.meta)?.path ?? (item.parentCallId !== undefined ? filePath : undefined)
   if (path === undefined) return null
   const content = Array.isArray(item.blocks) ? (item.blocks as unknown[]) : null
   if (content === null) return null

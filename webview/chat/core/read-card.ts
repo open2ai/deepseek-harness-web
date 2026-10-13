@@ -12,7 +12,7 @@ export interface ReadLine {
 }
 
 export interface ReadCard {
-  /** 相对化后的文件路径（无 home 数据，不做 `~` 缩写——见 docs/design/09） */
+  /** 相对化后的文件路径（无 home 数据，不做 `~` 缩写） */
   label: string
   lines: ReadLine[]
   totalLines: number
@@ -76,9 +76,11 @@ function readMeta(meta: unknown): { path: string; lines: ReadLine[]; totalLines:
  * `!('kind' in block) || isError → null` 同口径）。
  */
 export function readCardModel(
-  item: { name: string; argsRaw?: string; output?: string; status: string; meta?: unknown },
+  item: { name: string; argsRaw?: string; output?: string; status: string; meta?: unknown; parentCallId?: string },
   sessionCwd?: string,
 ): ReadCard | null {
+  // 嵌套调用（上游）：`parentCallId !== undefined` → 退让到通用卡
+  if (item.parentCallId !== undefined) return null
   if (item.status !== 'ok') return null
   const args = parseArgs(item.argsRaw)
   if (args === null) return null

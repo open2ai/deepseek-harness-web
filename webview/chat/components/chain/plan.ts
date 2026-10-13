@@ -5,11 +5,12 @@
 // 迟早分叉 —— 这里只搬不复制。
 import { html } from 'htm/preact'
 import type { Ref } from 'preact'
-import type { ChatStore, DshTurnProcessItem } from '../../core/store/chat'
+import type { ChatRow, ChatStore, DshTurnProcessItem } from '../../core/store/chat'
 import { isVisibleContextItem } from '../../core/chat-visibility'
 import { renderMd } from '../../core/markdown'
 import type { ScrollEdges } from '../../core/scroll-edges'
 import { ContextInjectionRow } from '../message/ContextInjectionRow'
+import { CommandRow } from '../message/CommandRow'
 import { ReasoningRow } from './ReasoningRow'
 import { ToolRow } from './ToolRow'
 
@@ -19,8 +20,7 @@ export type ChainLike = readonly DshTurnProcessItem[]
 /**
  * 思考行是否处于「活跃」（收起摘要跟随最新一行）。
  *
- * **判据不能用 `row.bodyStarted`**：切到「宿主下发行」这条渲染通路之后，页面侧的行由
- * `host-rows.ts` 映射而来，那里**恒填 `bodyStarted: true`**（旧指令通路退役时的遗留），
+ * **判据不能用 `row.bodyStarted`**：页面侧的行由节点模型映射而来，映射层**恒填 `bodyStarted: true`**，
  * 用它算 live 会永远为假 —— 表现为思考行的收起摘要不再跟随最新一行【2026-09-19 修】。
  * 真正的事实是「回合还没结束 + 这是最后一条思考」。
  */
@@ -118,6 +118,14 @@ export function chainItemNode(
     // 判据与理由见 `chainProcText`。
     return chainProcText(item)
   }
+  if (item.kind === 'command') {
+    // 命令行 / 手动压缩（上游 `command` / `manual-compaction` 节点当**片的成员**）：
+    // 与顶层那条独立行**同一个组件**（`MessageList` 的 `case 'command'` 也用它）——
+    // 文案决议（`command-copy.ts` 的标题/摘要/可展开）只有一份，两条路不会漂开。
+    // 组件声明的是 `Extract<ChatRow, { kind: 'command' }>`（比链项多一个 `commandId`）：
+    // 它这一支**不读 `commandId`**（标题/摘要/可展开全走 `name` 与 `outcome`），故按形状等价断言传进去。
+    return html`<${CommandRow} key=${item.key} row=${item as unknown as Extract<ChatRow, { kind: 'command' }>} />`
+  }
   return html`<${ToolRow} key=${item.key} item=${item} store=${ctx.store} />`
 }
 
@@ -126,8 +134,8 @@ export function chainItemNode(
  * （`hidden="until-found"` —— 仍可被网页查找命中，命中即由 `beforematch` 唤出，见 `Chain.ts`）。
  *
  * 判据：`foldCompleted && 回合已关闭 && 有过程事实 && !alwaysOpen && 记录世代 ≠ 当前世代`。
- * ⚠️ **行兜底**：插件把"一段回答"做成一条行（上游是一个 seat），跨行折会藏掉用户正在看的段落 ——
- * 所以本行不是本回合唯一一行时整支关闭。完整对照见 `14` §7。
+ * **逐世代折**（上游）：每一行按**它自己的世代**判 —— 更早世代的那些行
+ * 整行折起、当前世代那行照常可见。所以一个被插话切成多段的回合里，屏幕上只留最后一段。
  *
  * @param input - 本回合的折叠偏好与事实。
  * @returns `hidden` = 是否折起（只留当前世代），`answerStep` = 当前世代（唤出时要记的值），`revealed` = 本回合用户已唤出过。
@@ -137,26 +145,79 @@ export function outerFold(input: {
     foldCompleted: boolean
     /** 本回合是否已关闭 */
     done: boolean
-    /** 本行是不是本回合的**唯一**一行（行兜底：多行时不跨行折） */
-    soleRow: boolean
     /** 过程区间里有人插过话 → 永远展开（由宿主按上游判据算好） */
     hasInterleavedInput?: boolean
     /** 宿主下发的过程事实（`spec` 不存在 = 没有过程证据 → 不折） */
     hasProcess: boolean
     /** 本行的回答世代 */
     answerStep: number | undefined
+    /**
+     * **本回合的当前世代**（座位层算好的事实，同一个回合的各行同值）。
+     *
+     * 上游的 `revealed` 判据拿的是**回合级 spec 的 `answerStep`**（：
+     * `stored?.answerStep !== (spec.answerStep ?? 0)`），而不是"本行自己的世代" —— 所以点一次控制行
+     * 是**整个回合**一起露出来。缺省（旧宿主 / 夹具没给座位计划）时退回本行世代。
+     */
+    currentStep?: number
     /** 用户已唤出的世代（`undefined` = 没有记录） */
     storedAnswerStep: number | undefined
     /** `alwaysOpen` 的输入：上游只认 `aborted` / `error`（`forked`、`interrupted` 都算普通收官） */
     interrupted: boolean
     /** 本行的片数（**仅作诊断/透传**：上游折不折不看片数，单片回合同样折起） */
     sliceCount: number
+    /**
+     * 本回合**有没有分组头**（上游 `stepGrouping` 那一列；`false` = `none` 档）。
+     *
+     * 上游策略表里 `stepGrouping: 'none'` 只出现在 `verbose`，而那一档的
+     * `foldCompletedTurns` 恒为 `false` —— 两列是**同一张表**里的一行。插件把两列拆成两个字段接，
+     * 读不到偏好时只补了 `compact` 的默认，于是「不分组」那一档仍会被外层折起：真机表现就是
+     * 「设置里改完，插件还要点一次收起/展开才看得到明细」（2026-10-09）。
+     * 缺省（旧宿主 / mock）按 `true` 处理 = 保持既有形态。
+     */
+    grouped?: boolean
 }): { hidden: boolean; answerStep: number; revealed: boolean } {
     const answerStep = input.answerStep ?? 0
-    const revealed = input.storedAnswerStep === answerStep
-    const alwaysOpen = input.interrupted || !input.soleRow || input.hasInterleavedInput === true
-    // 折不折只看 `foldable && hasContent && !alwaysOpen` —— **没有"片数 > 1"这一项**
+    /**
+     * 「本回合**有没有**被用户唤出过」——判据是**回合级**的，不是行级。
+     *
+     * ⚠️ **2026-10-12 真机左右对照修**（维护者截图：插件展开后比网页端**少了一大截步骤内容**）。
+     * 原先这里写的是 `input.storedAnswerStep === answerStep`（拿**本行自己的** `answerStep` 去比），
+     * 于是点开控制行只让**当前世代那一条行**的过程区露出来，其余行的 `.chain-body` 仍是 `hidden`
+     * —— 而各片的**片头本身就在 `.chain-body` 里**（`Chain.ts` 的注释：折的是控制节点之外的
+     * **全部**过程内容，含各片头），所以屏幕上只剩一个片头，网页端却有十几个。
+     *
+     * 上游是**回合级**的，两处一致： 的 `storedTurnProcessEntry(state, turn)`
+     * **只按回合号查找**（一个回合一个条目）； 的
+     * `processOpen = alwaysOpen || processEntry !== undefined` 对**该回合的每个节点**都成立 ⇒
+     * `processHidden` 全假； 的 `outerHidden` 拿的是同一个回合条目
+     * （`stored?.answerStep` 比的是**回合级 spec** 的 `answerStep`，`spec` 由
+     * `useChatNodeProcess(firstKey)` 给出、同一回合各片同一个）⇒ **要么全露、要么全折**。
+     *
+     * 收起方向不受影响：`setTurnProcessOpen(..., false)` 是把条目**整个删掉**，
+     * 于是 `storedAnswerStep` 回到 `undefined` → 本判据重新为假、逐世代折叠照旧。
+     *
+     * ⚠️ **比的是"回合级当前世代"，不是"本行世代"**：上游 `stored?.answerStep !== (spec.answerStep ?? 0)`
+     * 里的 `spec` 是**回合级**的（同一回合各片同一个 `answerStep`）。插件原先既用本行世代比、
+     * 唤出时又存本行世代（`Chain` 的 `revealOuter(turn, outer.answerStep)`，而承控制行的往往是**首行**、
+     * 世代 = 第一条回答步），于是"存 1、当前 48" → 恒不相等 → 展开后只剩那一条行的过程区
+     * （2026-10-12 维护者截图："插件比 web 少了很多步骤"）。
+     */
+    const revealed = input.storedAnswerStep !== undefined
+        && input.storedAnswerStep === (input.currentStep ?? answerStep)
+    /**
+     * ⚠️ **这里曾经有一条 `!input.soleRow`（行兜底）**："插件把一段回答做成一条行，跨行折会藏掉
+     * 用户正在看的段落 → 本行不是本回合唯一一行时整支关闭"。**2026-10-11 删掉**，因为它与上游相反：
+     * 上游 的 `outerHidden` 是**逐片**判的
+     * （`foldCompleted && turnClosed && !alwaysOpen && stored.answerStep !== spec.answerStep`）——
+     * 把**更早世代**的片藏起来、**当前世代那一片照常可见**，而不是"有多段就全都不折"。
+     *
+     * 那条兜底的后果（维护者四次截图指出）：一个被插话切成五代回答的回合，插件把**五段答句全部**
+     * 摆在屏幕上，而网页端只显示最后一段。
+     */
+    const alwaysOpen = input.interrupted || input.hasInterleavedInput === true
+    // 折不折只看 `foldable && hasContent && !alwaysOpen && 不是当前世代` —— **没有"片数 > 1"这一项**
     const hidden =
+        input.grouped !== false &&
         input.foldCompleted &&
         input.done &&
         input.hasProcess &&

@@ -32,7 +32,7 @@ export function slashTrigger(store: ChatStore): TriggerDef {
       // /model 上游由客户端(非 host)贡献：追加在指令组末尾，对齐上游「host 原序 + contribution 殿后」。
       // kind 必须区别于 'command'，否则会落进 pick() 末尾「无参 command 立即执行」分支被误发到后端；
       // group 仍挂 'command'，分组头按 group 边界渲染，不会在它前面重出「指令」头
-      rows.push({ kind: 'local', group: 'command', groupLabel: '指令', prefix: '/', name: 'model', description: '选择模型与推理等级' })
+      rows.push({ kind: 'local', group: 'command', groupLabel: '指令', prefix: '/', name: 'model', description: '选择本会话使用的模型' })
       const skills = cat?.skills ?? []
       for (const s of skills) {
         rows.push({ kind: 'skill', group: 'skill', groupLabel: '技能', prefix: '/', name: s.name, description: s.description })
@@ -53,9 +53,8 @@ export function slashTrigger(store: ChatStore): TriggerDef {
       if (row.kind === 'local' && row.name === 'model') {
         // /model 是客户端贡献项：清掉 token，转交「仅模型列表」可搜索弹窗(openModelSearch)。
         // 先 clear 再 open：clear 的归焦 microtask 先入队，SearchPicker 挂载后的自动聚焦后跑才拿得到焦点。
-        // 不能在这里 closePopups()——它会把下面刚设的 slashPickKind 清成 null，选中后就不回显结果行了
+        // 选中后不产生对话区行（上游模型选择是客户端 RPC，不在聊天区回显）。
         helpers.clear()
-        store.markSlashPick('model')
         store.openModelSearch()
         return
       }

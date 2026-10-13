@@ -1,6 +1,8 @@
 // 终端卡 —— 独立组件，与 Web/Ask/Context 各占一个文件，改一种不影响其它。
 // 形态是一块面板：命令横幅（状态点 + 命令，固定高度内滚）→ 一条分隔线 → 输出体。
-// 输出体**上限 224px + 纵向内滚**；**不折行**（`white-space: pre`，超宽交给输出体横滚）。**不做行折叠**——上游另有 16 行折中段，本插件不跟。
+// 输出体**上限 224px + 纵向内滚**；**不折行**（`white-space: pre`，超宽交给输出体横滚）。
+// **不做行折叠**——与上游一致：上游对话区的终端卡传的是 `maxLines={Infinity}`（`ui-tool/ToolRow.tsx`），
+// `DEFAULT_TERMINAL_MAX_LINES = 16` 那套折中段只服务别的表面。
 // 收起/展开头由上级 ToolRow 控制。
 import { html } from 'htm/preact'
 import type { ChatStore } from '../../core/store/chat'

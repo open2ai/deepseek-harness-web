@@ -8,8 +8,7 @@
 //   - 行的正文 = 上游的**回答步**（回答节点不随折叠隐藏）。
 // 判据集中在本文件（纯函数、不碰 store 与 DOM），组件只按结果渲染 —— 与 `core/*-card.ts` 同一路子。
 //
-// 与上游的一处**有意偏离**（不是漏做，改前先看这里）：
-//   插件的提问不参与过程折叠：链里只有提问行时不出折叠头（见 design/06 §4）。
+// 提问行按上游口径**照常计入**过程（曾有一条 `noFold` 偏离，已删，见本文件末尾那条注释）。
 //
 // 已对齐（2026-10-01，dsh 0.2.0-rc.2 复核）：
 //   1. 上游策略表的 `stepGrouping` 列（`grouped`）—— `collapsed`（compact/standard）下**进行中的回合也出
@@ -51,14 +50,6 @@ export interface ProcessDisclosureInput {
     open: boolean
     /** 本行是不是**折叠头的归属行**（回合首行 ＝ 上游的 `turn-process` 控制节点；只有它渲染折叠头） */
     ownsHead: boolean
-    /**
-     * 本次判定是**一片**（上游 `ChatGroupSeat` 的每个 seat）而不是整个回合。
-     *
-     * 差别只有一处：**窗口门里的"有回答锚点"那一条只属于回合级**（上游 `processWindowReady` 里没有它）。
-     * 分组头开合的是这一片的明细，不需要锚点 —— 少了这个区分，"没有回答步的那一片"（例如停下来的
-     * 回合只留一条思考）分组头整个不出现。
-     */
-    groupSeat?: boolean
 }
 
 export interface ProcessDisclosure {
@@ -117,17 +108,37 @@ export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclos
     // 最后那条在 0.2.0 里是 per-Turn 的 `turnStarted || turnClosed` —— 历史分页截断**不再**是禁止折叠的理由
     // （旧版那道 `historyIncomplete` 已被上游删除）。
     //
-    // ⚠️ **"有回答锚点"这一条只属于回合级那道门，不能拿来卡分组头**（真机 2026-10-06 截图）：
-    // 上游 `processWindowReady` 里**没有**回答锚点这一项（锚点只用在"哪些节点算这一片的过程成员"上）；
-    // 插件把它写进窗口门是为了**回合级那个可点折叠**（折叠动作的落点就是锚点世代，没有锚点可点，
-    // 见 `Chain.ts` 的 `canCollapse`）。分组头（`groupSeat`，每片自己的 seat）不需要锚点：
-    // 它开合的是**这一片**的明细。少了这个区分，「停下来的回合只留一条思考」那一片（没有回答步）
-    // `windowReady` 恒假 → 分组头整个不出现 —— 网页端同一位置有「已完成分析」那个框。
-    const anchorReady = input.groupSeat === true ? true : process?.answerAnchorSeq !== null
+    /**
+     * ⚠️ **2026-10-12 已按 §6.3 的做法结案：那道自造的"有回答锚点"门已删除**（此前写成
+     * `anchorReady = groupSeat === true ? true : process?.answerAnchorSeq !== null`，
+     * 挂在下面 `windowReady` 上）。它的来历与结局：
+     *
+     * · **来历**：上游 `processWindowReady`里**没有**回答锚点这一项
+     *     （锚点只用在"哪些节点算这一片的过程成员"上），插件当初把它写进窗口门，是为了回合级那个可点折叠
+     *     找落点。后来那两条理由都作废了 —— `canCollapse` 在 **2026-10-07** 撤掉了"必须有回答锚点"
+     *     （上游的可点条件是 `foldable && hasContent && !alwaysOpen`，无锚点项）；「唤出」的落点在
+     * **2026-10-12** 改成**回合级当前世代**（上游 比的就是回合级 `spec.answerStep`）。
+     *   · **为什么保留过一阵**：它理论上会改变"没有定稿回答的回合要不要出折叠头"的渲染，按本仓约定
+     *     （先真机左右对照再动）登记在 `next/docs/10` §6.3，未就地删除。
+     *   · **这次怎么结的案**（脚本 `tmp/_anchorgate.ab.probe.mjs`，可复跑）：同一批**真实事件帧**、
+     *     A = 现行源码、B = **只在打包时**把那一行强制成 `true`（仓库文件不改），
+     *     六个采样点（含四处"按形状正该咬到它的"回合：`c5c3c306` 回合 2/3/6、`54fdba8f` 回合 20）
+     *     × 四档「工作步骤展示」× 历史/实时 = **64 种组合渲染出的 DOM 逐字节相同**
+     *     （唯一差异是左下角"用时 X"走秒，已归一化）。**但那六个采样点里没有"整回合一条头"那种形状**，
+     *     所以"零差异"**不能推广**。
+     *   · **真正的判定来自真实会话的全量回归**：`tmp/_e2e.history.test.mjs` 原先钉着
+     *     "出了折叠头的行都必须有回答锚点"这条**旧偏离**；删掉门之后它报出 **5 个回合**
+     *     （#10/#13/#14/#16/#24：已关闭 + 有过程 + 零正文）从"平铺"变成"出折叠头"——
+     *     而网页端在那些回合**本来就是出头的**（上面那条上游判据里没有锚点项）。
+     *     也就是说：这条门确实改变渲染，**改变的方向正是上游**。守卫的旧期望随之下调为上游口径
+     *     （`_e2e.history` 与 `_transcript.fourmodes` 各一条），并留一个观测量
+     *     （"出头的行里没有回答锚点的行数"）。
+     *   · **结论**：这不是"零像素风险的清理"，而是**一次有意的行为变更、方向对齐上游**；
+     *     证据是"真实会话里 5 个回合从平铺改成出头"＋上游 `processWindowReady` 里确实没有锚点项。
+     */
     const windowReady =
         process !== undefined &&
         input.compact &&
-        anchorReady &&
         (input.turnStarted === true || input.done)
     // 上游的 `foldable`（对回合而言）：窗口就绪 **且**（过程外置 或 回答步自带推理）
     // —— 「区间内什么都没有」时不折叠，但这不等于"没有过程"：回答步的推理同样算。
@@ -145,7 +156,12 @@ export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclos
     // 折叠时藏的是**过程成员**（本行的链）；回答步的正文在行的正文里，不受影响（上游同）。
     // 同回合的每一行都跟随同一个展开态 —— 上游也是这么收的：折叠头一个，被收起来的是整个回合的成员。
     // `detail` 由 `groupable`（有没有可收的东西）与回合级展开态决定；没有分组头时明细永远可见（上游 `expandedBody` 同）。
-    return { windowReady, foldable, grouped, head: groupable && input.ownsHead, detail: !groupable || input.open }
+    // ⚠️ **`grouped` 是这两条的门**（不是只有 `groupable`）：
+    //   · `grouping === 'none'`（上游 verbose 档）→ **没有分组头、明细一律平铺**；
+    //   · 没有偏好（旧宿主 / mock）→ 按 `history` 兜底，与接入前的形态一致。
+    // 少了这道门，改档只会改掉 `grouped` 这个没人读的字段：头照出、明细照藏 ——
+    // 真机表现就是「设置里改完，插件还要点一次收起/展开」（2026-10-09 事故）。
+    return { windowReady, foldable, grouped, head: grouped && groupable && input.ownsHead, detail: !grouped || !groupable || input.open }
 }
 
 

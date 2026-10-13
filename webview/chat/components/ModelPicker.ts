@@ -11,12 +11,14 @@
 import { html } from 'htm/preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ChatStore } from '../core/store/chat'
+import { rankByName } from '../core/rank-by-name'
 
 type Pane = 'root' | 'model' | 'effort'
 
 export function ModelPicker({ store }: { store: ChatStore }) {
   const sel = store.sel.value
   const [pane, setPane] = useState<Pane>('root')
+  const [q, setQ] = useState('')
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   const modelOf = (
@@ -44,6 +46,7 @@ export function ModelPicker({ store }: { store: ChatStore }) {
   /** 关闭弹窗并把焦点交还输入框：弹窗卸载后焦点会掉到 body，接着打字/敲 "/" 都会失效。 */
   const close = (): void => {
     store.closePopups()
+    setQ('')
     queueMicrotask(() => document.getElementById('input')?.focus())
   }
 
@@ -122,26 +125,36 @@ export function ModelPicker({ store }: { store: ChatStore }) {
     ${pane === 'model'
       ? html`<div class="mp-pane">
           ${head('模型')}
+          <div class="mp-search">
+            <input class="mp-search-input" type="text" placeholder="搜索模型" value=${q}
+              onInput=${(e: Event) => setQ((e.target as HTMLInputElement).value)} />
+          </div>
           <div class="mp-list">
-            ${(sel.modelGroups ?? []).map(
-              (g) =>
-                g.models.length > 0 &&
-                html`<div key=${g.id}>
-                  <div class="optgroup-label">${g.name || g.id}</div>
-                  ${g.models.map(
-                    (m) => html`<button type="button" class="mp-opt" key=${m.id}
-                      aria-selected=${g.id === sel.curProvider && m.id === sel.curModel}
-                      title=${m.description || m.name || m.id}
-                      onClick=${() => {
-                        // 不传 effort：由 store.selectModel 按「同路由保留现等级 / 换模型用其 defaultEffort」处理（与上游同）
-                        store.selectModel(g.id, m.id)
-                        close()
-                      }}>
-                      <span class="mp-opt-name">${g.id === sel.curProvider && m.id === sel.curModel ? '✓ ' : ''}${m.name || m.id}</span>
-                    </button>`
-                  )}
-                </div>`
-            )}
+            ${(sel.modelGroups ?? []).map((g) => {
+              // 与上游同一位置、同一口径：**组内**按 `rankByName` 排序（ 的
+              // `rankByName(group.models, showSearch ? query.trim() : '')`）—— 不是简单过滤，是可排序的模糊匹配。
+              const models = rankByName(
+                g.models.map((m) => ({ name: m.name || m.id, model: m })),
+                q.trim()
+              ).map((entry) => entry.model)
+              return models.length > 0
+                ? html`<div key=${g.id}>
+                    <div class="optgroup-label">${g.name || g.id}</div>
+                    ${models.map(
+                      (m) => html`<button type="button" class="mp-opt" key=${m.id}
+                        aria-selected=${g.id === sel.curProvider && m.id === sel.curModel}
+                        title=${m.description || m.name || m.id}
+                        onClick=${() => {
+                          // 不传 effort：由 store.selectModel 按「同路由保留现等级 / 换模型用其 defaultEffort」处理（与上游同）
+                          store.selectModel(g.id, m.id)
+                          close()
+                        }}>
+                        <span class="mp-opt-name">${g.id === sel.curProvider && m.id === sel.curModel ? '✓ ' : ''}${m.name || m.id}</span>
+                      </button>`
+                    )}
+                  </div>`
+                : null
+            })}
           </div>
         </div>`
       : null}

@@ -211,8 +211,11 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
                 break;
             }
             case 'context': {
-                // **只有会显示的注入**才算候选，且**不推进过程起点**：被隐藏的注入在屏幕上是空的，
-                // 算进去会让"只有提问"的回合被误判成有过程内容。
+                // **只有会显示的注入**才算候选，且**不推进过程起点**：被隐藏的注入在屏幕上是空的。
+                // ⚠️ 2026-10-12 更正括号里的理由：原文写"算进去会让『只有提问』的回合被误判成有过程内容" ——
+                // **"只有提问就不算过程内容"这条早已不成立**（插件自造的 `noFold` 偏离 2026-10-02 已撤，
+                // 提问与普通工具行一视同仁）。这条判据现在只为"隐藏的注入不该占过程成员位"而留，
+                // 与提问无关（文件头与 `core/process-fold.ts`）。
                 if (e.seq !== undefined && e.visible !== false) {
                     otherMembers.push({ seq: e.seq, step: undefined, kind: 'context' });
                     otherStartSeq = min(otherStartSeq, e.seq);

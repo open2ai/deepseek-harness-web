@@ -13,7 +13,7 @@
 // `placement`/顶层 `rpcId`）：那些字段是上游自己删掉的旧形状，插件不再双形状嗅探，改与上游同口径
 // （单代 + 明确判定）。万一连到旧主机，本层会经 `DshControlHandlers.onLegacyHost` **明确报告**
 // （这行原文只进日志；给用户的通知是 `dshService.reportLegacyHost` 里写死的固定文案），
-// 而不是静默给一个空队列；沿革与恢复办法见 `tmp/版本差异记录/`。
+// 而不是静默给一个空队列。
 //
 // 本文件是**唯一**允许出现上游形状的地方：对外统一成 `DshQueueItem`（见 queue-types.ts），
 // 页面与 `queue-view.ts` 对上游换形状零感知（分层铁律）。
@@ -367,7 +367,9 @@ export function reduceControlFrame(
     if (type === 'queue') {
         handlers.onLegacyHost?.("收到 `{type:'queue'}` 帧（`dsh-0.1.7-rc.1` / `dsh-0.1.7-rc.2` 复核里不会出现此帧：上游已删）");
     }
-    // jobs 帧本插件不用：**静默忽略**，不自作主张当队列处理。
+    // `jobs` 帧：本插件不消费。**0.2.0-rc.2 源码里已找不到它的生产者**（全仓搜 `type: 'jobs'` 无命中），
+    // 上游客户端也不走这条帧 —— 它的任务列表经 cordis 的 `jobs` 服务（`ui-jobs` 的 `inject = ['jobs', …]`）。
+    // 保留这一句只为显式说明「不是漏处理」，别再当成未接的功能去补。
 }
 
 /**

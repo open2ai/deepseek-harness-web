@@ -1,14 +1,10 @@
 // 选择器切片：权限 / 模型 / 模式的选项状态与弹窗开关。
-// 唯一跨域点是「/」菜单发起选择后要把结果追加到对话区——由装配层注入消息切片的 showNotice，
-// 本切片不直接依赖消息行（保持切片之间无 import 边）。
+// 纯状态：不依赖消息行、不产生对话区行 —— 上游模型/权限选择都不在对话区显示结果（见 selectModel/selectPerm）。
 import { signal } from '@preact/signals'
 import { orderModelProviders } from '../model-order'
 import type { ChatHost } from '../host'
 import type { PermissionOption, ChatModelInfo, ChatAgentPreset } from '../protocol'
 import type { ChatStore, SelectorState } from './types'
-
-/** 追加一条通知行。由聚合层注入，避免选择器切片依赖消息行。 */
-export type EmitNotice = (text: string, command?: string, tone?: 'error' | 'ok') => void
 
 export interface SelectorsSlice {
   store: Pick<
@@ -18,7 +14,6 @@ export interface SelectorsSlice {
     | 'openPopup'
     | 'togglePopup'
     | 'openModelSearch'
-    | 'markSlashPick'
     | 'closePopups'
     | 'selectPerm'
     | 'selectModel'
@@ -31,17 +26,15 @@ export interface SelectorsSlice {
   setModels(models: ChatModelInfo | undefined): void
   /** chatInfo 帧：写 agent 模式选项与锁定态。 */
   setModes(info: { presets?: ChatAgentPreset[] } | undefined, current: string | undefined, locked: boolean | undefined): void
+  /**
+   * **投影帧**：只挪「当前模式」（别处切模式时的跟随；选项表仍由 `setModes` 那份管）。
+   * `undefined` = 这一帧没带该键 → 保持原值。
+   */
+  setCurrentMode(id: string | null | undefined): void
   reset(): void
 }
 
-export function createSelectors(host: ChatHost, emitNotice: EmitNotice): SelectorsSlice {
-  /**
-   * 「/model」菜单发起的选择：选中后把结果追加到对话区；按钮入口不设此标记。
-   *
-   * **只有 model 一种**：切权限在对话区本就不显示任何行（上游 `isVisibleChatNode()` 排除权限命令），
-   * 所以权限没有需要标记的场景。
-   */
-  let slashPickKind: 'model' | null = null
+export function createSelectors(host: ChatHost): SelectorsSlice {
   const permNameOf = new Map<string, string>()
   const openPopup = signal<'perm' | 'model' | 'mode' | 'modelSearch' | null>(null)
   const sel = signal<SelectorState>({
@@ -59,11 +52,6 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
 
   function closePopups(): void {
     openPopup.value = null
-    slashPickKind = null
-  }
-  /** 标记下一次 selectModel 是「/」菜单发起(用于把操作结果追加到对话区)。 */
-  function markSlashPick(kind: 'model'): void {
-    slashPickKind = kind
   }
   function togglePopup(w: 'perm' | 'model' | 'mode'): void {
     openPopup.value = openPopup.value === w ? null : w
@@ -141,13 +129,7 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
       model,
       reasoningEffort: eff !== undefined ? eff || undefined : undefined,
     })
-    // 由「/model」发起：把选到的 提供方 · 模型 · 等级 追加到对话区(按钮入口不设标记，不进对话)
-    if (slashPickKind === 'model') {
-      const gName = s0.modelGroups?.find((x) => x.id === provider)?.name || provider
-      const mName = s0.modelGroups?.find((x) => x.id === provider)?.models.find((x) => x.id === model)?.name || model
-      const label = `${gName} · ${mName}${eff ? ` · ${eff}` : ''}`
-      emitNotice(label, 'model', 'ok')
-    }
+    // 不产生对话区行：上游模型选择是客户端 RPC，选中后只更新模型选择器，不在聊天区回显。
   }
   function setModes(info: { presets?: ChatAgentPreset[] } | undefined, current: string | undefined, locked: boolean | undefined): void {
     if (!info?.presets) return
@@ -157,6 +139,22 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
     const lockedVal = locked === true
     sel.value = { ...sel.value, modeOptions: rows, currentMode, modeLocked: lockedVal }
     if (lockedVal) closePopups()
+  }
+  /**
+   * **只更新「当前模式」**：别处（网页端 / 编辑区）切模式时的跟随。
+   *
+   * 为什么不复用 `setModes`：它开头 `if (!info?.presets) return` —— 投影帧里只有**当前值**（`agentPreset`），
+   * 没有选项列表，传进去会被整段跳过（这正是"切模式不跟随"的根因之一）。选项与锁定仍以 `chatInfo`
+   * 那份为准，这里只挪当前值。
+   *
+   * `undefined` = 这一帧没带这个键 → **保持原值**（别误清）；`null` = 服务端明说"没有模式" → 记空串，
+   * 由 UI 回退到选项表里的第一个（与 `setModes` 的兜底同口径）。
+   */
+  function setCurrentMode(id: string | null | undefined): void {
+    if (id === undefined) return
+    const value = id ?? ''
+    if (sel.value.currentMode === value) return
+    sel.value = { ...sel.value, currentMode: value }
   }
   function selectMode(id: string): void {
     sel.value = { ...sel.value, currentMode: id }
@@ -174,17 +172,17 @@ export function createSelectors(host: ChatHost, emitNotice: EmitNotice): Selecto
     host.post({ type: 'chatModeConfig', agentPreset })
   }
 
-  /** 新会话清空：只清弹窗与「/」发起标记，不动 sel 与 permNameOf（权限名回退表跨会话仍有效）。 */
+  /** 新会话清空：只清弹窗，不动 sel 与 permNameOf（权限名回退表跨会话仍有效）。 */
   function reset(): void {
     openPopup.value = null
-    slashPickKind = null
   }
 
   return {
-    store: { sel, permNameOf, openPopup, togglePopup, openModelSearch, markSlashPick, closePopups, selectPerm, selectModel, selectMode, openModeConfig },
+    store: { sel, permNameOf, openPopup, togglePopup, openModelSearch, closePopups, selectPerm, selectModel, selectMode, openModeConfig },
     setPermOptions,
     setModels,
     setModes,
+    setCurrentMode,
     reset,
   }
 }

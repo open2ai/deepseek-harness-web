@@ -116,8 +116,9 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     images.value = []
     refs.value = []
     text.value = ''
+    // 不再建本地占位回答行（那正是「发送后闪一下」的来源）：回答只由宿主事件到达时出现；
+    // 「深度求索中」由 processing 信号 + 提交台账 + turnActive 三条腿驱动（整表替换时一并重算）。
     processing.value = true
-    messages.beginAssistant(prompt) // 立即出现"思考中…"行(与 setProcessing(true) 行为一致)
     host.post({ type: 'chatSend', text: prompt, images: imgs, ...(files.length > 0 ? { files } : {}), rpcId })
   }
 
@@ -138,7 +139,6 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
       text.value = ''
       messages.addUser(line)
       processing.value = true
-      messages.beginAssistant(line)
       host.post({ type: 'chatSend', text: line })
     }
   }
@@ -148,7 +148,6 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     messages.bumpScroll()
     messages.addUser(p)
     processing.value = true
-    messages.beginAssistant(p)
     host.post({ type: 'chatSend', text: p })
   }
 

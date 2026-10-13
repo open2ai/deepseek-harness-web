@@ -20,10 +20,16 @@
 // **两道回退**（都走回"整回合一条头"的既有形态，绝不半新半旧）：
 //   · 宿主没给 `groups`（旧宿主 / 单回答步回合）→ 整回合一条头；同回合各行共用展开态（`ownsHead` 归首行）；
 //   · 有 `groups` 但**片数与链上边界对不上** → 同上（`planProcessGroups` 的 `ok === false`）。
-// 例外：只含提问行(ask)时整回合/整片不折叠，平铺显示问行（见 docs/design/06 §4）。
+// **没有"只含提问行就不折叠"这条例外**（⚠️ 2026-10-12 更正：本行原先写着"例外：只含提问行(ask)时
+// 整回合/整片不折叠，平铺显示问行" —— 那条插件自造的偏离 `noFold` 早在 2026-10-02 就撤了，
+// 提问在上游是**可见节点**、与普通工具行一视同仁地计入过程内容：
+// 的 `tool/call` 分支、`core/nodes/chat-nodes.ts` 的 `derivePresentation`，
+// 以及 `core/process-fold.ts` 的 `foldable = windowReady && (hasExternalProcess || inlineReasoning)` 里
+// 都没有"提问"这一支）。真正"不出整回合折叠头"的情形只有一个：算不出可折内容
+//（`hasExternalProcess` 与 `inlineReasoning` 皆假）。
 import { html } from 'htm/preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
-import type { ChatRow, ChatStore } from '../../core/store/chat'
+import type { ChatRow, ChatStore, DshTurnProcessItem } from '../../core/store/chat'
 import { processDisclosure } from '../../core/process-fold'
 import { planProcessGroups } from '../../core/process-groups'
 import { scrollEdges, type ScrollEdges } from '../../core/scroll-edges'
@@ -47,14 +53,36 @@ export { chainRenderPlan, reasoningLive }
 
 type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
 
-export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; soleRow?: boolean; stoppedPill?: unknown }) {
+/**
+ * 一行的过程链渲染。
+ *
+ * ⚠️ 这里曾经的 `soleRow`（"本行不是本回合唯一一行就不折"）**已整条删除**（2026-10-11）：
+ * 外层折叠改成**逐世代**判之后它就没有读者了，留着只会让下一个人以为它还在起作用。
+ * 判定口径见 `outerFold` 的注释。
+ */
+export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey, turnCurrentStep }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; stoppedPill?: unknown; outerHidden?: boolean; seatKey?: string; turnCurrentStep?: number }) {
+  void outerHidden
+  // 座位身份（上游 render entry 的 key）：**一行属于哪一项**由此说话。
+  // 目前只作身份标记落在 DOM 上（`data-seat-key`），供"逐座位"改造的下一步与真机核对读它。
+  const seatAttr = seatKey === undefined ? {} : { 'data-seat-key': seatKey }
   const chain = row.chain
   // 上游显示偏好（控制已完成轮次的过程内容）；未知/未到 = compact，即接入前的固有形态
   const compact = store.transcriptView.value === 'compact'
+  /**
+   * 分组偏好（上游 `stepGrouping` 那一列）**必须在渲染体里读一次**。
+   *
+   * ⚠️ 真机事故（2026-10-09）：「工作步骤展示」在设置里改完，网页端即时生效，插件要**再点一次
+   * 收起/展开**才看得到。根因就是这里 —— 原先只在**把 prefs 当属性传下去的那一刻**读
+   *（`prefs=${{ grouping: store.stepGrouping?.value }}`）：那个表达式在 htm 模板里求值，
+   * **不建立本次渲染对信号的订阅**，偏好一变本组件不重渲 → 片组件拿到的还是旧的 `grouping`，
+   * 分组头的有无与明细的可见性就全停在改动前那一档。（`transcriptView` 一直是这么读的，
+   * 所以四档里只有分组那一档不跟手。）
+   */
+  const grouping = store.stepGrouping?.value
   // 展开态是**回合级**的（整回合路径：同回合多段行共用；上游按 (turn, answerStep) 持久化）。
   // 默认**收起**：上游的分组头初始即收，**与回合是否已关闭无关**；只有用户点开才展开。
   // **按片路径不用它**（各片有自己的键 `${turn}:${group.key}`，见 `ProcessGroup`）—— 那道回合级
-  // 控制属于"整回合一条头"的形态，随片化的头一起退出；外层折叠是另一步（见 14 §进度 ⑧）。
+  // 控制属于"整回合一条头"的形态，随片化的头一起退出；外层折叠是另一步。
   const turn = row.turn
   const stored = turn === undefined ? undefined : store.turnFoldOpen.value.get(turn)
   // 分组体的滚动状态（上游 `useProcessScroll` 的边判定部分）：`up/down` = 两端还看不看得见内容。
@@ -75,29 +103,37 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
   // 它只决定"画什么"、不参与 hook 数量，所以放在这里与判据同序读。
   const groupPlan = planProcessGroups(chain, row.groups)
   const grouped = groupPlan.ok && row.groups !== undefined && row.groups.length > 0
+  /** 最终形态：节点模型下发的成员表分组（每组 = 实际成员 + 该片事实），优先于步区间切片。 */
+  const nodeGrouped = row.nodeGroups !== undefined && row.nodeGroups.length > 0
   const groupEntries = groupPlan.entries.filter((entry) => entry.kind === 'group')
 
   // **外层折叠**（⑧，上游 `ChatGroupSeat` 的 `outerHidden`/`revealOuter`；判据在 `./plan`）：
   // 已关闭的回合只留**当前回答世代**那一片可见，更早的世代整片折起（`hidden="until-found"`，可被查找唤出）。
   // `stored` 缺省 = 没记录 → 折起（与上游一致：历史回合默认只看得见最后一个世代）。
+  // ⚠️ **逐世代判**（2026-10-11 去掉 `soleRow` 兜底）：本行按**自己的** `answerStep` 判，
+  // 于是"被插话切成多段"的回合里，更早世代的那些行各自折起、当前世代那行照常可见 ——
+  // 与上游 同口径。去掉之前是"多段就整支不折"，屏幕会出现全部答句。
   const outer = outerFold({
     foldCompleted: compact,
+    // 「不分组」那一档（上游 verbose）连外层折起也一并关掉（同一张策略表里两列同源，见 `outerFold` 的注释）
+    grouped: grouping !== 'none',
     done: row.done,
-    // 行兜底：本行不是本回合唯一一行时不跨行折（跨行折会藏掉用户正在看的段落）
-    soleRow: soleRow !== false,
     // 上游 `turnProcessAlwaysOpen()` 的一项：过程区间里有人插过话 → 永远展开（宿主算好的事实）
     hasInterleavedInput: row.process?.hasInterleavedInput === true,
     hasProcess: row.process !== undefined,
     answerStep: row.process?.answerStep ?? undefined,
+    // **回合级当前世代**（座位层给）：`revealed` 与唤出记录都用它 —— 上游 `spec.answerStep` 是回合级的，
+    // 于是"点一次控制行 = 整个回合一起露出来"（2026-10-12 修：「插件比 web 少了很多步骤」）
+    currentStep: turnCurrentStep,
     storedAnswerStep: turn === undefined ? undefined : store.outerAnswerStep?.value.get(turn),
     // 上游 `turnProcessAlwaysOpen()` 的两个"非正常收官"：**只有** aborted / error。
     // （`forked` / `interrupted` 等一律当普通收官 —— 2026-10-02 按 tag 更正，见下面的注释）
     interrupted: row.interrupted === true || row.status === 'aborted' || row.status === 'error',
-    sliceCount: groupEntries.length,
+    sliceCount: nodeGrouped ? row.nodeGroups!.length : groupEntries.length,
   })
   /** 用户唤出（网页查找命中 `beforematch`）→ 记下"已唤出到当前世代"。 */
   const revealOuter = (): void => {
-    if (turn !== undefined) store.revealOuter?.(turn, outer.answerStep)
+    if (turn !== undefined) store.revealOuter?.(turn, turnCurrentStep ?? outer.answerStep)
   }
   /** `beforematch` 的稳定监听器（ref 回调里 add/remove 的是同一个引用）。 */
   const onBeforeMatch = useRef(revealOuter)
@@ -152,7 +188,7 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
     compact,
     // 上游 `stepGrouping`（0.2.0）：`collapsed` 时**进行中的回合也出分组头**（默认展开，可点收起）；
     // `history`/`none` 下进行中平铺。读不到偏好（部分 mock / 旧宿主）时 undefined → 按 `history` 处理。
-    grouping: store.stepGrouping?.value,
+    grouping,
     open,
     ownsHead,
     // 窗口就绪的最后一条门（上游 0.2.0：per-Turn 的 `turnStarted || turnClosed`）：
@@ -160,9 +196,9 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
     // **历史分页截断不是不折叠的理由**（旧版那道 `historyIncomplete` 上游已删）。
     turnStarted: row.process?.turnStarted === true,
   })
-  // 按片路径下**整回合这道头不渲染**："片数 = 头数"是 B′ 的验收判据（14 §4）—— 多一个回合级头就多一个
+  // 按片路径下**整回合这道头不渲染**："片数 = 头数"是验收判据 —— 多一个回合级头就多一个
   // 控制点，且与片头语义重叠（一个开合整个回合、一个开合片内）。片自己的头就是本回合的控制。
-  const folded = disclosure.head && !grouped
+  const folded = disclosure.head && !nodeGrouped
   // 头部结构按上游：`[16px 位：活动图标 / 悬停换箭头][标题]`。
   // 图标与箭头叠在同一格（`.chain-summary-act` / `.chain-summary-chev`，CSS 管淡入淡出），
   // 所以**悬停图标位就看到箭头、点它展开/收起**；展开态常显箭头（上游 `aria-expanded` 那条规则）。
@@ -176,7 +212,11 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
         </span>
         <${ShimmerText} text=${headText} className="chain-summary-text" active=${!row.done} />
       </button>`
-    : null // 只含提问行 / 进行中 / 「标准」下的已完成回合 / 按片路径：无整回合折叠头，明细平铺
+    : null // 没有可折内容（`hasExternalProcess`/`inlineReasoning` 皆假）/ 按片路径（片自己的头）/ 四档里只有「完全展开」不折
+    // ⚠️ 2026-10-12 更正：这里原先还写着「只含提问行」与「『标准』下的已完成回合」两种情形，**两者都已不成立**：
+    // 前者见文件头（`noFold` 2026-10-02 已撤）；后者是插件两档时代的说法 —— 四档里 `standard` 与 `compact`
+    // 的策略列相同（`foldCompletedTurns: true` + `stepGrouping: 'collapsed'`），不折的只有 `verbose`
+    // （`false` + `'none'`；映射在）。
 
   /**
    * 明细里实际渲染的项（整回合路径）。
@@ -227,7 +267,7 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
 
   /**
    * **终局态摘要行**（上游回合级过程控制节点：`已完成，用时 {d}` + 行尾一个 chevron + 下面一条细线）：
-   * 形状取自真机截图（`tmp/版本差异记录/…/03` §3.1 的那三张）：文案在左、chevron **紧贴文案之后**
+   * 形状取自真机截图（三张对照）：文案在左、chevron **紧贴文案之后**
    * （不是贴右边缘）、下一行是一条贯穿内容宽度的细线（`--dsh-hairline`）。
    * 文案按终局原因分档（正常收官「已完成」/ 被停止「已停止」/ `error`·`max-tokens` 不在此重复），
    * 判据在 `core/run-status.ts` 的 `doneStatusText()`；用时取本回合的 `turn-stats`
@@ -241,6 +281,22 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
    * 现在：`hidden` 挂 `.chain-body`，**这一行 + 细线始终在**（看起来 = "只剩这条线"）。
    */
   const wallSecOf = row.usageRaw?.['wallSec']
+  /**
+   * **已定稿回合的用时**：口径与上游**逐字同** —— `turn/end.time − turn/start.time`，下限 1 秒。
+   *
+   * 上游 ：
+   *   `const elapsedMs = turn.start === undefined || turn.end === undefined ? undefined`
+   *   `  : Math.max(1000, turn.end.time - turn.start.time)`
+   * —— **两个节点缺一个就不显示时长**（label 退回「已完成」，没有「用时」那一段）。
+   *
+   * ⚠️ **2026-10-10 真机（左右对照，同一历史会话）**：插件显示「用时 11秒」、网页端「用时 12秒」。
+   * 原因是这里原先另写了一条兜底 `row.timeMs − row.turnStartMs`，并**在两条都有时取小的** ——
+   * 而那条兜底用的是**末条回答的时刻**（`render-plan.ts` 的 `timeMs = answer.time`，比 `turn/end` 早），
+   * 于是它算出来总比真值小约一秒，取小的规则又让它每次都赢。上游没有这条兜底 → 两边必然不一致。
+   * 现在**只认上游那一条**：窗口里缺 `turn/start` 时拿不到（网页端此时**同样**不显示用时，因为它的
+   * `turn.start` 节点也不在窗口里）—— 宁可两边都不显示，也不要两边显示成不同的数。
+   */
+  const wallMs = typeof wallSecOf === 'number' ? Math.max(1000, Math.round(wallSecOf * 1000)) : undefined
   /**
    * **一个回合只有一个控制行**：控制块归谁由 `MessageList` 按**过滤后的可见行**算出来（`ownsHead`），
    * 这里只在**拥有它的那条行**上渲染「已完成 [, 用时 X]」。
@@ -256,15 +312,25 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
    */
   const doneLine = !ownsHead
     ? null
-    : doneStatusText(row.done, row.status, typeof wallSecOf === 'number' ? wallSecOf * 1000 : undefined)
+    : doneStatusText(row.done, row.status, wallMs)
   /**
    * **控制节点的三态**（0.2.0 起）：`canCollapse = foldable && hasContent && !alwaysOpen`；
    * 它真 → **有 chevron、可点**；假 → **按钮仍在、`disabled`、无 chevron**（是同一个 button）。
    * ⚠️ **片数不是条件**：单片回合只要 `hasContent` 为真，上游照样给 chevron。
-   * 这里 `hasContent` 用过程事实的等价物："有过程外置"或"真的留下思考行"。
+   *
+   * ⚠️ **2026-10-12 补上 `!interleavedInput` 这一项**（维护者截图：插件这颗 `^` 网页端**没有**）。
+   * 上游 `hasContent` 是**两项之与**：
+   *   `hasContent = !interleavedInput && (processPresentation?.hasExternalProcess === true || processSpec.inlineReasoning)`
+   * —— **过程区间里有人插过话的回合，`hasContent` 恒假 → 不给 chevron**（那一轮的过程本来就是
+   * "永远展开"的：`alwaysOpen` 含 `hasInterleavedInput`），
+   * 于是控制行是一颗 `disabled`、无箭头的按钮。插件此前只算了后半截，于是给"被插话的回合"也画了箭头 ——
+   * 真机样本：会话 `54fdba8f` 回合 25（`turn/start` 之后还有一条 `source.kind === 'user'` 的
+   * `user/message`「不要剩」，即插话），网页端该行**无箭头**、插件有。
    */
   const hasProcessContent =
-    row.process !== undefined && (row.process.hasExternalProcess === true || row.process.inlineReasoning === true)
+    row.process !== undefined
+    && row.process.hasInterleavedInput !== true
+    && (row.process.hasExternalProcess === true || row.process.inlineReasoning === true)
   /**
    * 上游 `turnProcessAlwaysOpen()`：**只有**"未关闭"与 `aborted` / `error` 不能折。
    * ⚠️ 不能再宽：`forked` 这类分叉切点合成的收尾原因是**普通收官**（上游照常给 chevron）。
@@ -287,19 +353,38 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
     if (!outer.hidden) {
       store.foldOuter?.(turn)
     } else {
-      store.revealOuter?.(turn, outer.answerStep)
+      store.revealOuter?.(turn, turnCurrentStep ?? outer.answerStep)
     }
   }
   const doneBody = html`<span class="chain-done-text">${doneLine}</span>`
+  /**
+   * 控制行的**可点性与图标**（2026-10-11 **二次校正**，以网页端实测为准）。
+   *
+   * | 网页端 | 收起态 | 展开态 |
+   * |---|---|---|
+   * | `disabled` | false | **false**（`disabled={!canCollapse}`，**与开合无关**） |
+   * | `data-open` | 无 | `"true"` |
+   * | `aria-expanded` | `"false"` | `"true"` |
+   * | chevron | **有** | **有**（靠 `[data-open] .chevron { rotate(180deg) }` 转过来） |
+   * | `title` | **无** | **无** |
+   *
+   * ⚠️ **我上一轮在这里改错过一次**：当时量到的样本恰好是 `foldable=false` 的回合（`disabled=true`、
+   * 无 chevron），我把它当成"展开态"，于是写下 `disabled=${!canCollapse || !collapsed}`、并把 chevron
+   * 也 gate 在 `collapsed` 上 —— 结果**展开之后那颗按钮彻底不可点、也没有箭头，"收起"这个动作被删掉了**
+   *（维护者截图："^展开后，没法收起了？？？？ 之前都是好好的啊"）。
+   * 上游源码里 `disabled={!canCollapse}`、`canCollapse && <IconChevronDownOutlineRegular className={css.chevron}/>`
+   * 两项都与 `open` 无关；`open` 只体现在 `data-open` 与那个旋转上。
+   */
+  const collapsed = outer.hidden
   const doneRow = doneLine === null
     ? null
     : html`<div class="chain-done" data-turn-done="true" data-turn-done-foldable=${canCollapse ? 'true' : undefined}>
         <button class="chain-done-btn" type="button" onClick=${toggleDone} disabled=${!canCollapse}
-          aria-expanded=${hasProcessContent ? String(!outer.hidden) : undefined}
-          title=${canCollapse ? (outer.hidden ? '展开过程详情' : '收起过程详情') : undefined}>
+          data-open=${collapsed ? undefined : 'true'}
+          aria-expanded=${hasProcessContent ? (collapsed ? 'false' : 'true') : undefined}>
           ${doneBody}
           ${canCollapse
-            ? html`<span class="chain-done-chev" data-turn-done-chevron>${chevronGlyph(!outer.hidden)}</span>`
+            ? html`<span class="chain-done-chev" data-turn-done-chevron>${chevronGlyph(false)}</span>`
             : null}
         </button>
       </div>`
@@ -326,6 +411,11 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
    *   · `beforematch`：preact 不认这个事件名（不挂监听）→ 用户搜到了内容却仍折着。
    * 所以：`setAttribute` / `addEventListener` 自己来，卸载时清掉。
    */
+  // ⚠️ 外层折叠**只折内容、不折控件**（2026-10-11 修正）：`.chain-done` 那一行
+  //（「已完成，用时 4分16秒 ⌄」）是**展开/收起这一回合内容的唯一入口**，它必须留在外面 ——
+  // 我上一版把整行（`.turn-anchor`）都藏了，结果控件消失、用户没法展开（维护者当场指出）。
+  // 落点因此是**内容容器**：行内的 `.chain-body`（过程片）+ 行内 `.body`（答句），
+  // 两者都由 `MessageList` 的 `outerRowHidden` 判定后、经 `outerHidden` 传进来。
   const outerRef = (el: HTMLDivElement | null): void => {
     const previous = outerRefEl.current
     if (previous !== null) {
@@ -343,14 +433,36 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
     }
     el.addEventListener('beforematch', onBeforeMatch.current)
   }
-
+  /**
+   * 行内**答句正文**（`.body`）的折叠落点在 `AssistantRow` 里（`answerRef`）—— 这里不再重复一份。
+   * 两处都折同一个 `outer.hidden`：`.chain-body`（过程）+ `.body`（答句），
+   * 而控件 `.chain-done` 留在外面可点。
+   */
   // **按片**：每片走子组件（各自的头/明细/计时/滚动边），边界文本渲染在相邻两片**之间**（永远可见）。
   // **各片头 + 明细都在 `.chain-body` 里**（外层折起时一起藏 —— 与 web 折起态一致）；终局行在外。
   // 「已停止」药丸（`stoppedPill`）**只挂最后一片的明细末尾**（上游那个药丸长在该步自己的正文块上，
   // 而这一步没有正文时那个块本身就是这一片的成员 → 落在分组框里面；见 `AssistantRow` 的分派）。
+  // 最终形态：节点模型下发的成员表分组（每组 = 该片成员链项 + 该片折叠事实）。
+  if (nodeGrouped) {
+    const chainByKey = new Map(chain.map((c) => [c.key, c]))
+    const lastGroupAt = row.nodeGroups!.length - 1
+    return html`<div class="chain" ...${seatAttr}>
+      ${doneRow}
+      <div class="chain-body" ref=${outerRef}>
+        ${row.nodeGroups!.map((g, index) => {
+          const items = g.itemKeys.map((k) => chainByKey.get(k)).filter((c): c is DshTurnProcessItem => c !== undefined)
+          return html`<${ProcessGroup} key=${g.key} row=${row} store=${store}
+              group=${{ key: g.key, facts: g.facts }} items=${items}
+              outerHidden=${outer.hidden}
+              tail=${index === lastGroupAt ? stoppedPill : null}
+              prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />`
+        })}
+      </div>
+    </div>`
+  }
   if (grouped) {
     const lastGroupAt = groupPlan.entries.reduce((at, entry, index) => (entry.kind === 'group' ? index : at), -1)
-    return html`<div class="chain">
+    return html`<div class="chain" ...${seatAttr}>
       ${doneRow}
       <div class="chain-body" ref=${outerRef}>
         ${groupPlan.entries.map((entry, index) =>
@@ -359,14 +471,14 @@ export function Chain({ row, store, ownsHead, soleRow, stoppedPill }: { row: Ass
                 group=${{ key: entry.key, facts: entry.facts }} items=${entry.items}
                 outerHidden=${outer.hidden}
                 tail=${index === lastGroupAt ? stoppedPill : null}
-                prefs=${{ compact, grouping: store.stepGrouping?.value, liveProcessDetail: store.liveProcessDetail?.value }} />`
+                prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />`
             : chainProcText(entry.item))}
       </div>
     </div>`
   }
 
   // 整回合路径：**折叠头也属于过程区**（折起时它跟着藏，与 web 同）—— 只有终局行留在外面。
-  return html`<div class="chain">
+  return html`<div class="chain" ...${seatAttr}>
     ${doneRow}
     <div class="chain-body" ref=${outerRef}>
       ${head}

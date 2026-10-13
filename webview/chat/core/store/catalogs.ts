@@ -78,10 +78,17 @@ export function createCatalogs(host: ChatHost): CatalogsSlice {
   /**
    * slashCatalog 帧到达。
    *
-   * 两侧都缺 = 本次拉取**失败**：状态记 `failed`（于是下次需要时还会再拉），**目录保留原值** ——
-   * 这里与上游有意不同：上游失败会把 `commands` 清空（它的会话一直活着，几乎不会失败），
-   * 而我们逐 RPC resume，失败是常态；把上一份好目录清掉只会让菜单凭空变空。因此：旧目录继续照用，
-   * 只把状态标成 `failed`，等下次需要（输入 `/`、或回车强拉）再刷新。
+   * 两侧都缺 = 本次拉取**失败**：状态记 `failed`（下次需要时还会再拉），**目录保留原值**。
+   *
+   * ⚠️ **这里与上游有意不同，别按上游改**（2026-10-09 曾误改过一次，已回退）：
+   * 上游 `ui-commands` 的 在 `catch` 里 `entry.commands = []`（丢快照），
+   * 但它的会话**常驻**；本插件的会话按 RPC 起停（服务未就绪 / 被别的进程占着都会失败），
+   * 失败是常态。**宿主层据此已经把「失败」与「空目录」分开编码**：
+   * · 的 `listCommands`/`listSkills` 失败返回 `undefined`（不是 `[]`）；
+   * · 的 `slashListReq` 在两侧都缺时下发**两侧皆缺的帧**，并注明
+   *     「页面保留现有菜单并稍后重试；若在这里把失败拼成空数组，一次失败就会把「/」菜单清成
+   *     只剩客户端贡献的 /model」。
+   * 所以这一支的契约就是「保留」，清空等于把宿主的区分抹掉。
    * 只有一侧缺时，缺的那侧沿用原值（另一侧正常更新）。
    */
   function receiveSlashCatalog(commands: SlashCommandInfo[] | undefined, skills: SlashSkillInfo[] | undefined): void {

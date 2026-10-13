@@ -7,6 +7,7 @@
 import { html } from 'htm/preact'
 import type { ChatStore } from '../../core/store/chat'
 import type { DetailItem, DetailsModel } from '../../core/details-card'
+import { renderMd } from '../../core/markdown'
 
 /** todo 三态 → codicon（无 `codicon-` 前缀）。进行中那项用 play 三角（对齐上游，不是转圈）。 */
 function statusGlyph(status: DetailItem['status']): string {
@@ -60,6 +61,9 @@ function DetailRow({ item, store }: { item: DetailItem; store: ChatStore }) {
       : null}
     ${item.lines !== undefined
       ? html`<ul class="detail-lines">${item.lines.map((line, index) => html`<li key=${index}>${line}</li>`)}</ul>`
+      : null}
+    ${item.markdown !== undefined
+      ? html`<div class="detail-prose" dangerouslySetInnerHTML=${{ __html: renderMd(item.markdown) }}></div>`
       : null}
     ${item.code !== undefined
       ? html`<pre class="detail-code">${item.code.text}</pre>`

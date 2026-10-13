@@ -5,7 +5,7 @@
 // 「为什么停了 / 要登录」。文案逐字取自上游 `ui-settings-account/src/client/locales.ts`（zh）。
 //
 // 与额度（`QUOTA`/`ACCOUNT_QUOTA`）的分工：额度是**回合失败**，走 `turn/end` 的失败文案
-// （`webview/chat/core/turn-copy.ts`）；这里管的是**没有回合**的账号态通知。
+// 这里管的是**没有回合**的账号态通知。
 import { dshEvents } from './events';
 
 /** 一条账号提示。 */

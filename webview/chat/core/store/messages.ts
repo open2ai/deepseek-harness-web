@@ -10,6 +10,13 @@ import type { DshStreamRow } from '../../../../src/dsh/rows/types'
 import type { SubagentFacts } from '../stop-control'
 import { toChatRows } from './host-rows'
 import type { ChatRow, ChatStore, RefSnap } from './types'
+import type { RenderSeatKeys } from '../nodes/render-plan'
+
+/**
+ * 座位计划的一项：类型只有**一处**定义（`render-plan.ts` 的 `RenderSeatKeys`）。
+ * 这里再导出一次，store 侧的读者不必去 `nodes/` 里找类型。
+ */
+export type SeatPlanEntry = RenderSeatKeys
 
 export interface MessagesSlice {
   store: Pick<
@@ -21,6 +28,7 @@ export interface MessagesSlice {
     | 'turnRunning'
     | 'subagentFacts'
     | 'scrollPend'
+    | 'seatPlan'
     | 'historyHasMore'
     | 'historyLoading'
     | 'historyEvents'
@@ -30,6 +38,8 @@ export interface MessagesSlice {
     | 'showNotice'
     | 'answerApproval'
     | 'openFile'
+    | 'openAttachment'
+    | 'openAttachmentBytes'
   >
   /**
    * 追加一条审批行。
@@ -38,7 +48,7 @@ export interface MessagesSlice {
    */
   pushApproval(approvalId: string, description: string, toolName?: string, displayReason?: Record<string, string>): void
   /** 追加一条用户行（本地乐观行：发出即显示，等宿主行回显后由提交标识认领）。 */
-  addUser(text: string, imgs?: ImageAttachment[], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void
+  addUser(text: string, imgs?: ImageAttachment[], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number; attachmentId?: string }>, rpcId?: string): void
   /**
    * 宿主**提交台账**的帧（`submissions`）：整表的待结算提交 + 自上一帧以来退休的那些。
    *
@@ -55,15 +65,23 @@ export interface MessagesSlice {
   nextKey(): number
   /** 在编辑器区打开文件（相对路径按 cwd——会话工作区根——解析）。 */
   openFile(path: string, line?: number, cwd?: string): void
+  /** 按附件 id 在编辑区打开附件（用户消息/图片卡里的图与文件只有 id，没有本地路径）。 */
+  openAttachment(attachmentId: string, name?: string): void
+  /** 把还没有附件 id 的字节在编辑区打开（本地乐观行里刚粘贴/拖进来的图）。 */
+  openAttachmentBytes(data: string, mediaType?: string, name?: string): void
   /** 直接追加一行（历史恢复构行用）。 */
   push(row: ChatRow): void
   /** 请求滚到底（+1 由列表组件消费后清零）。 */
   bumpScroll(): void
   /** 清空消息与进行中标记；不动 scrollPend 与 key 计数器。 */
   resetRows(): void
+  /** 座位计划（上游 render entry 同形）；与行表同帧更新。 */
+  seatPlan: Signal<ReadonlyArray<SeatPlanEntry>>
   /** 接受宿主下发的行（阶段 4）：映射后写入列表，并保留本地尚未被回显认领的乐观行。
    *  `sessionId` 用于判归属：会话一变，上一个会话的乐观行必须丢弃（否则 processing 恒真）。 */
   applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void
+  /** 接受**节点模型**映射出的 ChatRow：与 applyHostRows 同一条整表替换 + 认领逻辑。 */
+  applyNodeRows(rows: ChatRow[], sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts, seats?: ReadonlyArray<SeatPlanEntry>): void
   /** 更早的历史还没有进窗口（宿主给的窗口事实）：列表顶端据此出「加载更早」。 */
   historyHasMore: Signal<boolean>
   /** 「加载更早」是否在飞：按钮据此禁用并换成进行时文案。 */
@@ -127,7 +145,7 @@ const UNKNOWN_ECHO_GRACE_MS = 10_000
 /**
  * 宿主行表里**同一条提交标识只留一行**（页面的最后一道闸）。
  *
- * 为什么放在页面这一层：宿主已经按消息 id 挡了一道（见 `src/dsh/rows/build.ts`），但页面拿到的是
+ * 为什么放在页面这一层：宿主已经按消息 id 挡了一道，但页面拿到的是
  * 拼装后的整表 —— 窗口整表替换、行缓存与差分帧交错这些来路都在宿主与页面之间，多一道廉价的闸
  * 比在真机上再看到一次"提问重复"划算。同一 `rpcId` 的两行内容必然相同（它就是那一次提交的回显），
  * 而**用户真的连发两条同文案**时两条的 `rpcId` 不同、不受影响。
@@ -158,7 +176,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * 为什么不是 `messages.value.length === 0`（「切换权限、模型之后，新会话区域的
    * 提示词被清空了」）：切权限走的是 `/permission <preset>` 斜杠命令，会话日志里因此多出
    * `command/run` + `command/done` 一对事件，宿主照实把它建成一条 `command` 行（见
-   * `src/dsh/rows/build.ts`：上游是在**渲染**时剔 `name === 'permission'`，数据层照旧留着）。
+   * ：上游是在**渲染**时剔 `name === 'permission'`，数据层照旧留着）。
    * 按**原始行表**长度算：这条**根本不会显示**的命令行就把空会话顶成"有内容" → 欢迎页卸载，
    * 而 `MessageList` 又把它按可见性滤掉 → 会话区**一片空白**（看起来就是提示词被清空了）。
    *
@@ -188,7 +206,15 @@ export function createMessages(host: ChatHost): MessagesSlice {
    */
   const unknownEchoAt = new Map<string, number>()
   const scrollPend = signal(0)
-  /** 更早的历史还没进窗口（宿主事实，见 `src/api/dshService.ts` 的窗口分页）。 */
+  /**
+   * **座位计划**（`RenderSeatKeys[]`：一条 entry 一项，项内按序带行 key）。
+   *
+   * 页面渲染正在从"逐行"迁到"逐座位"：座位是**上游的渲染粒度**（一个 render entry 一个 seat），
+   * 而位次 / 间距 / 折叠 / 可见性四类判据应当在座位这一层判一次，
+   * 不再每一条都在"行"上重复近似。这一步先把计划接进 store（只读、不改渲染）。
+   */
+  const seatPlan = signal<ReadonlyArray<SeatPlanEntry>>([])
+  /** 更早的历史还没进窗口（宿主事实，见 的窗口分页）。 */
   const historyHasMore = signal(false)
   const historyLoading = signal(false)
   const historyEvents = signal(0)
@@ -198,7 +224,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * **待结算的提交**（宿主台账的镜像：与上游 `SessionSnapshot.pendingSubmissions` 同构）。
    *
    * 页面不再自己推断"这条本地行还会不会来" —— 位置（`transcript` / `queued` / `steering`）与退休
-   * 都由宿主判定（见 `src/dsh/submissions.ts`）：`queued` 交给队列卡表示、`steering` 留到入档、
+   * 都由宿主判定：`queued` 交给队列卡表示、`steering` 留到入档、
    * `transcript` 在"提交之后、回合真正开跑"那一拍撑住「处理中」（上游 `awaitingFirstTurn` 的等价物）。
    * 于是「处理中」不再有一条"没人回收的本地乐观行"的腿（真机 2026-10-06 的卡死来路）。
    */
@@ -251,6 +277,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
     outerAnswerStep.value = next
   }
   let rowKey = 1
+  /** 本地乐观用户行的 key：用**负数**域，与宿主行（正数）永不冲突，认领时可直接复用、不触发 preact 重挂载。 */
+  let optUserKey = -1
   /** 当前列表属于哪个会话：会话一变就丢弃本地乐观行（见 applyHostRows） */
   let rowsSessionId: string | undefined
   /** 上一次宿主下发里出现过的提交标识：判「这条本地行是否已被服务端回显认领」 */
@@ -270,6 +298,30 @@ export function createMessages(host: ChatHost): MessagesSlice {
   function openFile(filePath: string, line?: number, cwd?: string): void {
     if (!filePath) return
     host.post({ type: 'openFile', path: filePath, ...(line === undefined ? {} : { line }), ...(cwd ? { cwd } : {}) })
+  }
+  /**
+   * 按**附件 id** 打开附件（用户消息 / 图片卡里的图与文件在会话里只有 id，没有本地路径）：
+   * 交给宿主取字节 → 落临时文件 → 在**编辑区**打开（图片走 VS Code 图片预览、其它文件走编辑器）。
+   *
+   * ⚠️ "取字节"这一条对**图片与文件是同一条路**（上游 `session/attachment` 只认 id + 会话归属），
+   * 所以文件卡也走它 —— 2026-10-12 扩到 `file` 块（事件里同样带 `attachmentId`）。
+   */
+  function openAttachment(attachmentId: string, name?: string): void {
+    if (!attachmentId) return
+    host.post({ type: 'openAttachment', attachmentId, ...(name === undefined || name === '' ? {} : { name }) })
+  }
+  /**
+   * 把**还没有附件 id 的字节**在编辑区打开（本地乐观行里刚粘贴/拖进来的图）。
+   * 见 `protocol.ts` 那条消息的说明：一旦进日志就换 `openAttachment`（带 id）那条路。
+   */
+  function openAttachmentBytes(data: string, mediaType?: string, name?: string): void {
+    if (!data) return
+    host.post({
+      type: 'openAttachmentBytes',
+      data,
+      ...(mediaType === undefined || mediaType === '' ? {} : { mediaType }),
+      ...(name === undefined || name === '' ? {} : { name }),
+    })
   }
 
   const showNotice = (msgText: string, command?: string, tone: 'error' | 'ok' = 'error'): void => {
@@ -309,14 +361,27 @@ export function createMessages(host: ChatHost): MessagesSlice {
   // ---------- 消息流动作(本地渲染) ----------
   function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void {
     // 实时本地上送用本地时刻;恢复历史时传入事件自带时间戳,不覆盖为"现在"
-    push({ kind: 'user', key: rowKey++, text: textMsg, images: imgs, time: time !== undefined ? formatMsgClock(time) : nowTime(), refs, ...(imageRefs && imageRefs.length > 0 ? { imageRefs } : {}), ...(files && files.length > 0 ? { files } : {}), ...(rpcId !== undefined ? { rpcId } : {}) })
+    push({ kind: 'user', key: optUserKey--, text: textMsg, images: imgs, time: time !== undefined ? formatMsgClock(time) : nowTime(), refs, ...(imageRefs && imageRefs.length > 0 ? { imageRefs } : {}), ...(files && files.length > 0 ? { files } : {}), ...(rpcId !== undefined ? { rpcId } : {}) })
   }
   /**
    * 接受宿主下发的行（阶段 4，见 docs/design/08 §11）：**整表替换** —— 宿主是行列表的唯一权威。
    * 只有一种例外：本地已出、但尚未被回显认领的**乐观行**要留住（否则刚发出去的消息会一闪而没）。
    * 认领判定用提交标识：宿主行里已有同标识 → 已被认领；没有 → 还没回显，保留在末尾。
    */
-  function applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
+  /** 接受宿主下发的行：映射成 ChatRow 后整表替换（宿主是行列表的唯一权威）。 */
+function applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
+    installMappedRows(dropDuplicateUserRows(toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : [])), sessionId, turnActive, subagent)
+}
+
+/** 接受节点模型映射出的 ChatRow：与 applyHostRows 同一条整表替换 + 认领。 */
+function applyNodeRows(rows: ChatRow[], sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts, seats?: ReadonlyArray<SeatPlanEntry>): void {
+    // 座位计划与行表**同帧更新**：它是行的"分组说明书"（哪些行属于同一项），
+    // 分两帧更新就会出现"计划指向已经不在的行"这种中间态。
+    seatPlan.value = seats ?? []
+    installMappedRows(dropDuplicateUserRows(rows), sessionId, turnActive, subagent)
+}
+
+function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
     // 会话变了 → 列表里那些「本地已出、尚未被回显认领」的乐观行属于**上一个会话**，必须丢掉：
     // 留着会让 pending 恒非空 → processing 恒真（一直「深度求索中」，停止按钮还对着别人的行）。
     // 上游的做法更彻底（乐观态挂在**会话**上、不混进时间线），这里先按会话归属把它清掉。
@@ -364,7 +429,6 @@ export function createMessages(host: ChatHost): MessagesSlice {
       }
       rowsSessionId = sessionId
     }
-    const host = dropDuplicateUserRows(toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : []))
     const claimed = new Set(
       host
         .filter((r): r is Extract<ChatRow, { kind: 'user' }> => r.kind === 'user')
@@ -384,6 +448,9 @@ export function createMessages(host: ChatHost): MessagesSlice {
       if (local === undefined) return r
       return {
         ...r,
+        // 认领时**复用本地 key**：本地行与宿主行是同一件事，换 key 会让 preact 卸载再挂载那一行
+        //（首发送「会话区闪一下」的来源）。本地 key 在负数域，与宿主正数 key 永不冲突。
+        key: local.key,
         ...(local.images.length > 0 ? { images: local.images } : {}),
         ...(local.files !== undefined ? { files: local.files } : {}),
         ...(local.refs !== undefined ? { refs: local.refs } : {}),
@@ -687,6 +754,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
       turnRunning,
       subagentFacts,
       scrollPend,
+      seatPlan,
       historyHasMore,
       historyLoading,
       historyEvents,
@@ -696,9 +764,14 @@ export function createMessages(host: ChatHost): MessagesSlice {
       showNotice,
       answerApproval,
       openFile,
+      openAttachment,
+      openAttachmentBytes,
     },
     openFile,
+    openAttachment,
+    openAttachmentBytes,
     applyHostRows,
+    applyNodeRows,
     failSubmission,
     applySubmissions,
     applyHistory,
@@ -706,6 +779,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
     historyHasMore,
     historyLoading,
     historyEvents,
+    seatPlan,
     sessionOpenError,
     pushApproval,
     addUser,

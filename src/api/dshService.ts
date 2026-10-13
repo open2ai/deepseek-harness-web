@@ -2,6 +2,13 @@
 // 职责：进程管理、共享会话、对话、DSH 面板、查看模式、全量 DSH API 通用通道。
 import * as vscode from 'vscode';
 import { spawn, execFile, type ChildProcess, type SpawnOptions, type StdioOptions } from 'child_process';
+import { hostConflictDecision, otherDshHosts } from './dshHostConflict';
+// ⚠️ **直连零依赖模块，不要走 `../dsh` barrel**（2026-10-12 真机 `shouldVerifyCheckpoint is not defined`）：
+// 里 `export * from './rows'`，而本文件也被 `dsh` 门面引用 —— 从 barrel 拿这个函数
+// 会落进**循环依赖**，运行时取到 `undefined`。它本来就没有任何依赖，直接指文件最稳。
+import { shouldVerifyCheckpoint } from '../dsh/rows/checkpoint-verify';
+// 分叉子会话的标题升号（纯函数，算法逐字对齐上游；见该文件头的出处与"服务端不做这件事"的查证）
+import { increasedForkTitle } from '../dsh/fork-title';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -16,6 +23,7 @@ import {
     createSession,
     sendPrompt,
     forkSession as forkSessionRpc,
+    renameSession as renameSessionRpc,
     cancelSession,
     interruptSubagent,
     listMessageFeedback,
@@ -49,8 +57,7 @@ import {
     followSession,
     buildRowsIncremental,
     type RowsFoldCheckpoint,
-    foldTodos,    type DshFollowHandle,
-    type DshFollowWindow,
+    foldTodos,    type DshFollowHandle,    type DshFollowWindow,
     type DshStreamEvent,
     type DshStreamRow,
     type DshTodoItem,
@@ -80,6 +87,7 @@ import {
     readChatPrefs as readChatPrefsRpc,
     getCachedChatPrefs as getCachedChatPrefsRpc,
     subscribeChatPrefs as subscribeChatPrefsRpc,
+    subscribeSettingsDocument as subscribeSettingsDocumentRpc,
     type DshAgentPresetRoster,
     type DshAgentPresetDocument,
     type DshChatPrefs,
@@ -102,14 +110,9 @@ const NODE_REQUIREMENT = '^22.19.0 || >=24.0.0';
  */
 const OWNED_ENDPOINT_KEY = 'dsh.ownedEndpoint';
 
-/**
- * 断点续折的校验抽样：每这么多次**复用旧断点**的构建，全量重折一遍做逐字节比对。
- *
- * 校验不便宜（一次全量 = 几百毫秒），而它防的是「断点折叠与全量折叠不等价」——
- * 那种问题的判据在**真实会话**上（`tmp/_rows.checkpoint.test.mjs` 已逐回合钉住），
- * 生产里再按轮次抽样属于兜底：真出现了就自愈，而不是让正文悄悄错一段。
- */
-const CHECKPOINT_VERIFY_EVERY = 5;
+// 断点续折的校验抽样策略在 `dsh/rows/checkpoint-verify.ts`（零依赖模块，守卫可直接调用断言行为；
+// 放这里的话守卫一 import 就把 `vscode` 拉进来，判据只能退化成搜源码字符串）。
+// 见该文件里两个间隔的理由：小会话 5、大会话 50（那一次是全量重折，成本随窗口线性涨）。
 
 /**
  * 投递节流里「每 MB 载荷记多少毫秒」。
@@ -130,9 +133,8 @@ const TURN_WATCH_INTERVAL_MS = 2000;
 /**
  * 事件窗口**不设条数上界**（与上游一致）。
  *
- * 上游 `session-controller/src/client` 里只有**取数页大小**（`PAGE_MESSAGES = 50` /
- * `JUMP_PAGE_MESSAGES = 200`），窗口本身按 `seq` 合并、**从不按条数裁剪**（`contract/events.ts`
- * 的 `publish`），显示量交给渲染层虚拟化。长会话卡顿的正解是**渲染层虚拟化**（登记在 `12` §3.3，
+ * 上游客户端里只有**取数页大小**两个常量，窗口本身按 `seq` 合并、**从不按条数裁剪**，
+ * 显示量交给渲染层虚拟化。长会话卡顿的正解是**渲染层虚拟化**（登记在 `12` §3.3，
  * B 类待办），不是删数据。
  */
 
@@ -144,6 +146,44 @@ function isProcessAlive(pid: number): boolean {
     } catch (e) {
         return (e as NodeJS.ErrnoException).code === 'EPERM';
     }
+}
+
+/**
+ * 扫一遍**别在跑的 dsh 宿主**（只探测，不动它们）。
+ *
+ * 为什么需要：工作区归属只活在 `~/.dsh/storages/workspace.json`，而每个 dsh 宿主进程各持一份
+ * canonical-cwd 索引、落盘时会把不认识的会话 id **从成员表物理删掉**。两个宿主共用一份 `~/.dsh` 时
+ * 归属会被互相抹掉（真机：新会话掉进「未分组」）。判据与文案在 `./dshHostConflict`（纯函数、有守卫）。
+ *
+ * @returns 别的宿主的 {pid, command}（探测失败一律返回空 —— **不因为探测不了就拦住启动**）。
+ */
+function scanOtherDshHosts(): Promise<Array<{ pid: number; command: string }>> {
+    return new Promise((resolve) => {
+        const selfPid = process.pid;
+        const isWin = process.platform === 'win32';
+        const run = (cmd: string, args: string[]): Promise<string> =>
+            new Promise((done) => {
+                execFile(cmd, args, { windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+                    done(err ? '' : (stdout || ''));
+                });
+            });
+        void (async () => {
+            if (!isWin) {
+                resolve(otherDshHosts(await run('ps', ['-eo', 'pid=,args=']), selfPid));
+                return;
+            }
+            // Windows：wmic 还在就用它（最快）；已被移除的系统退 PowerShell 的 CIM 查询。
+            // 两条都拿不到 → 空数组（**不因为探测不了就拦住启动**）。
+            let text = await run('wmic', ['process', 'get', 'ProcessId,CommandLine', '/format:list']);
+            if (text.trim() === '') {
+                text = await run('powershell', [
+                    '-NoProfile', '-NonInteractive', '-Command',
+                    'Get-CimInstance Win32_Process | ForEach-Object { "CommandLine=" + $_.CommandLine; "ProcessId=" + $_.ProcessId }',
+                ]);
+            }
+            resolve(otherDshHosts(text, selfPid));
+        })();
+    });
 }
 
 /** 工作区视图（workspace.list / workspace.create 返回） */
@@ -189,7 +229,7 @@ function normalizePath(p?: string): string {
 /**
  * 从 goal 投影里取出**CAS 引用** `{id, revision}`（上游 `GoalRef`）。
  *
- * 形状兼容两层：上游 `GoalProjection = { goal: GoalSnapshot, … }`（`goal/src/types.ts:107`），
+ * 形状兼容两层：上游 `GoalProjection = { goal: GoalSnapshot, … }`，
  * 但也见过扁平写法（`{id, revision, phase, …}`），两种都收。
  * 缺 `revision` 时返回 undefined —— 没有版本号就无法 compare-and-set，宁可什么都不做也不盲打
  *（盲打会被服务端按"版本不符"拒掉，用户看到的是一个没头没尾的报错）。
@@ -262,6 +302,14 @@ export class DshService {
     private dshStdout = '';
     private ready = false;
     private starting = false;
+    /**
+     * 双宿主警告**本会话是否已经提醒过且用户没选「仍然启动」**。
+     *
+     * `ensureRunning` 会被很多入口反复调用（提交 / 打开面板 / 就绪握手…），
+     * 用户第一次点 × 关掉通知后，不能下一次调用又弹一遍 —— 记一次，本会话内就不再重复提醒，
+     * 直接不自起（返回 false）。用户真的关掉另一个宿主之后，`conflict.confirm` 变假，照常放行。
+     */
+    private hostConflictDismissed = false;
     private ensurePromise: Promise<boolean> | undefined;
     // 共享会话（右键/对话/网页同一条线）
     private currentSessionId: string | undefined;
@@ -297,6 +345,11 @@ export class DshService {
     private permissionCatalogRequested = false;
     /** 本会话收到的事件（保结构）：**行构建的唯一输入**；换会话时清空。 */
     private streamEvents: DshStreamEvent[] = [];
+    /**
+     * 「窗口被整份替换过、还没告诉页面」的标记（见 `applyWindowChange` 与 `WindowChange.replaced`）。
+     * 随**下一帧**事件帧下发一次后清掉。
+     */
+    private windowReplacedForPage = false;
     /** 事件窗口的当前实例（不按条数裁剪；见 `history-window.ts` 的类注释）。 */
     private window: HistoryWindow<DshStreamEvent>;
     /**
@@ -304,7 +357,7 @@ export class DshService {
      *
      * 用途：回合尾部的「改动文件卡」。上游这张卡的数据来自 **Host 内存态**
      *（`GET /api/changes.summary`），Host 重启/会话释放后就拿不到了 —— 那时上游**也不显示**该卡
-     *（`docs/design/12` §2.1.7）。所以本插件同样**问一次、拿到才画**，不自己从 `write`/`edit`
+     *（上游同款口径）。所以本插件同样**问一次、拿到才画**，不自己从 `write`/`edit`
      * 调用重建（重建会让历史会话凭空多出上游没有的卡：2026-10-04 真机截图现象）。
      * `null` 也缓存（上游 `retryable: () => false`：一次说没有就不再重问）。换会话清空。
      */
@@ -424,6 +477,10 @@ export class DshService {
     historyHasMore(): boolean {
         return this.window.hasMore();
     }
+    /** 已取回的回合改动摘要（`seq` → 摘要 / `null` = 没有）；节点模型据此补「改动文件卡」。 */
+    changesSummaryMap(): ReadonlyMap<number, DshChangesSummary | null> {
+        return this.changesSummaries;
+    }
 
     /**
      * **打开历史失败**的事实（上游 `openState === 'error'` + `openError`）：页面据此在列表顶端出一条横幅。
@@ -510,7 +567,14 @@ export class DshService {
     }
 
     /** 窗口变过之后同步只读视图（窗口不裁剪，所以这里只做一次拷贝）。 */
-    private applyWindowChange(_change: WindowChange): void {        this.streamEvents = [...this.window.list()];
+    private applyWindowChange(change: WindowChange): void {
+        this.streamEvents = [...this.window.list()];
+        // 整份替换（重开订阅的首帧快照）要往页面**转达一次**：页面侧的归一化缓存与折叠断点
+        // 只看得到"头 seq + 长度"，同头同长的改写它察觉不到（见 `WindowChange.replaced`）。
+        // 只转达一次：随下一帧事件帧下发后清掉，之后的追加帧照旧。
+        if (change.replaced === true) {
+            this.windowReplacedForPage = true;
+        }
     }
 
     /**
@@ -662,7 +726,18 @@ export class DshService {
                         this.captureVersion(launcher.versionCmd);
                     }
                     child.stdout?.on('data', (d: Buffer) => { this.dshStdout += d.toString(); });
-                    child.stderr?.on('data', (d: Buffer) => { this.dshStderr += d.toString(); });
+                    child.stderr?.on('data', (d: Buffer) => {
+                        const text = d.toString();
+                        this.dshStderr += text;
+                        // **归属相关的那几句不能只躺在缓存里**（2026-10-10 取证：宿主那句
+                        // `workspace '<id>' filtered session '<sid>' from membership: <reason>` 此前全无出口，
+                        // 于是「新会话掉进未分组」查不到任何痕迹）。这里把它们转进事件窗口日志（Output 面板）。
+                        for (const line of text.split(/\r?\n/)) {
+                            if (line.includes('filtered session') || line.includes('membership') || line.includes('workspace-attach')) {
+                                this.onWindowLog?.(`[dsh-host] ${line.trim()}`);
+                            }
+                        }
+                    });
                     child.once('spawn', () => resolve(child));
                     child.once('error', (err) => reject(err));
                 } catch (e) {
@@ -823,6 +898,25 @@ export class DshService {
                 vscode.window.showErrorMessage(`dsh.port 配置的端口 ${cfgPort} 没有检测到 DSH 服务在运行`);
                 return false;
             }
+            // ②-b **同一份 ~/.dsh 上已经有别的 dsh 宿主在跑？**（2026-10-10 真机取证）
+            //
+            // 工作区归属只存在于 ~/.dsh/storages/workspace.json 的成员表，而每个宿主进程落盘时会
+            // 把本进程索引不认识的会话 id **从成员表删掉** —— 两个宿主的归属会互相抹掉，真机表现
+            // 就是「新会话跑到未分组」。自起第二个宿主之前必须让用户知道，别静默制造这个局面。
+            // 用户点「仍然启动」才继续（默认取消：把选择权留在用户手里）。
+            const others = await scanOtherDshHosts();
+            const conflict = hostConflictDecision(others);
+            if (conflict.confirm) {
+                // 已提醒过、用户没选「仍然启动」→ 本会话不再重复弹，直接不自起
+                if (this.hostConflictDismissed) {
+                    return false;
+                }
+                const pick = await vscode.window.showWarningMessage(conflict.message, '仍然启动');
+                if (pick !== '仍然启动') {
+                    this.hostConflictDismissed = true;
+                    return false;
+                }
+            }
             // ② Node 版本检查
             const node = await this.checkSystemNode();
             if (!node.ok) {
@@ -904,8 +998,23 @@ export class DshService {
     // ---------- 共享会话 / 对话 ----------
 
     /** 取当前共享会话，没有则创建 */
-    /** 行变更回调：装配层接到下发给页面的通道上（渲染**只剩这一条通路**，见 docs/design/08 §13）。 */
+    /** 行变更回调：装配层接到下发给页面的通道上（渲染**只剩这一条通路**）。 */
     onRows: ((rows: DshStreamRow[], turnActive: boolean) => void) | undefined;
+    /**
+     * **保结构事件回调**（节点模型影子通路）：把窗口原文（`streamEvents`）下发，客户端据此建节点模型
+     *（分组/可见性/折叠/块序在客户端算）。与 `onRows` 同源同刻（都在 `flushRows`），
+     * 目前只影子对照、界面零变化；切换渲染源后 `onRows` 退役。
+     */
+    onEvents: ((events: DshStreamEvent[], sessionId: string | undefined, turnActive: boolean, replaced?: boolean) => void) | undefined;
+
+    /**
+     * **宿主侧「这一次提交入档了」的收尾**（推 `submissions` 退休帧）。
+     *
+     * 为什么单开一个回调而不是留在 `onRows` 里：页面认领本地回显靠的是 `chatEvents`（渲染源），
+     * 所以**退休帧必须排在事件帧之后**；而 `onRows` 里无论如何都在 `onEvents` 之前（见 `flushRows`）。
+     * 顺序错的真机表现：发送后对话区闪一下（本地回显先没、真行后到）。
+     */
+    onSubmissionsAdmitted: ((sessionId: string | undefined) => void) | undefined;
 
     /**
      * 任务清单变更回调（输入框上方的常驻条；`null` = 没有清单）。
@@ -1333,10 +1442,25 @@ export class DshService {
     }
 
     /**
+     * 让下一次 `ensurePermissionCatalog()` 重新读目录。
+     *
+     * 为什么需要：`control.ts` 那条路（订阅上游 `permission-presets/catalog-changed` emit）是活的，
+     * 但它走的是 `onProjection`；而 `postChatInfo` / `readSettings` 走的是**本类这份缓存**。
+     * 只读一次的话，用户在设置里开关「自动授权审查 / 智能体团队」后，`postChatInfo` 会把**旧目录**
+     * 推给页面（权限选择器少/多一项），得等 control 那条 emit 来纠偏 —— 谁后到谁生效，不该赌顺序。
+     *
+     * 旧目录**不立刻清空**：新目录读回来之前仍拿它兜底（与上游「目录失败时保留并重试」同义）。
+     */
+    invalidatePermissionCatalog(): void {
+        this.permissionCatalogRequested = false;
+    }
+
+    /**
      * 懒读一次进程级权限目录（dsh 0.1.7 的 `permissionPresets/catalog`）。
      *
-     * 只读一次、失败不重试：0.1.5-rc.2 上这条 remote 不存在，重试只会反复打 404 噪音；
-     * 目录随贡献变化时由 `control.ts` 的 emit 订阅负责重读并补发。
+     * 读一次后缓存；**设置文档一变就失效重读**（见 `invalidatePermissionCatalog`）。
+     * 失败不重试：0.1.5-rc.2 上这条 remote 不存在，重试只会反复打 404 噪音；
+     * 目录随贡献变化时另由 `control.ts` 的 emit 订阅重读并补发。
      */
     private ensurePermissionCatalog(): void {
         if (this.permissionCatalogRequested) {
@@ -2012,8 +2136,9 @@ export class DshService {
             ...(this.rowsCheckpoint === undefined ? {} : { checkpoint: this.rowsCheckpoint }),
             // 校验（最强那种：同跑一次全量并逐字节比对）按轮次抽样，且只在**复用旧断点**时才付这份钱。
             // 它换来的是「断点与全量不等价」这类问题在真实会话里自动被发现并以全量为准，
-            // 而不是让正文悄悄错一段 —— 代价是每 N 轮多一次全量重折。
-            verify: this.rowsCheckpoint !== undefined && this.checkpointUses % CHECKPOINT_VERIFY_EVERY === 0,
+            // 而不是让正文悄悄错一段 —— 代价是每 N 轮多一次全量重折（N 见 `shouldVerifyCheckpoint`：
+            // 小会话 5、大会话 50，因为那一次是全量、成本随窗口线性涨）。
+            verify: this.rowsCheckpoint !== undefined && shouldVerifyCheckpoint(this.streamEvents.length, this.checkpointUses),
         });
         this.rowsCheckpoint = result.checkpoint;
         if (result.checkpoint !== undefined) {
@@ -2026,7 +2151,7 @@ export class DshService {
      * 给行挂上**改动摘要**，并为还没问过的 `changesSeq` 起一次取回（见 `dsh/changes-summary.ts`）。
      *
      * 为什么挂在行上而不是另开一帧：摘要是**回合级事实**，与「本轮文件改动」的渲染一一对应；
-     * 行帧本来就是这个插件下发行事实的唯一通道（`host-rows.ts` 只搬运、不判断）。
+     * 事件帧是这个插件下发行事实的唯一通道，页面据此折行再挂摘要。
      * 取回是异步的：**到账前那张卡不出现**（与上游一致：摘要没读到就没有卡），到账后 `emitRows()`
      * 重发一帧，卡片自然浮现。`null` 也进缓存 —— 一次说没有就不再重问（上游 `retryable: () => false`）。
      */
@@ -2075,6 +2200,19 @@ export class DshService {
             }
         }
         this.onRows(rows, active);
+        // 保结构事件同刻下发（**渲染源**）：客户端节点模型吃同一份窗口原文。
+        // `replaced` 只在这一帧为真（窗口刚被整份换过），页面据此丢掉归一化缓存与断点。
+        this.onEvents?.(this.streamEvents, this.getSessionId(), active, this.windowReplacedForPage);
+        this.windowReplacedForPage = false;
+        // ⚠️ **认领/退休帧必须排在这两帧之后**（2026-10-10 真机：发送后对话区闪一下又回来）。
+        //
+        // 页面认这一次提交的入档靠的是 `chatEvents`（行帧已退役、页面不再读它）；而退休帧
+        // （`submissions` 的 `admitted`）一到，页面就收掉本地回显。若退休先到：本地回显没了、
+        // 承接它的真行还没来 —— 那一拍里这条提问**没有任何东西在表示它**（就是「闪一下」）。
+        //
+        // 原先这次退休挂在 `onRows` 末尾（那时页面还读行帧，所以顺序是对的）；渲染源换成事件之后，
+        // 它变成了「退休帧 → chatEvents」这个错误顺序。所以搬到**事件帧之后**。
+        this.onSubmissionsAdmitted?.(this.getSessionId());
         // 已到期的回合结算（用**这一份**刚建好的行，不重算；见 noteTurnSettled）
         if (this.settlePending) {
             this.settlePending = false;
@@ -2331,8 +2469,51 @@ export class DshService {
             return reusable;
         }
         const sid = await createSession({ workspaceId: wsId });
+        // **建完立刻核一遍归属**（2026-10-10 真机：新会话出现在「未分组」）。
+        //
+        // `session.create { workspaceId }` 只是**请求**宿主把这条会话挂进工作区；宿主侧
+        // `workspace.attachSession` 失败时它会明确报 `session/workspace-attach-failed`，
+        // 而**有的版本/路径**既不改成员表、也不报错 —— 于是会话建出来了、却谁都不属于：
+        // 侧栏与网页端都会把它归到「未分组」（真机现象）。
+        //
+        // 判据不看返回值、看**事实**（工作区成员表）；没挂上就显式补一次登记（幂等收养），
+        // 还是挂不上就如实告警 —— 绝不让它静默落进「未分组」。
+        await this.ensureSessionInWorkspace(wsId, sid);
         this.setCurrentSession(sid);
         return sid;
+    }
+
+    /**
+     * **确保这条会话真的在工作区成员表里**（幂等）：不查返回值，查 `workspace.list` 的事实。
+     *
+     * @param workspaceId - 目标工作区。
+     * @param sessionId - 刚建出来（或要收养）的会话。
+     * @returns 核对之后它确实在成员表里才 true（本来就属于这里也算 true）。
+     */
+    async ensureSessionInWorkspace(workspaceId: string, sessionId: string): Promise<boolean> {
+        const isMember = async (): Promise<boolean> => {
+            try {
+                const list = await this.listWorkspaces();
+                const ws = (list.items ?? []).find((w) => w.workspaceId === workspaceId);
+                return (ws?.sessionIds ?? []).includes(sessionId);
+            } catch {
+                // 列表读不到就**不下结论**（当作已挂上，别在探测失败时反复补登记）
+                return true;
+            }
+        };
+        if (await isMember()) {
+            return true;
+        }
+        try {
+            await createSession({ sessionId, workspaceId });
+        } catch (e) {
+            console.warn('[dsh-ws] 补登记失败 session=' + sessionId + ' ws=' + workspaceId + '：' + (e instanceof Error ? e.message : String(e)));
+        }
+        const ok = await isMember();
+        if (!ok) {
+            console.warn('[dsh-ws] 会话仍未归属工作区（会显示成「未分组」）session=' + sessionId + ' ws=' + workspaceId);
+        }
+        return ok;
     }
 
     // ---------- 工作区 / 会话历史恢复 ----------
@@ -2638,11 +2819,15 @@ export class DshService {
     }
 
     /**
-     * 从一段已完成回合分叉出新会话（标题升号交给宿主，见下）。
-     * 为什么升号：分叉会把源会话的**标题事件一并复制**进子会话，不升号两者在会话列表里同名。
-     * **升号是宿主的能力**（分叉请求里带 `increaseTitle`，与上游客户端同一做法）——客户端自己
-     * `durableTitleFor` + 算号 + `rename` 是把这个能力重做一遍，而且本地只拿得到**源标题**、
-     * 看不到已有的兄弟会话，于是同一个源分叉两次会得到两个 `(1)`（真机反馈）。
+     * 从一段已完成回合分叉出新会话（**标题升号：客户端做，与上游同**）。
+     *
+     * 为什么必须升号：分叉会把源会话的**标题事件一并复制**进子会话，不升号两者在会话列表里同名。
+     *
+     * ⚠️ **"升号是宿主能力"这个说法是错的**（2026-10-13 查证并改正）：服务端的分叉请求只有
+     * 会话标识与切点序号两个字段，**没有**"是否升号"这类开关（全仓搜不到那个字段名）—— 插件当年
+     * 把它当 RPC 字段发出去，服务端**忽略**它 ⇒ 子会话永远拿不到 ` (1)`
+     *（真机："新对话名字后面没有像上游一样的命名规则"）。
+     * 上游就是在**客户端**做的：读源标题 → 分叉 → 算号 → 改名。本方法照这三步实现。
      * @param sessionId - 源会话。
      * @param atSeq - 切点事件序号；省略 = 从最后一条已完成回合分叉。
      * @returns 子会话标识与它的标题（读不到标题时为 undefined）。
@@ -2650,6 +2835,25 @@ export class DshService {
     async forkSession(sessionId: string, atSeq?: number): Promise<{ sessionId: string; title?: string }> {
         if (!(await this.ensureRunning())) {
             throw new Error('DSH 服务不可用，无法分叉会话');
+        }
+        /*
+         * **标题升号：照上游三步走**（上游把这件事做在客户端，服务端没有这个能力）。
+         *
+         * 服务端的分叉请求只有会话标识与切点序号两个字段，**没有**"是否升号"这类开关（全仓搜不到
+         * 那个字段名）。插件曾经把它当 RPC 字段发出去（被忽略）⇒ 子会话标题永远等于源标题、
+         * **不出现 ` (1)`**（真机："新对话名字后面没有像上游一样的命名规则"）。三步是：
+         *   ① 先读**源会话的持久标题**；
+         *   ② 分叉（只传服务端认的字段，见 `dsh/session.ts` 的分叉包装）；
+         *   ③ 用 `increasedForkTitle()` 算号 → 调「改名」。
+         */
+        let sourceTitle: string | undefined;
+        try {
+            const name = await this.durableTitleFor(sessionId);
+            if (name !== '') {
+                sourceTitle = name;
+            }
+        } catch {
+            // 读不到源标题就**不升号**（与上游同：拿不到标题时那一步整个跳过、分叉照常返回）
         }
         const childId = await forkSessionRpc(sessionId, atSeq);
         // 归属：子会话**继承源会话的工作区**。
@@ -2661,8 +2865,19 @@ export class DshService {
         // 子会话事实（谁是它的父 + 父在不在）：刚分叉出来的子会话马上就会用上 —— 它在跑的时候
         // 「停止」要走父级中断，不能等下一次列表刷新才知道自己的父是谁。
         await this.refreshSubagentFacts();
-        // 标题由**宿主**升号（分叉请求里的 `increaseTitle`）——这里只把结果读回来给提示用；
-        // 读不到就只提示"已分叉"，**不再自己算名字**（客户端算号会与宿主打架，且看不到兄弟会话）。
+        // ③ 升号（纯函数 `dsh/fork-title.ts`，算法逐字对齐上游）
+        if (sourceTitle !== undefined) {
+            try {
+                await renameSessionRpc(childId, increasedForkTitle(sourceTitle));
+            } catch (e) {
+                /*
+                 * ⚠️ **与上游的一处有意偏离**：上游在改名失败时**抛错**，但那一刻**子会话已经创建好了**
+                 * —— 抛出去会让调用方以为"分叉失败"，而会话其实在。插件选**记警告并继续**（分叉可用优先）。
+                 */
+                console.warn(`[dsh-fork] 子会话标题升号失败（分叉本身已完成）：${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
+        // 标题读回来给提示用（升号后读，拿到的是落定值）
         let title: string | undefined;
         try {
             const name = await this.durableTitleFor(childId);
@@ -2676,7 +2891,7 @@ export class DshService {
         // 所以把每一步留在控制台，出问题时能一眼看出是没触发、失败、还是成功但看不出差别。
         console.warn(
             `[dsh-fork] source=${sessionId} atSeq=${String(atSeq)} child=${childId} ` +
-                `title=${title ?? '(未读到标题)'}`
+                `sourceTitle=${sourceTitle ?? '(未读到)'} title=${title ?? '(未读到标题)'}`
         );
         return { sessionId: childId, ...(title === undefined ? {} : { title }) };
     }
@@ -2934,8 +3149,7 @@ export class DshService {
      * 目标条的动作（编辑 / 暂停 / 恢复 / 清除）——**直接打上游的 goal RPC**，不走 `/goal` 命令。
      *
      * 为什么不用 `/goal`：命令要**下一轮**才被 agent 处理（会多跑一次模型回合），而目标条上的按钮
-     * 是即时操作。上游 `ui-goal` 也是这么打的（`ctx.remote.goals.edit|pause|resume|clear`，
-     * `client/index.ts:102-120`）。
+     * 是即时操作。上游目标条的四个动作也是直接打这四个 remote，不经命令。
      *
      * **CAS 用投影里的 `{id, revision}`**：上游服务端拿它做 compare-and-set（`expectCurrent`），
      * 版本不符会报错 —— 所以每次动作**现读投影**、不缓存，避免拿旧 revision 撞 CAS。
@@ -3042,6 +3256,11 @@ export class DshService {
     /** 订阅上游「设置 → 通用设置」四项偏好变更（emit 实时跟随 + 重连后重读对齐）；返回退订函数 */
     subscribeChatPrefs(cb: (prefs: DshChatPrefs) => void): () => void {
         return subscribeChatPrefsRpc(cb);
+    }
+
+    /** 订阅**设置文档任何变化**（不按命名空间过滤）：模型/预设/权限选择器据此实时刷新；返回退订函数 */
+    subscribeSettingsDocument(cb: () => void): () => void {
+        return subscribeSettingsDocumentRpc(cb);
     }
 
     /** 切换当前会话的 agent 模式（仅空白会话可切，后端会拒绝已开始的会话） */
@@ -3179,6 +3398,7 @@ export class DshService {
         const value = await rpcCall<boolean | undefined>('userQuestions/answer', lateAnswerArgs(target, callId, answers));
         return typeof value === 'boolean' ? value : undefined;
     }
+
 
     /** 取消 ask_user_question（rc.1 以 UserQuestionError/ASK_CANCELLED 拒绝该 waterfall） */
     /**

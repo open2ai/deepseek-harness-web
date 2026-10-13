@@ -13,10 +13,15 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
 
 /**
  * 内容里**有没有**工具增删块。
- * @param content - 内容块数组（可能坏形；认不出的块不算）。
+ *
+ * ⚠️ **两种形状都要容**（2026-10-10 真机）：数组（常见）与**单个块对象**（真窗口里就有）。
+ * 原先直接 `content.some(...)` —— 遇到单块形状会抛 `content.some is not a function`：
+ * 那一条注入所在的行会整行渲染失败（落成 `row-error` 的错误行）。
+ * @param content - 内容块（数组或单块；坏形一律当作「没有」）。
  */
-export function hasToolChangeBlock(content: readonly unknown[]): boolean {
-  return content.some((block) => {
+export function hasToolChangeBlock(content: readonly unknown[] | unknown): boolean {
+  const blocks = Array.isArray(content) ? content : content === null || content === undefined ? [] : [content]
+  return blocks.some((block) => {
     const record = asRecord(block)
     return record !== null && (record['type'] === 'tool-addition' || record['type'] === 'tool-removal')
   })
@@ -61,7 +66,7 @@ export function hasVisibleAssistantContent(row: { text?: string; chain?: readonl
 /**
  * 这一行是否进聊天区。
  *
- * ⚠️ 上游 `isVisibleChatNode` 还**剔除 `name === 'permission'` 的命令行**（`contract/chat-visibility.ts`）：
+ * ⚠️ 上游 `isVisibleChatNode` 还**剔除 `name === 'permission'` 的命令行**：
  * 权限预设切换在界面上由 Access chip 表达，命令行不再重复一行。
  * @param row - 行（用 `kind`；`context` 行看 `content`；`command` 行看 `name`；`assistant` 行看 `text`/`chain`）。
  */

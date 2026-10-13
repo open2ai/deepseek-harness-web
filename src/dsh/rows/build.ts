@@ -1,6 +1,6 @@
 // 事件流的行构建（适配上游 0.1.7-rc.2）：把事件序列归约成**行模型**。
 //
-// 为什么放在宿主（见 docs/design/08 §9）：
+// 为什么放在宿主：
 //   - 解包（三层嵌套 / 结果文本展平 / 退出码 / 上下文投影）只此一份，就在本层（`official/`）；
 //   - 认领（提交标识 ↔ 服务端回显）也在这层 —— 认领操作的就是行模型，同侧才不用跨层传标识；
 //   - 历史重建与实时因此能共用同一个构建器，两条链合并。
@@ -39,7 +39,7 @@ function contentText(content: unknown): string {
 /**
  * 这条**上下文注入**在聊天区里会不会显示出来（内容里有工具增删块才留一行）。
  *
- * 与页面侧 `webview/chat/core/chat-visibility.ts` 的 `hasToolChangeBlock()` **同一判据**
+ * 与页面侧 的 `hasToolChangeBlock` **同一判据**
  * （刻意的两处实现：宿主构建时不依赖 webview 模块图 —— 那是另一套 bundle）。
  * 两处必须同改；上游依据：`isVisibleChatNode` 把普通 `context` 节点排除
  * （`node.kind !== 'context'`），只有带工具增删块的那条在本插件里会渲染成"工具变更通知行"。
@@ -544,7 +544,9 @@ export function buildRowsIncremental(
      *
      * 位置由 `textInsertAt` 决定：本步工具已在链上就插到它**之前**（模型的说明写在调用之前），
      * 否则接在**上一步块尾之后**（不越过步边界）。块内「推理与文本谁先」由事件因果决定，
-     * 不做二次排序 —— 上游按块次序持有 `anchorSeq`，插件按到达次序近似，见 `docs/design/06`。
+     * 不做二次排序 —— 上游按块次序持有 `anchorSeq`，本通路按到达次序。
+     * **这条通路已不参与渲染**（渲染源是客户端的节点模型，见 `webview/chat/core/nodes/*`）：
+     * 它现在只服务台账/清单/结算这些宿主侧事实，所以这里的次序差异不再影响界面。
      */
     const appendStepTexts = (step: number | undefined, texts: readonly string[]): number[] => {
         const row = ensureActive();
@@ -1357,7 +1359,7 @@ export function buildRowsIncremental(
 
         // `developer/message`：上游 `developerMessageDefinition` 复用**上下文行的呈现**，
         // 故这里也入链成一条 context 项。内容全是工具增删块时，页面按上游 `ContextInjectionRow`
-        // 的规则改走「工具已更新」形态（`webview/chat/core/context-body.ts`）。
+        // 的规则改走「工具已更新」形态。
         if (type === 'developer/message') {
             const raw = d['message'];
             const message = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
@@ -1484,9 +1486,9 @@ export function buildRowsIncremental(
                 }
                 // 上下文注入属于**过程**：入当前回答行的链（与既有通路一致，见 design/06 §2「过程折叠内」）。
                 // **照旧开行** —— 「这条注入看不看得见、要不要占一行」是**渲染层**的事，与上游同机制：
-                // 上游为每条注入建一个 `context` 节点（`conversation-nodes/message.ts:76-91`），
+                // 上游为每条注入建一个 `context` 节点，
                 // 由 `orderedVisibleChatNodes()` 的 `filter(isVisibleChatNode)` 把不可见的排除在**行**之外
-                //（`chat-snapshot-builder.ts:496-509`）；插件对应 `webview/chat/core/chat-visibility.ts`。
+                // 插件有对应实现。
                 const row = ensureActive();
                 if (row === undefined) {
                     continue;
@@ -1769,7 +1771,7 @@ export function buildRowsIncremental(
                     replaceActive({ ...row, text });
                 }
             }
-            // 消息级「这条回答被中断」：上游读的就是 `event.data.interrupted`（见 `conversation-nodes/assistant.ts:207`），
+            // 消息级「这条回答被中断」：上游读的就是 `event.data.interrupted`，
             // 正文末尾据此出「已停止」（与上游同位）。放在最后写入，
             // 免得被上面的正文写入用旧 row 覆盖掉。
             if (d['interrupted'] === true) {
@@ -1996,7 +1998,7 @@ export function buildRowsIncremental(
             const kind = reason?.kind;
             // 失败事实（code/message）照上游两处口径，收在 `official/turn-end.ts`：
             // AUTH 只留 code 不留 message、`aborted` + hook(signed-out) 合成 ACCOUNT_SIGNED_OUT。
-            // 中文按 code 决议在页面（`webview/chat/core/turn-copy.ts`）。
+            // 中文按 code 决议在页面。
             const failure = turnEndFailure(reason);
             // 终局通知（独立行）：失败（`turn-error`）或输出 token 上限（`turn-max-tokens`）——两者互斥。
             // 先占 key，等回答行收完再 push —— 顺序 = 该回合末尾。

@@ -658,7 +658,7 @@ export async function readSessionProjections(sessionId: string): Promise<Record<
     return projectionValuesOf(value);
 }
 // ---------- 会话操作（适配 dsh 0.1.7+；对应 session-controller 远程方法，载荷统一
-//   args{ request: Session*Request }，契约见 docs/design/04） ----------
+//   args{ request: Session*Request }） ----------
 /**
  * 新建 / **收养**会话（上游 `session/create`；`workspaceId` 与 `cwd` 二选一）→ sessionId。
  *
@@ -721,7 +721,7 @@ export async function pageSessionEvents(
 }
 
 /**
- * 读取会话里**被引用过**的图片附件字节（上游 `session.attachment`，请求 `{sessionId, attachmentId}`）。
+ * 读取会话里**被引用过**的图片附件字节（上游端点 `session/attachment`）。
  *
  * 上游会遍历会话事件校验该附件确被本会话引用，未被引用/找不到时返回 `session/attachment-invalid`
  * （附带 `reason`）——错误原样上抛，不吞、不猜。
@@ -730,9 +730,25 @@ export async function pageSessionEvents(
  * @returns 媒体类型与 base64 字节。
  */
 export async function readSessionAttachment(sessionId: string, attachmentId: string): Promise<DshImageAttachment> {
-    const value = await rpcCall<{ attachment?: { mediaType?: unknown }; data?: unknown }>('session.attachment', {
-        sessionId,
-        attachmentId,
+    /**
+     * ⚠️ **方法名与参数形状都不能照抄邻居**（2026-10-11 真机查出来的两个错，这条链此前从未走通）：
+     *
+     *   ① **方法名是 `session/attachment`（斜杠）**，不是本文件其它函数的 `session.xxx` 点号形态。
+     *      网关会校验信封里的 `method` 与 `/api/<端点>` 是否一致，点号名会被直接挡掉：
+     *      `gateway/bad-request: method "session.attachment" does not match endpoint "session/attachment"`。
+     *      （点号名那条路连路由都没有：`POST /api/session.attachment` → 404 not found。）
+     *   ② **参数要包一层 `request`**：这个端点的描述符要 `{ request: { sessionId, attachmentId } }`，
+     *      摊平写会被 `gateway/arguments-invalid` 挡掉：
+     *      `missing "request"; unexpected "sessionId", "attachmentId"`。
+     *
+     * 两个都改对之后实测：99,697 字节的 JPEG 原样取回，文件头 `ffd8ff…` 对得上
+     *（取证脚本 `tmp/_attach.fetch.probe.mjs`）。
+     */
+    const value = await rpcCall<{ attachment?: { mediaType?: unknown }; data?: unknown }>('session/attachment', {
+        request: {
+            sessionId,
+            attachmentId,
+        },
     });
     const mediaType = typeof value?.attachment?.mediaType === 'string' ? value.attachment.mediaType : '';
     const data = typeof value?.data === 'string' ? value.data : '';
@@ -784,24 +800,39 @@ export async function updateQueue(sessionId: string, itemId: string, action: Dsh
     await rpcCall<{ accepted: boolean }>('session.updateQueue', { sessionId, itemId, action });
 }
 /**
- * 从一段**已完成回合**分叉出新会话（上游 `session/fork`，SessionForkRequest { sessionId, atSeq?, increaseTitle? }）。
+ * 从一段**已完成回合**分叉出新会话（上游 `session/fork`，SessionForkRequest { sessionId, atSeq? }）。
  *
  * `atSeq` 是事件序号，服务端取**第一条 `seq >= atSeq` 的 `turn/end`** 作为切点（含该回合），
  * 再把切点推到下一个 `turn/start` 之前；**省略或不传** = 从最后一条已完成的回合分叉。
  * 因此锚点落在「正在跑、还没 turn/end」的回合里会被服务端拒（`session/fork-unavailable`）。
  * 序号可能带小数（中断回合的冻结节点），服务端只接受非负整数，故这里先取整。
+ *
+ * ⚠️ **标题升号不在这里、也不在服务端**：服务端的分叉请求只有会话标识与切点序号两个字段，
+ * **没有**"是否升号"这类开关（全仓搜不到那个字段名）。上游是在**客户端**做的：
+ * 先读源标题 → 分叉 → 用 `increasedForkTitle()` 算号 → 调「改名」。
+ * 插件曾经把那个开关当 RPC 字段发出去（服务端忽略它）⇒ 子会话永远拿不到 ` (1)`。
+ * 现在请求只传服务端认的字段，升号由宿主的分叉流程按上游三步走（纯函数在 `./fork-title`）。
+ *
  * @returns 子会话标识。
  */
 export async function forkSession(sessionId: string, atSeq?: number): Promise<string> {
     const result = await rpcCall<{ sessionId: string }>('session.fork', {
         sessionId,
         ...(atSeq === undefined ? {} : { atSeq: Math.floor(atSeq) }),
-        // 子会话标题**由宿主升号**（与上游客户端同：它也只传这一个开关，不自己算名字）。
-        // 插件先前自己 `durableTitleFor` + 算号 + `rename` —— 那是把一个宿主能力在客户端重做一遍，
-        // 结果同一个源分叉两次都得到 `(1)`（本地只拿源标题推号，看不到已有的兄弟会话）。
-        increaseTitle: true,
     });
     return result.sessionId;
+}
+/**
+ * 改会话标题（上游 `session/rename`，SessionRenameRequest { sessionId, title } → { title, seq }）。
+ *
+ * 唯一用途是**分叉后的升号**（上游同：fork 流程里 rename 是最后一步）。与 fork 同款：服务端的签名
+ * 都是**单个 `request` 形参**，所以这里照样平铺传字段、由 `rpcCall` 那层包成 `request`。
+ * @param sessionId - 目标会话。
+ * @param title - 新标题。
+ * @returns 服务端落定的标题与它的事件序号。
+ */
+export async function renameSession(sessionId: string, title: string): Promise<{ title: string; seq: number }> {
+    return rpcCall<{ title: string; seq: number }>('session.rename', { sessionId, title });
 }
 /** 取消当前回合（上游 `session/cancel`，SessionCancelRequest { sessionId }）→ { accepted }。 */
 export async function cancelSession(sessionId: string): Promise<void> {
@@ -835,7 +866,7 @@ export async function selectModel(sessionId: string, provider: string, model: st
  * 模型目录（适配 dsh v0.1.7-rc.2）。
  * 上游接口：session-controller 远程方法 `session/modelCatalog`（无参，payload { args:{} }），
  * 返回 ModelCatalog { default, routableProviders, groups[{ id,name,models[{id,name,description,
- * reasoning:{efforts[]}}] }], failures }（契约见 docs/design/04）。
+ * reasoning:{efforts[]}}] }], failures }。
  * ⚠️ 口径变化（rc.2）：`routableProviders` 由「**已注册**的 provider」（含空目录）
  * 改为「**至少有一个可用模型**的 provider」——所以它不再能用来判断「某 provider 是否已配置」。
  * 本插件未消费该字段（只透传），这里只是留痕，避免以后按旧语义拿它做门控。

@@ -8,7 +8,7 @@
 //
 // 不在本文件处理的两类（与上游分层一致，由展示层按 code 另行覆盖）：
 //   - ask_user_question 的 ASK_CANCELLED → ok、ASK_ABORTED → stopped
-//     上游把它放在提问行组件里（`AskQuestionRow` 显式改写 state），本插件对应 `webview/chat/core/ask-card.ts`。
+// 上游把它放在提问行组件里（`AskQuestionRow` 显式改写 state），本插件有对应实现。
 
 /** 工具行终态（与协议/组件的 status 字段同集合；running 由调用方另行判定）。 */
 export type ToolStatus = 'ok' | 'error' | 'stopped';

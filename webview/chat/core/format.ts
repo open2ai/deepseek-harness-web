@@ -36,35 +36,27 @@ export function formatMsgClock(t: number | undefined | null): string {
  * 真实工具名改由摘要承载（见 deriveToolSummary）。
  */
 const TOOL_TITLES: Record<string, string> = {
-  // 壳类：上游 `tool.title.bash` / `tool.title.pwsh` 两键的**同一句文案**（不是工具名）
-  bash: '运行命令',
+  // ⚠️ 这里**只放上游有专属 title key 的工具**（`tool-call-model.ts` 的 `TOOL_TITLE_KEYS`、
+  // 各 toolview 自己的 key、`ui-deliverables` 的 `row.title`）。其余一律走**变体兜底**
+  //（`VARIANT_TITLES`）—— 之前这里堆了一批上游根本没有的名字（apply_patch / shell / powershell /
+  // readTextFile / findings / search…），那些工具在上游是「工具调用」，插件却显示了别的说法。
   pwsh: '运行命令',
-  powershell: '运行命令',
-  shell: '运行命令',
-  read: '读取',
   read_image: '读取图片',
-  readTextFile: '读取',
-  write: '写入',
-  edit: '编辑',
-  str_replace_editor: '编辑',
-  apply_patch: '应用补丁',
-  glob: '查找文件',
-  // 上游 `tool.title.grep` = 「搜索文件内容」（与 `glob`「查找文件」**不同键**，别合并）
   grep: '搜索文件内容',
-  search: '网页搜索',
+  glob: '查找文件',
   web_search: '网页搜索',
   web_fetch: '网页获取',
-  webFetch: '网页获取',
-  think: '思考',
-  findings: '分析',
-  plan: 'plan',
+  present: '交付文件',
+  todo_write: '更新任务清单',
+  ask_user_question: '提问',
+  skill: '加载技能', // 上游 `ui-skill/locales.ts` 的 `row.title`
   subagent: '创建子智能体',
-  // 子智能体 / 后台任务的协调类工具（上游 `tool.title.*` 逐条对应）
   list_agents: '查看子智能体',
   send_message: '发送消息',
   interrupt_agent: '中断智能体',
   wait_agent: '等待子智能体',
   spawn_teammate: '创建队友',
+  list_subagent_models: '查看可用模型',
   job_list: '查看后台任务',
   job_output: '读取任务输出',
   job_kill: '取消后台任务',
@@ -72,17 +64,10 @@ const TOOL_TITLES: Record<string, string> = {
   create_goal: '创建目标',
   get_goal: '查看目标',
   update_goal: '更新目标',
-  // 定时任务（上游 `tool.title.createSchedule` 等四键；工具名是 schedule_* 蛇形）
   schedule_create: '创建定时任务',
   schedule_list: '查看定时任务',
   schedule_delete: '删除定时任务',
   schedule_update: '修改定时任务',
-  ask_user_question: '提问',
-  todo_write: '更新任务清单',
-  present: '交付文件',
-  list_subagent_models: '查看可用模型',
-  // 上游标题表里还有这一族（本机默认组合尚未出现，见 `12` §0.5 的清点）：文案逐条取上游 zh 字面量，
-  // 免得用户一旦打开对应组合，插件这边回退成「工具调用」而网页端显示具体动作。
   cordis_package_inspect: '查询 Cordis 环境',
   cordis_runtime_inspect: '查询 Cordis 环境',
   cordis_run: '运行 Cordis 插件',
@@ -109,8 +94,41 @@ const TOOL_TITLES: Record<string, string> = {
   team_task_list: '查看团队任务',
 }
 
+/** 工具名 → 行变体（逐条镜像上游 \`TOOL_VARIANTS\`；认不出的落 \`others\`）。 */
+const TOOL_VARIANTS: Record<string, string> = {
+  bash: 'bash',
+  pwsh: 'bash',
+  read: 'read',
+  read_image: 'read',
+  web_fetch: 'read',
+  web_search: 'search',
+  grep: 'search',
+  glob: 'search',
+  write: 'write',
+  edit: 'edit',
+  run_code: 'code',
+  cordis_package_inspect: 'read',
+  cordis_runtime_inspect: 'read',
+  cordis_run: 'others',
+  cordis_stop: 'others',
+  cordis_undefine: 'others',
+}
+
+/** 变体兜底标题（镜像上游 \`VARIANT_TITLE_KEYS\` 的 zh 字典）。 */
+const VARIANT_TITLES: Record<string, string> = {
+  search: '搜索',
+  read: '读取',
+  bash: '运行命令',
+  write: '写入',
+  edit: '编辑',
+  code: '代码',
+  others: '工具调用',
+}
+
 /** 无专属标题的工具统一用「工具调用」。 */
 const GENERIC_TOOL_TITLE = '工具调用'
+
+
 
 /**
  * `file:` URI → 本地路径（拖拽给的 `text/uri-list` 是 URI，不是路径）。
@@ -141,8 +159,57 @@ export function fileUriToPath(uri: string): string | undefined {
   return drive === null ? decoded : drive[1]
 }
 
+/**
+ * 工具名 → 行变体（认不出的落 `others`）。
+ *
+ * 调用方用它做**卡体分派**（`ToolRow` 的 `code` 那一支）与标题兜底，所以必须导出一份，
+ * 别让调用点各自复制这张表 —— 复制出来的第二份迟早与这张漂开。
+ *
+ * @param name - 线上工具名。
+ * @returns 变体名（`bash` / `read` / `search` / `write` / `edit` / `code` / `others`）。
+ */
+export function toolVariantOf(name: string): string {
+  return TOOL_VARIANTS[name] ?? 'others'
+}
+
+/**
+ * 工具行的展示标题（镜像上游 `toolTitleKey`）：**专属标题优先，其次变体兜底**。
+ * 兜底不是恒为「工具调用」—— `read` 变体是「读取」、`search` 是「搜索」、`bash` 是「运行命令」、
+ * `write`/`edit` 是「写入」/「编辑」、`code` 是「代码」，只有 `others` 才是「工具调用」。
+ */
 export function toolTitle(name: string): string {
-  return TOOL_TITLES[name] ?? GENERIC_TOOL_TITLE
+  return TOOL_TITLES[name] ?? VARIANT_TITLES[toolVariantOf(name)] ?? GENERIC_TOOL_TITLE
+}
+
+// ---- Auto review 拒绝（镜像上游 `deriveAutoReviewDenial` + `auto-review-denial.ts`） ----
+//
+// 「Auto review」权限档（`auto`）下，同模型会对危险操作做实验性审查；**被拒绝的工具根本没执行**，
+// 所以它的专属卡（终端/读文件/差异…）全都是空壳 —— 上游在 `ToolCallTree` 里直接改走通用卡，
+// 并把摘要与输出换成这两句。本地化文案：
+//   `tool.autoReviewRejected` = 「Auto review 已拒绝」
+//   `tool.autoReviewNotExecuted` = 「工具未执行。原因：{reason}」
+//   `tool.autoReviewReasonFallback` = 「Auto review 未授权此次操作」（reason 缺失/空白时）
+const AUTO_REVIEW_ERROR = 'AutoReviewDeniedError'
+const AUTO_REVIEW_CODE = 'AUTO_REVIEW_DENIED'
+
+/** 判断是不是 Auto review 拒绝；是则给出展示用摘要 + 输出（reason 按上游口径归一化）。 */
+export function autoReviewDenialOf(item: {
+  status?: string
+  isError?: boolean
+  errorName?: string
+  errorCode?: string
+  errorReason?: string
+}): { summary: string; output: string } | null {
+  // 上游先看 `'kind' in block && block.isError`，再看 name+code 两个都要对
+  if (item.status !== 'error' || item.isError !== true) return null
+  if (item.errorName !== AUTO_REVIEW_ERROR || item.errorCode !== AUTO_REVIEW_CODE) return null
+  // 原因归一化（上游 `normalizeAutoReviewReason`）：去首尾空白、把所有换行折成空格；空则用兜底句
+  const raw = item.errorReason ?? ''
+  const reason = raw.trim().replace(/[\r\n\u2028\u2029]+/gu, ' ')
+  return {
+    summary: 'Auto review 已拒绝',
+    output: `工具未执行。原因：${reason === '' ? 'Auto review 未授权此次操作' : reason}`,
+  }
 }
 
 /** raw 工具名 → 展示图标 codicon（无 codicon- 前缀；按上游 variant 归类，未知兜底 wrench）。 */
@@ -224,6 +291,31 @@ export function toolIconOfTool(name: string): string {
     ralph: 'git-branch',
   }
   return map[name] ?? 'wrench'
+}
+
+/**
+ * **`code` 变体的展开体 = 程序本身**（逐条镜像上游 `formatToolBody` 的 code 那一支）。
+ *
+ * 上游：`const code = parsed.code; if (typeof code === 'string' && code !== '') return code`，
+ * 然后这条体交给 `CodeBlock`（横幅 + 等宽 + 复制），**不再**进通用「输入/输出」区的输入段
+ * （`cardBody = variant === 'code' ? null : bodyText`）。真机 `run_code` 的参数恒为
+ * `{ description, code }`（146/146），`code` 是一段 TypeScript —— 少了这一支，用户看到的是
+ * **包着 JSON 的源码**（`{"description":…,"code":"…\n…"}`），而不是程序。
+ *
+ * @param argsRaw - 工具调用的原始参数串。
+ * @returns 程序文本；参数坏形 / 没有 `code` 字段时给 `null`（那时才退回通用体）。
+ */
+export function codeBodyOf(argsRaw: string | undefined): string | null {
+  if (!argsRaw) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(argsRaw)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const code = (parsed as Record<string, unknown>)['code']
+  return typeof code === 'string' && code !== '' ? code : null
 }
 
 /** 工具调用原始参数(JSON 串) → 摘要一行（偏好键：

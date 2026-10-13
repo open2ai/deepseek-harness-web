@@ -4,6 +4,7 @@
 // 新加触发类型时新建一个文件(如 at.ts)实现 TriggerDef，并在 Composer 的 defs 数组里加一项即可，
 // 避免把逻辑堆进 Composer/单文件。
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { rankByName } from '../rank-by-name'
 import { html } from 'htm/preact'
 import { keepRowVisible } from '../scroll'
 import type { ChatStore } from '../store/chat'
@@ -129,8 +130,18 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
   const def = sel ? defs.find((d) => d.id === sel.defId) : undefined
   const hitCtx: TriggerHitContext = { query: sel?.query.trim() ?? '', quoted: sel?.quoted === true }
   const allRows = def ? def.rows(hitCtx) : []
-  const q = sel?.query.trim().toLowerCase() ?? ''
-  const filtered = q ? allRows.filter((r) => ((r.searchText ?? r.name).toLowerCase().includes(q))) : allRows
+  // 与上游同口径：斜杠/@ 候选走 `rankByName`（前缀命中 → 对齐分 → 源序），不是子串过滤。
+  // 上游三处都这么排：、。
+  // 搜索键取 `searchText ?? name`（上游 `name` + 可选 `label` 的等价物）。
+  const rawQuery = sel?.query.trim() ?? ''
+  // `q` 仍保留（小写）供下面高亮用；`rankByName` 收**原始**查询（它自己转小写）。
+  const q = rawQuery.toLowerCase()
+  const filtered = rawQuery === ''
+    ? allRows
+    : rankByName(
+        allRows.map((r) => ({ name: r.searchText ?? r.name, row: r })),
+        rawQuery
+      ).map((entry) => entry.row)
   // 缓存只在「弹窗关着」或「过滤后有候选」时更新：pending 期间的空结果不许覆盖它 —— 那正是要沿用的那一份
   if (def === undefined || filtered.length > 0) settledRows.current = filtered
   const pending = def?.pending?.(hitCtx) === true

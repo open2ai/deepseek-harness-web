@@ -33,6 +33,8 @@ export interface DetailItem {
   change?: { value: 'added' | 'removed' | 'updated'; label: string }
   fields: DetailField[]
   lines?: string[]
+  /** 富文本正文（子智能体回复 / lsp hover）—— 走 markdown 渲染，别当等宽代码块。 */
+  markdown?: string
   /** 结果正文 / 长文本（等宽块）。 */
   code?: { text: string; language?: string }
   /** 可点击打开的文件位置（lsp 命中项）。 */
@@ -290,6 +292,115 @@ function formatScheduleDate(scheduledAt: string): string {
   }
 }
 
+/** 定时规则 → 重复文案（镜像上游 `scheduleItem` 的 kind 分支）；形状不符返回 null。 */
+export function scheduleFrequency(value: unknown): string | null {
+  if (!detailRecord(value)) return null
+  switch (value.kind) {
+    case 'at': return '单次'
+    case 'after':
+      if (!count(value.afterSeconds) || value.afterSeconds === 0) return null
+      return '单次'
+    case 'every':
+      if (!count(value.everySeconds) || value.everySeconds === 0) return null
+      return `每 ${interval(value.everySeconds)}`
+    case 'daily':
+      if (!nonempty(value.time) || !nonempty(value.timeZone)) return null
+      return `每天 ${shortTime(value.time)}（${value.timeZone}）`
+    case 'weekly': {
+      const days = weekdayText(value.weekdays)
+      if (!nonempty(value.time) || !nonempty(value.timeZone) || days === undefined) return null
+      return `每周 ${days} ${shortTime(value.time)}（${value.timeZone}）`
+    }
+    case 'cron':
+      if (!nonempty(value.expression) || !nonempty(value.timeZone)) return null
+      return `Cron ${value.expression}（${value.timeZone}）`
+    default: return null
+  }
+}
+
+/**
+ * 紧凑「已创建定时任务」卡模型（上游 `ui-schedule` 的 `ScheduleCreateCard`）：标题 + 重复规则。
+ * 该卡在**回合尾部**渲染（`turnTail` seat），不在工具组里 —— 见上游 `schedule-turn.ts` 的注释。
+ */
+/**
+ * 时区标签（镜像上游 ui-schedule 的 `zoneLabel`）：`UTC+08:00 · 中国标准时间`。
+ * 详情卡用的是 IANA 原文（`ui-tool`），而**回合尾部卡**用的是这个本地化标签（`ui-schedule`）——
+ * 两张卡的上游来源不同，别混用。未知时区逐级退回：标签 → 偏移 → IANA 名。
+ */
+function zoneLabel(zone: string): string {
+  const at = Date.now()
+  let offset: string | undefined
+  try {
+    const raw = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longOffset' })
+      .formatToParts(at).find((p) => p.type === 'timeZoneName')?.value
+    if (raw !== undefined) offset = raw.replace(/^GMT/u, 'UTC')
+  } catch { /* 未知时区 */ }
+  try {
+    const name = new Intl.DateTimeFormat('zh-CN', { timeZone: zone, timeZoneName: 'longGeneric' })
+      .formatToParts(at).find((p) => p.type === 'timeZoneName')?.value
+    if (offset === undefined) return name ?? zone
+    return name === undefined || /^GMT(?:[+-]|$)/u.test(name) ? offset : `${offset} · ${name}`
+  } catch {
+    return offset === undefined ? zone : `${offset} · ${zone}`
+  }
+}
+
+/** 卡片用重复文案（镜像上游 ui-schedule 的 `formatScheduleFrequency`）：周几不带「周」前缀、时区是本地化标签。 */
+function cardFrequency(value: Record<string, unknown>): string | null {
+  switch (value.kind) {
+    case 'at': return '单次'
+    case 'after':
+      if (!count(value.afterSeconds) || value.afterSeconds === 0) return null
+      return '单次'
+    case 'every': {
+      // 先落成局部量：类型守卫对属性访问的收窄传不进 `find` 回调。
+      const everySeconds = value.everySeconds
+      if (!count(everySeconds) || everySeconds === 0) return null
+      const units = [
+        { seconds: 86400, label: '天' }, { seconds: 3600, label: '小时' },
+        { seconds: 60, label: '分钟' }, { seconds: 1, label: '秒' },
+      ]
+      const unit = units.find((u) => everySeconds % u.seconds === 0) ?? units[3]
+      return `${everySeconds / unit.seconds}${unit.label}一次`
+    }
+    case 'daily':
+      if (!nonempty(value.time) || !nonempty(value.timeZone)) return null
+      return `每天 ${shortTime(value.time)}（${zoneLabel(value.timeZone)}）`
+    case 'weekly': {
+      const days = weekdayTextShort(value.weekdays)
+      if (!nonempty(value.time) || !nonempty(value.timeZone) || days === undefined) return null
+      return `每周${days} ${shortTime(value.time)}（${zoneLabel(value.timeZone)}）`
+    }
+    case 'cron':
+      if (!nonempty(value.expression) || !nonempty(value.timeZone)) return null
+      return `Cron ${value.expression}（${zoneLabel(value.timeZone)}）`
+    default: return null
+  }
+}
+
+/** 短周几名（`每周{一、三}` 模板用，不带「周」前缀）。 */
+function weekdayTextShort(days: unknown): string | undefined {
+  if (!Array.isArray(days) || days.length === 0) return undefined
+  const labels: string[] = []
+  for (const day of days) {
+    if (typeof day !== 'number' || !Number.isInteger(day)) return undefined
+    const key = WEEKDAY_KEYS[day - 1]
+    if (key === undefined) return undefined
+    labels.push(key.slice(1))
+  }
+  return labels.join('、')
+}
+
+export function scheduleCardOf(value: unknown): { id: string; title: string; frequency: string } | null {
+  if (!detailRecord(value) || !nonempty(value.id) || !nonempty(value.prompt)) return null
+  const frequency = cardFrequency(value)
+  if (frequency === null) return null
+  // 标题取 `title`，否则取 prompt 的**首行**（镜像上游 `narrowScheduleRecord`）。
+  const title = nonempty(value.title) ? value.title.trim() : (value.prompt.split('\n')[0] ?? '').trim()
+  if (title === '') return null
+  return { id: value.id, title, frequency }
+}
+
 function scheduleItem(value: unknown): DetailItem | null {
   if (!detailRecord(value) || !nonempty(value.id) || !nonempty(value.prompt)
     || typeof value.scheduledAt !== 'string'
@@ -297,33 +408,8 @@ function scheduleItem(value: unknown): DetailItem | null {
     || (value.state !== 'scheduled' && value.state !== 'overdue')) return null
   const date = new Date(value.scheduledAt)
   if (!Number.isFinite(date.getTime()) || date.toISOString() !== value.scheduledAt) return null
-  let frequency: string
-  switch (value.kind) {
-    case 'at': frequency = '单次'; break
-    case 'after':
-      if (!count(value.afterSeconds) || value.afterSeconds === 0) return null
-      frequency = '单次'
-      break
-    case 'every':
-      if (!count(value.everySeconds) || value.everySeconds === 0) return null
-      frequency = `每 ${interval(value.everySeconds)}`
-      break
-    case 'daily':
-      if (!nonempty(value.time) || !nonempty(value.timeZone)) return null
-      frequency = `每天 ${shortTime(value.time)}（${value.timeZone}）`
-      break
-    case 'weekly': {
-      const days = weekdayText(value.weekdays)
-      if (!nonempty(value.time) || !nonempty(value.timeZone) || days === undefined) return null
-      frequency = `每周 ${days} ${shortTime(value.time)}（${value.timeZone}）`
-      break
-    }
-    case 'cron':
-      if (!nonempty(value.expression) || !nonempty(value.timeZone)) return null
-      frequency = `Cron ${value.expression}（${value.timeZone}）`
-      break
-    default: return null
-  }
+  const frequency = scheduleFrequency(value)
+  if (frequency === null) return null
   return {
     title: nonempty(value.title) ? value.title : value.prompt,
     fields: [
@@ -411,7 +497,7 @@ function lspDetails(args: Record<string, unknown>, text: string): DetailsModel |
   if (file === '' || typeof args.line !== 'number' || typeof args.character !== 'number') return null
   const source = `${file}:${args.line}:${args.character}`
   if (operation === 'hover') {
-    return detailList([{ title: source, location: { path: file, line: args.line }, code: { text }, fields: [] }], source)
+    return detailList([{ title: source, location: { path: file, line: args.line }, markdown: text, fields: [] }], source)
   }
   if (text === 'No results.') return detailList([], '0 个位置')
   const items: DetailItem[] = []
@@ -438,8 +524,36 @@ function lspDetails(args: Record<string, unknown>, text: string): DetailsModel |
   return detailList(items, `${file} · ${hit} 个位置`)
 }
 
+/** terminal_list：逐行 `id (name) [type] running|exited code=… signal=… pid=…`。 */
+function terminalList(text: string): DetailsModel | null {
+  if (text === '(no terminal sessions)') return detailList([], '0 个终端')
+  const items: DetailItem[] = []
+  for (const line of text.split('\n')) {
+    const match = /^(\S+)(?: \((.*?)\))? \[([^\]]+)\] (running|exited code=(\S+) signal=(\S+))(?: pid=(\d+))?$/u.exec(line)
+    if (match === null) return null
+    const id = match[1]
+    const name = match[2]
+    const type = match[3]
+    const state = match[4]
+    const exitCode = match[5]
+    const signal = match[6]
+    const pid = match[7]
+    if (id === undefined || type === undefined || state === undefined) return null
+    const fields: DetailField[] = [{ label: '类型', value: type }]
+    if (pid !== undefined) fields.push({ label: '进程 ID', value: pid })
+    if (exitCode !== undefined) fields.push({ label: '退出码', value: exitCode })
+    if (signal !== undefined && signal !== 'null') fields.push({ label: '信号', value: signal })
+    items.push({
+      title: name ?? id, ...(name === undefined ? {} : { subtitle: id }),
+      badge: state === 'running' ? detailBadge('running') : { label: '已退出', tone: exitCode === '0' ? 'success' : 'neutral' },
+      fields,
+    })
+  }
+  return detailList(items, `${items.length} 个终端`)
+}
+
 /**
- * 子代理协调 / 后台任务 / lsp 的实体列表与回执（镜像上游 `controlDetails`）。
+ * 子代理协调 / 后台任务 / 团队任务 / 终端 / lsp 的实体列表与回执（镜像上游 `controlDetails`）。
  * 输出格式认不出即 null；只覆盖本插件带专属标题的那几类工具。
  */
 function controlDetails(name: string, args: Record<string, unknown>, text: string, json: unknown): DetailsModel | null {
@@ -485,7 +599,7 @@ function controlDetails(name: string, args: Record<string, unknown>, text: strin
         const job = started[1] === 'subagent'
         return receipt(argOf(args, 'prompt'), { label: '已启动', tone: 'info' }, [{ label: job ? '智能体 ID' : '任务 ID', value: started[2] ?? '' }])
       }
-      return detailList([{ title: '智能体回复', code: { text }, fields: [], groups: [{ label: '任务内容', items: [{ description: argOf(args, 'prompt'), fields: [] }] }] }], '智能体回复')
+      return detailList([{ title: '智能体回复', markdown: text, fields: [], groups: [{ label: '任务内容', items: [{ description: argOf(args, 'prompt'), fields: [] }] }] }], '智能体回复')
     }
     case 'job_output': {
       const match = /\n\[status: ([^,\]\n]+)(?:, ([^\]\n]+))?\]$/u.exec(text)
@@ -505,17 +619,277 @@ function controlDetails(name: string, args: Record<string, unknown>, text: strin
       if (text.startsWith(`job ${target} had already finished `)) return receipt(target, { label: '任务已结束', tone: 'neutral' })
       return null
     }
+    case 'list_subagent_models': {
+      // 逐行 `id — 说明`；没有分隔符的行整行当描述
+      const items: DetailItem[] = text.split('\n').map((line) => {
+        const split = line.indexOf(' — ')
+        return split < 0
+          ? { description: line, fields: [] }
+          : { title: line.slice(0, split), description: line.slice(split + 3), fields: [] }
+      })
+      return detailList(items, argOf(args, 'model') || argOf(args, 'provider') || '可用模型')
+    }
+    case 'team_task_create':
+    case 'team_task_get':
+    case 'team_task_update': {
+      if (!detailRecord(json) || typeof json.subject !== 'string') return null
+      return detailList(inspectionItems(json), json.subject)
+    }
+    case 'team_task_list': {
+      if (!detailRecord(json) || !Array.isArray(json.tasks)) return null
+      if (json.nextCursor !== undefined && typeof json.nextCursor !== 'number') return null
+      return {
+        ...detailList(inspectionItems(json.tasks), `${json.tasks.length} 个团队任务`),
+        ...(json.nextCursor === undefined ? {} : { caption: `后面还有任务；下一页位置为 ${String(json.nextCursor)}` }),
+      }
+    }
+    case 'terminal_list': return terminalList(text)
+    case 'terminal_open': {
+      const match = /^started terminal session (\S+)(?: \((.*?)\))? \[type: ([^\]]+)\]\n([\s\S]*)$/u.exec(text)
+      if (match === null || match[1] === undefined || match[3] === undefined || match[4] === undefined) return null
+      const title = match[2] ?? match[1]
+      return detailList([{ title, ...(match[2] === undefined ? {} : { subtitle: match[1] }), badge: { label: '已启动', tone: 'info' }, fields: [{ label: '类型', value: match[3] }], code: { text: match[4] } }], title)
+    }
+    case 'terminal_read': {
+      const match = /\n\[lines: (\d+)-(\d+) of (\d+)\](\n\[output truncated\])?$/u.exec(text)
+      if (match === null) return null
+      return detailList([{
+        title: target,
+        subtitle: `第 ${match[1] ?? ''}–${match[2] ?? ''} 行，共 ${match[3] ?? ''} 行`,
+        fields: [], code: { text: text.slice(0, match.index) },
+        ...(match[4] === undefined ? {} : { description: '输出已截断' }),
+      }], target)
+    }
+    case 'terminal_signal': {
+      const match = /^delivered (\S+) to foreground process group (\d+)$/u.exec(text)
+      if (match === null || match[1] === undefined || match[2] === undefined) return null
+      return receipt(target, { label: '信号已发送', tone: 'success' }, [{ label: '信号', value: match[1] }, { label: '进程组', value: match[2] }])
+    }
+    case 'terminal_close': {
+      if (text === `closed terminal session ${target}`) return receipt(target, { label: '已关闭', tone: 'neutral' })
+      if (text === `terminal session ${target} was already closing`) return receipt(target, { label: '关闭中', tone: 'neutral' })
+      return null
+    }
+    default: return null
+  }
+}
+
+/** 日期展示（上游 `dateText`：`Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' })`）。
+ * 解析不出就原样返回。插件界面固定中文，故 locale 固定 `zh-CN`。 */
+function dateText(value: string | number): string {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return String(value)
+  try {
+    return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  } catch {
+    return String(value)
+  }
+}
+
+/** `cordis_inspect_*` 三个（上游 `cordisDetails`）。 */
+function cordisDetails(name: string, args: Record<string, unknown>, value: unknown): DetailsModel | null {
+  if (!detailRecord(value)) return null
+  if (name === 'cordis_inspect_list') {
+    if (!Array.isArray(value.providers)) return null
+    return { items: inspectionItems(value.providers), summary: `${value.providers.length} 个检查提供方` }
+  }
+  if (name === 'cordis_inspect_query') {
+    if (!('data' in value) || typeof value.provider !== 'string' || typeof value.method !== 'string') return null
+    return { items: inspectionItems(value.data), summary: `${value.provider}.${value.method}` }
+  }
+  if (name === 'cordis_inspect_self') {
+    if (Array.isArray(value.plugins)) return { items: inspectionItems(value.plugins), summary: `${value.plugins.length} 个动态插件` }
+    return { items: inspectionItems(value), summary: String(args['pluginId'] ?? args['packageId'] ?? value['mode']) }
+  }
+  return null
+}
+
+/** `workflow` 与 `ralph`（上游 `workflowDetails`）。 */
+function workflowDetails(name: string, args: Record<string, unknown>, text: string): DetailsModel | null {
+  if (name === 'workflow') {
+    const match = /^workflow "([\s\S]*?)" completed \((\d+) agents?\)\.\nReturn value:\n([\s\S]*)$/u.exec(text)
+    if (match === null || match[1] === undefined || match[2] === undefined || match[3] === undefined) return null
+    const value = detailJson(match[3])
+    if (value === undefined) return null
+    const header: DetailItem = {
+      title: match[1], badge: { label: '已完成', tone: 'success' },
+      fields: [{ label: '启动智能体数', value: match[2] }],
+      ...(typeof args['code'] === 'string' ? { groups: [{ label: '工作流脚本', items: [{ fields: [], code: { text: args['code'], language: 'javascript' } }] }] } : {}),
+    }
+    return { items: [header, ...inspectionItems(value)], summary: match[1] }
+  }
+  const separator = '\nFinal report:\n'
+  const split = text.indexOf(separator)
+  if (split < 0) return null
+  const header = text.slice(0, split)
+  const rounds = /\b(\d+) rounds?\b/u.exec(header)?.[1]
+  const report = detailJson(text.slice(split + separator.length))
+  if (!detailRecord(report) || typeof report['summary'] !== 'string' || !Array.isArray(report['evidence'])
+    || !report['evidence'].every((v) => typeof v === 'string') || !Array.isArray(report['nextSteps'])
+    || !report['nextSteps'].every((v) => typeof v === 'string') || typeof report['blocker'] !== 'string') return null
+  const badge = header.startsWith('Ralph worker reported completion ')
+    ? { label: '智能体报告完成', tone: 'success' as const }
+    : header.startsWith('Ralph worker reported a blocker ')
+      ? { label: '智能体报告受阻', tone: 'warning' as const }
+      : header.startsWith('Ralph reached its ') ? { label: '已达到轮次上限', tone: 'warning' as const } : undefined
+  if (badge === undefined) return null
+  const groups: NonNullable<DetailItem['groups']> = []
+  const nextSteps = report['nextSteps'] as string[]
+  const evidence = report['evidence'] as string[]
+  if (nextSteps.length > 0) groups.push({ label: '待完成事项', items: [{ fields: [], lines: nextSteps }] })
+  if (typeof args['objective'] === 'string') groups.push({ label: '任务内容', items: [{ fields: [], description: args['objective'] }] })
+  const fields: DetailField[] = rounds === undefined ? [] : [{ label: '执行轮次', value: rounds }]
+  if (report['blocker'] !== '') fields.push({ label: '受阻原因', value: report['blocker'] })
+  const item: DetailItem = {
+    title: report['summary'], badge, fields,
+    ...(evidence.length === 0 ? {} : { lines: evidence }), groups,
+  }
+  return { items: [item], summary: report['summary'] }
+}
+
+/** 会话/事件检索结果里那些字段名的本地化（上游 `TRACE_FIELDS`）。 */
+const TRACE_FIELDS: Record<string, string> = {
+  Created: '时间', Availability: '可用状态', Parent: '父级',
+  'Best match': '最相关事件', Target: '目标事件',
+  'Replaced by': '被替换为', 'Replacement chain': '替换链',
+  'Events replaced by target': '替换的事件', 'Events cited directly as sources': '引用来源',
+  'Direct derived events': '派生事件',
+}
+
+/** 从文本里抽 `键: 值` 行（只认 `TRACE_FIELDS` 里登记过的键；上游 `textFields`）。 */
+function traceTextFields(text: string): DetailField[] {
+  return text.split('\n').flatMap((line) => {
+    const match = /^\s*([^:]+): (.+)$/u.exec(line)
+    if (match === null || match[1] === undefined || match[2] === undefined) return []
+    const label = Object.prototype.hasOwnProperty.call(TRACE_FIELDS, match[1]) ? TRACE_FIELDS[match[1]] : undefined
+    if (label === undefined) return []
+    return [{ label, value: match[1] === 'Created' ? dateText(match[2]) : match[2] === 'none' ? '无' : match[2] }]
+  })
+}
+
+/** 会话/事件检索（上游 `searchDetails`）：`session_search` 与 `session_event_search`。 */
+function searchDetails(name: string, text: string): DetailsModel | null {
+  if (text === 'No prior session matches found.' || text.endsWith('\n\nNo prior event matches found.')) {
+    return { items: [], summary: '0 条匹配' }
+  }
+  const blocks = text.split(/\n(?=\d+\. )/u).filter((block) => /^\d+\. /u.test(block))
+  if (blocks.length === 0) return null
+  const items: DetailItem[] = []
+  for (const block of blocks) {
+    const snippet = /\n\s*Snippet: ([\s\S]*?)(?:\n\nResult cap reached\.|$)/u.exec(block)?.[1]
+    if (name === 'session_search') {
+      const match = /^\d+\. Session (\S+) — (.*)/u.exec(block)
+      if (match === null || match[1] === undefined || match[2] === undefined) return null
+      items.push({
+        title: match[2], subtitle: match[1],
+        ...(snippet === undefined ? {} : { description: snippet.trimEnd() }),
+        fields: traceTextFields(block),
+      })
+    } else {
+      const match = /^\d+\. seq (\d+) \| ([^|]+) \| ([^|]+) \| ([^\n]+)/u.exec(block)
+      if (match === null || match[1] === undefined || match[2] === undefined
+        || match[3] === undefined || match[4] === undefined) return null
+      items.push({
+        title: snippet?.trimEnd() ?? match[2], subtitle: `${match[2].trim()} · #${match[1]}`,
+        fields: [{ label: '时间', value: dateText(match[4]) }, { label: '记录状态', value: match[3].trim() }],
+      })
+    }
+  }
+  return {
+    items, summary: `${items.length} 条匹配`,
+    ...(text.includes('Result cap reached.') ? { caption: '已达到结果上限，可缩小搜索范围' } : {}),
+  }
+}
+
+/** `session_event_read`（上游 `eventReadDetails`）。 */
+function eventReadDetails(text: string): DetailsModel | null {
+  const match = /^Session (\S+) — ([^\n]*)\nTarget event seq (\d+):\n```json\n([\s\S]*?)\n```([\s\S]*)$/u.exec(text)
+  if (match === null || match[1] === undefined || match[2] === undefined
+    || match[3] === undefined || match[4] === undefined) return null
+  const event = detailJson(match[4])
+  if (!detailRecord(event) || typeof event['type'] !== 'string' || !detailRecord(event['data'])) return null
+  const fields: DetailField[] = [{ label: '事件序号', value: match[3] }]
+  if (typeof event['time'] === 'number') fields.push({ label: '时间', value: dateText(event['time']) })
+  const groups: NonNullable<DetailItem['groups']> = []
+  const adjacent = match[5]?.trim()
+  if (adjacent) groups.push({ label: '前后事件', items: [{ fields: [], description: adjacent }] })
+  return {
+    items: [
+      { title: event['type'], subtitle: `${match[2]} · ${match[1]}`, fields },
+      ...inspectionItems(event['data']),
+      ...(groups.length === 0 ? [] : [{ fields: [], groups }]),
+    ],
+    summary: `${event['type']} · #${match[3]}`,
+  }
+}
+
+/** `session_trace` / `session_event_trace`（上游 `traceDetails`）。 */
+function traceDetails(name: string, text: string): DetailsModel | null {
+  const match = /^Session (\S+) — ([^\n]*)\n([\s\S]*)$/u.exec(text)
+  if (match === null || match[1] === undefined || match[2] === undefined || match[3] === undefined) return null
+  if (name === 'session_event_trace') {
+    return { items: [{ title: match[2], subtitle: match[1], fields: traceTextFields(match[3]) }], summary: match[2] }
+  }
+  const sections = match[3].split('\n\n')
+  const items: DetailItem[] = [{ title: match[2], subtitle: match[1], fields: traceTextFields(sections[0] ?? '') }]
+  for (const section of sections.slice(1)) {
+    const firstBreak = section.indexOf('\n')
+    const label = section.startsWith('Ancestors (nearest first):') ? '祖先会话'
+      : section.startsWith('Descendants:') ? '后代会话' : undefined
+    if (label === undefined || firstBreak < 0) return null
+    const body = section.slice(firstBreak + 1)
+    items.push({
+      title: label, fields: [],
+      ...(body === '- none' || body === '- none (target is a root session)'
+        ? { description: '无' }
+        : { lines: body.split('\n').map((line) => line.replace(/^(\s*)- /u, '$1')) }),
+    })
+  }
+  return { items, summary: match[2] }
+}
+
+/**
+ * 巡检 / 会话查询 / 工作流报告（上游 `inspection-details-model.ts` 的 `inspectionDetails`，逐分支搬）。
+ * 顺序与上游一致：`controlDetails(...) ?? inspectionDetails(...)`，且**在 `value === undefined` 之前**调用
+ *（workflow/ralph/会话检索这几支本来就读文本，不需要整包 JSON）。
+ * @returns 结构化详情；输出格式不认识时 null（落回通用卡）。
+ */
+function inspectionDetails(name: string, args: Record<string, unknown>, text: string, json: unknown): DetailsModel | null {
+  switch (name) {
+    case 'cordis_inspect_list':
+    case 'cordis_inspect_query':
+    case 'cordis_inspect_self': return cordisDetails(name, args, json)
+    case 'workflow':
+    case 'ralph': return workflowDetails(name, args, text)
+    case 'session_search':
+    case 'session_event_search': return searchDetails(name, text)
+    case 'session_event_read': return eventReadDetails(text)
+    case 'session_trace':
+    case 'session_event_trace': return traceDetails(name, text)
     default: return null
   }
 }
 
 /** 详情卡覆盖的工具名（上游 `details-row` 注册的、本插件带专属标题的那几类）。 */
+/** 详情卡覆盖的工具名 = 上游 `details-row` 注册的全部 key（少一个就少一种卡）。 */
 const DETAILS_TOOL_NAMES: ReadonlySet<string> = new Set([
   'create_goal', 'get_goal', 'update_goal',
   'schedule_create', 'schedule_list', 'schedule_delete', 'schedule_update',
-  'subagent', 'list_agents', 'send_message', 'interrupt_agent', 'wait_agent', 'spawn_teammate',
-  'job_list', 'job_output', 'job_kill', 'lsp',
+  'cordis_inspect_list', 'cordis_inspect_query', 'cordis_inspect_self',
+  'workflow', 'ralph',
+  'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace',
+  'list_subagent_models', 'subagent', 'list_agents', 'send_message', 'interrupt_agent',
+  'job_list', 'job_output', 'job_kill',
+  'terminal_open', 'terminal_read', 'terminal_list', 'terminal_signal', 'terminal_close',
+  'lsp', 'spawn_teammate',
+  'team_task_create', 'team_task_get', 'team_task_update', 'team_task_list',
+  'wait_agent',
 ])
+
+/** 该工具名是否走详情卡（其他表面据此复用上游 `detailIcon` 的归类）。 */
+export function isDetailsTool(name: string): boolean {
+  return DETAILS_TOOL_NAMES.has(name)
+}
 
 /**
  * 详情卡入口（镜像上游 `detailsCardModel`）：只在 **ok** 终态出卡；
@@ -533,7 +907,9 @@ export function detailsCardModel(
   if (args === null) return null
   const text = item.output ?? ''
   const value = detailJson(text)
-  const control = controlDetails(name, args, text, value)
+  // 顺序照上游 `details-card-model.ts`：`controlDetails(...) ?? inspectionDetails(...)`，
+  // **在 `value === undefined` 之前** —— 巡检/工作流/会话检索那几支读的是文本，不需要整包 JSON。
+  const control = controlDetails(name, args, text, value) ?? inspectionDetails(name, args, text, value)
   if (control !== null) return control
   if (value === undefined) return null
   switch (name) {

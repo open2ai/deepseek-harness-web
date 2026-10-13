@@ -59,7 +59,27 @@ export function AttachmentGallery({ store, images }: { store: ChatStore; images:
 
   if (images.length === 0) return null
   const single = images.length === 1
-  return html`<div class="att-gallery" data-count=${images.length}>
+  /**
+   * 灯箱的当前图（由容器点击设置）。**图本身**那颗按钮走"在编辑区打开"，
+   * 所以灯箱挂在**容器**上：点图片 → 编辑器里看原图；点容器其它处 → 本卡灯箱（上游 `ImageLightbox` 同形）。
+   */
+  const firstReady = (): { src: string; alt: string } | null => {
+    for (const img of images) {
+      const entry = cache[img.attachmentId]
+      if (entry !== undefined && entry.state === 'ready') {
+        return { src: `data:${entry.mediaType ?? img.mediaType};base64,${entry.data ?? ''}`, alt: img.name ?? img.attachmentId }
+      }
+    }
+    return null
+  }
+  return html`<div class="att-gallery" data-count=${images.length}
+    onClick=${(event: MouseEvent) => {
+      // 点在图片按钮上 → 不抢它的动作（那颗按钮负责"在编辑区打开"）
+      const onImage = (event.target as Element | null)?.closest?.('.att-item')
+      if (onImage instanceof HTMLElement) return
+      const ready = firstReady()
+      if (ready !== null) setZoom(ready)
+    }}>
     ${images.map((img) => {
       const entry = cache[img.attachmentId]
       if (entry === undefined || entry.state === 'loading') {
@@ -71,8 +91,15 @@ export function AttachmentGallery({ store, images }: { store: ChatStore; images:
       }
       const src = `data:${entry.mediaType ?? img.mediaType};base64,${entry.data ?? ''}`
       const box = single ? singleStyle(img) : `width:${TILE}px;height:${TILE}px;object-fit:cover;object-position:center`
+      /**
+       * 两个动作都在（2026-10-11 维护者："图片上游能预览，插件最好也能打开查看，如在编辑区打开"）：
+       *   · **图本身**点开 → `openAttachment`：宿主按 `attachmentId` 取字节落临时文件，
+       *     交给 VS Code 的**图片预览**在编辑区打开（`vscode.open`）；
+       *   · **标题**点开 → 本卡的灯箱（与上游 `MessageImage.tsx` 的 `ImageLightbox` 同形）。
+       * 图本身不用来开灯箱：上游那颗 `button` 的 `title` 就是"打开"，在编辑器里打开更贴近它的意图。
+       */
       return html`<button type="button" class="att-item" key=${img.attachmentId}
-        onClick=${() => setZoom({ src, alt: img.name ?? img.attachmentId })}>
+        onClick=${() => store.openAttachment?.(img.attachmentId, img.name)}>
         <img src=${src} alt=${img.name ?? ''} title=${img.name ?? ''} style=${box} />
       </button>`
     })}

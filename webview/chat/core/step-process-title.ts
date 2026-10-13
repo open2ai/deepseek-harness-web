@@ -10,8 +10,6 @@
 //
 // 易错点：`liveProcessDetail`（实时细节的门）与**思考行预览**不是一回事 —— 后者的门是
 // `running || settledReasoningPreview`，写在 `Chain.ts` 里。两处曾接反过一次。
-import { deriveToolSummary } from './format'
-
 /** 上游 `ProcessActivity` 的全部取值（tools 是兜底类）。 */
 export type ProcessActivity =
   | 'thinking'
@@ -54,7 +52,13 @@ export interface ActivityItemLike {
   kind: string
   key?: number
   callId?: string
-  name?: string
+  /**
+   * 工具名。**允许 `null`**：链上现在也有命令行 / 手动压缩（`DshTurnProcessItem` 的 `command` 支，
+   * 上游把它们当片的成员），它们的 `name` 可以是 `null`（认不出命令名时）。
+   * 现有消费者一律按 `typeof name === 'string'` 取值（`rankActivities` / `liveProcessDetailOf`），
+   * 且只认 `kind === 'tool'` 的项 —— 所以这些项在标题/图标里本来就不参与，不会改变任何文案。
+   */
+  name?: string | null
   status?: string
   /** 工具参数原文（**实时细节**要从这里取，见 `liveProcessDetailOf`） */
   argsRaw?: string
@@ -128,8 +132,11 @@ function continuation(label: string): string {
  * @param chain - 过程链。
  * @returns 形如 `已读取文件并读取图片` / `已读取文件，修改了文件，执行了命令` / `已完成分析`。
  */
-export function closedProcessTitle(chain: readonly ActivityItemLike[]): string {
-  const ranked = rankActivities(chain)
+/**
+ * 标题拼装（上游 `processTitle` 的两条拼法：两类「A并B」、三类以上「A，B，C」+ 超三类补「等」）。
+ * @param ranked - **已排好序**的类别（调用数降序、同数按首次出现）。
+ */
+function titleOfRanked(ranked: readonly ProcessActivity[]): string {
   const labels = ranked.slice(0, 3).map((kind) => DONE_LABELS[kind])
   const first = labels[0]
   if (first === undefined) return DONE_LABELS.thinking
@@ -143,6 +150,29 @@ export function closedProcessTitle(chain: readonly ActivityItemLike[]): string {
   }
   const title = [first, ...labels.slice(1).map(continuation)].join('，')
   return ranked.length > 3 ? `${title}等` : title
+}
+
+export function closedProcessTitle(chain: readonly ActivityItemLike[]): string {
+  return titleOfRanked(rankActivities(chain))
+}
+
+/**
+ * 已关闭片的标题：**直接用这一片自己的 counts**（上游 `processTitle(data.summary)` 读的就是它）。
+ *
+ * 与链序版（`closedProcessTitle`）的区别在**计数的来路**：这份含递归 `subCalls`、按 `callId` 去重。
+ * @param counts - 已排好序的类别计数（片事实里的 `summary.counts`）。
+ */
+export function closedTitleOfCounts(counts: readonly { kind: string; count: number }[]): string {
+  return titleOfRanked(counts.map((c) => c.kind as ProcessActivity))
+}
+
+/**
+ * 未关闭片的标题：**直接读这一片自己的 `running`/`preparing`**（片头的 live 分支）。
+ * @param summary - 片事实里的 `summary`。
+ */
+export function liveTitleOfSummary(summary: { running?: string; preparing?: boolean }): string {
+  const activity = (summary.running ?? 'thinking') as ProcessActivity
+  return summary.preparing === true ? prepareLabel(activity) : LIVE_LABELS[activity]
 }
 
 /**
@@ -207,15 +237,69 @@ export function liveProcessTitle(chain: readonly ActivityItemLike[]): string {
   return live.status === 'preparing' ? prepareLabel(activity) : LIVE_LABELS[activity]
 }
 
-/** 上游对实时细节的长度上限（按字素计；这里按码元近似，够用且不会撑爆一行）。 */
+/** 上游对实时细节的长度上限（**按字素计**，不是码元）。 */
 const LIVE_DETAIL_MAX_CHARS = 160
 
-/** 折成单行 + 截断（上游 `normalizeLiveToolDetail` 同口径：空白折叠、超长补省略号）。 */
+/** 字素分段器（上游 `LIVE_TOOL_DETAIL_SEGMENTER`）：emoji / 组合字符不会被切成半个。 */
+const LIVE_DETAIL_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+/** 折成单行 + 截断（上游 `normalizeLiveToolDetail` 逐字同构：空白折叠、按字素截、超长补省略号）。 */
 function normalizeLiveDetail(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
-  return normalized.length <= LIVE_DETAIL_MAX_CHARS
+  const chars = Array.from(LIVE_DETAIL_SEGMENTER.segment(normalized), (part) => part.segment)
+  return chars.length <= LIVE_DETAIL_MAX_CHARS
     ? normalized
-    : `${normalized.slice(0, LIVE_DETAIL_MAX_CHARS - 1).trimEnd()}…`
+    : `${chars.slice(0, LIVE_DETAIL_MAX_CHARS - 1).join('').trimEnd()}…`
+}
+
+/** 上游 `normalizeLiveToolDetail` 接受的值形：字符串，或全字符串数组（用 `, ` 连接）。 */
+function scalarDetailText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value.join(', ')
+  return ''
+}
+
+/** 上游 `questionDetail`：`questions` 是对象数组时取第一项的 `question`。 */
+function questionDetail(value: unknown): string {
+  if (!Array.isArray(value)) return ''
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue
+    const detail = normalizeLiveDetail(scalarDetailText((item as Record<string, unknown>)['question']))
+    if (detail !== '') return detail
+  }
+  return ''
+}
+
+/**
+ * 上游 `LIVE_TOOL_DETAIL_KEYS`：实时细节按键序取**第一个有值**的字段。
+ * 顺序就是上游的字面顺序，别重排（`objective`/`task` 在 `prompt` 之前等）。
+ */
+const LIVE_DETAIL_KEYS = [
+  'title', 'description', 'objective', 'task', 'task_name', 'name', 'question', 'questions', 'prompt', 'message',
+  'command', 'cmd', 'queries', 'query', 'pattern', 'url', 'uri', 'file_path', 'path', 'target', 'action', 'status',
+] as const
+
+/**
+ * 一个工具调用的**实时细节**（镜像上游 `liveToolDetail`）：按固定键序取第一个非空字段；
+ * 参数坏形/没有命中键时退回**工具名**。
+ */
+function liveToolDetail(name: string, argsRaw: string): string {
+  let args: unknown
+  try {
+    args = JSON.parse(argsRaw)
+  } catch {
+    // 参数还在流式（截断）或不是 JSON：没有安全的一行任务细节，退回工具名
+    return normalizeLiveDetail(name)
+  }
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return normalizeLiveDetail(name)
+  const record = args as Record<string, unknown>
+  for (const key of LIVE_DETAIL_KEYS) {
+    if (!(key in record)) continue
+    const value = record[key]
+    const detail = key === 'questions' ? questionDetail(value) : normalizeLiveDetail(scalarDetailText(value))
+    if (detail !== '') return detail
+  }
+  return normalizeLiveDetail(name)
 }
 
 /**
@@ -225,8 +309,8 @@ function normalizeLiveDetail(text: string): string {
  * title/description/objective/task/…/command/url/file_path/…），没有运行中的工具时退回
  * **运行中那一步的思考**的最后一段（`**` 剥掉）。两者都折成单行、上限 160 字。
  *
- * 插件复用既有的展示派生（`deriveToolSummary` —— 与工具行摘要同一份实现）而不再来一套键序；
- * 摘要取不到时退回工具名（上游同样会退回 `name`）。
+ * **键序必须照抄上游**（`LIVE_TOOL_DETAIL_KEYS`）：工具行摘要那套（`deriveToolSummary`）是另一套口径，
+ * 两者取到的字段可能不同 —— 早先复用它是本仓最后一处「近似」。
  * @param chain - 过程链。
  * @returns 单行细节；没有可说的返回空串。
  */
@@ -237,13 +321,15 @@ export function liveProcessDetailOf(chain: readonly ActivityItemLike[]): string 
     if (live.status === 'preparing') {
       return activityOfToolName(live.name) === 'tools' ? normalizeLiveDetail(live.name) : ''
     }
-    const summary = normalizeLiveDetail(deriveToolSummary(live.argsRaw, live.name))
-    return summary !== '' ? summary : normalizeLiveDetail(live.name)
+    return liveToolDetail(live.name, live.argsRaw ?? '')
   }
   // 没有运行中的工具 → 取最后一条思考的**最后一段**（上游 `liveReasoningDetail` 同口径）
   for (let i = chain.length - 1; i >= 0; i--) {
     const item = chain[i]
     if (item?.kind !== 'reasoning' || typeof item.text !== 'string') continue
+    // ⚠️ **只有还在跑的那一步**才算实时细节（上游 要求 `status === 'running'`）。
+    // 少了这道门，已定稿/已中断的步也会被当成「正在发生的事」贴到片头后面。
+    if (item.status !== 'running') continue
     const paragraphs = item.text.split(/\r?\n[\t ]*\r?\n/)
     for (let p = paragraphs.length - 1; p >= 0; p--) {
       const detail = normalizeLiveDetail(String(paragraphs[p] ?? '').replaceAll('**', ''))
@@ -251,6 +337,105 @@ export function liveProcessDetailOf(chain: readonly ActivityItemLike[]): string 
     }
   }
   return ''
+}
+
+/**
+ * 一组过程的活动汇总（上游 `ProcessActivitySummary`）。
+ *
+ * 上游把它挂在**每个分组**上（`ProcessGroup.refresh` → `processActivity(nodes)`），分组头的
+ * 标题/图标都读它（`processTitle(summary)` / `summary.counts[0]`）—— 不是从回合级推的。
+ */
+export interface ActivitySummary {
+    counts: Array<{ kind: ProcessActivity; count: number }>
+    running?: ProcessActivity
+    runningDetail: string
+    preparing?: boolean
+}
+
+/** 活动汇总只要节点这两件事（`kind` + `data`），避免把整个行模型引进来。 */
+export interface ActivityNodeLike {
+    kind: string
+    data: Record<string, unknown>
+}
+
+/** 没有运行中的工具时，实时细节退回**运行中那一步的思考**最后一段（上游 `liveReasoningDetail`）。 */
+function liveReasoningDetailOfNodes(nodes: readonly ActivityNodeLike[]): string {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node?.kind !== 'assistant-step') continue
+        // 上游 ：只有**运行中**的步才把思考当实时细节（settled/interrupted 不算）
+        if (node.data['status'] !== 'running') continue
+        const blocks = node.data['blocks']
+        if (!Array.isArray(blocks)) continue
+        for (let b = blocks.length - 1; b >= 0; b--) {
+            const block = blocks[b] as { kind?: unknown; text?: unknown } | null | undefined
+            if (block?.kind !== 'reasoning' || typeof block.text !== 'string') continue
+            const paragraphs = block.text.split(/\r?\n[\t ]*\r?\n/)
+            for (let p = paragraphs.length - 1; p >= 0; p--) {
+                const detail = normalizeLiveDetail(String(paragraphs[p] ?? '').replaceAll('**', ''))
+                if (detail !== '') return detail
+            }
+        }
+    }
+    return ''
+}
+
+/**
+ * 一组成员节点的活动汇总（逐条镜像上游 `processActivity`）。
+ *
+ * 逐工具块递归 `subCalls`、按 `callId` 去重；`running`/`runningDetail`/`preparing` 取**最新**那个
+ * 仍在运行的块（上游按 `time >= runningTime`）。
+ * @param nodes - 该分组的成员节点。
+ */
+export function processActivityOfNodes(nodes: readonly ActivityNodeLike[]): ActivitySummary {
+    const counts = new Map<ProcessActivity, number>()
+    const seen = new Set<string>()
+    let running: ProcessActivity | undefined
+    let runningDetail = ''
+    let runningTime = -Infinity
+    let preparing: boolean | undefined
+    const visit = (raw: unknown): void => {
+        if (raw === null || typeof raw !== 'object') return
+        const tool = raw as Record<string, unknown>
+        const settled = tool['kind'] === 'tool-result'
+        const callId = typeof tool['callId'] === 'string' ? tool['callId'] : ''
+        if (callId !== '') {
+            if (seen.has(callId)) return
+            seen.add(callId)
+        }
+        const call = (settled ? tool['call'] : tool) as Record<string, unknown> | null | undefined
+        const name = call !== null && call !== undefined && typeof call['name'] === 'string' ? call['name'] : ''
+        if (name !== '') {
+            const kind = activityOfToolName(name)
+            if (!settled) {
+                const time = typeof tool['time'] === 'number' ? tool['time'] : 0
+                if (time >= runningTime) {
+                    const phase = tool['phase']
+                    running = kind
+                    preparing = phase === 'preparing'
+                    runningDetail = phase === 'preparing'
+                        ? (kind === 'tools' ? name : '')
+                        : liveToolDetail(name, typeof tool['argsRaw'] === 'string' ? tool['argsRaw'] : '')
+                    runningTime = time
+                }
+            }
+            counts.set(kind, (counts.get(kind) ?? 0) + 1)
+        }
+        const subCalls = tool['subCalls']
+        if (Array.isArray(subCalls)) for (const child of subCalls) visit(child)
+    }
+    for (const node of nodes) if (node.kind === 'tool-call') visit(node.data['root'])
+    if (running === undefined) runningDetail = liveReasoningDetailOfNodes(nodes)
+    return {
+        // 调用数降序、同数按首次出现（上游 `sort` 的口径）
+        counts: [...counts.entries()]
+            .map(([kind, count], index) => ({ kind, count, index }))
+            .sort((left, right) => (right.count - left.count) || (left.index - right.index))
+            .map(({ kind, count }) => ({ kind, count })),
+        ...(running === undefined ? {} : { running }),
+        runningDetail,
+        ...(preparing === true ? { preparing: true } : {}),
+    }
 }
 
 /** 上游 `PROCESS_TITLE_MINIMUM_MS`：一条进行中的标题**至少显示**这么久，才允许换成下一条。 */

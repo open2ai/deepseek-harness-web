@@ -41,7 +41,7 @@ export function createChatStore(host: ChatHost): ChatStore {
   const composer = createComposer(host)
   const catalogs = createCatalogs(host)
   const status = createStatus(host)
-  const selectors = createSelectors(host, messages.store.showNotice)
+  const selectors = createSelectors(host)
   const question = createQuestion(host)
   const attachments = createAttachments(host)
   // 队列卡：它不是行（见 store/queue 文件头）。失败提示借用消息切片的通知行（与 selectors 同一注入方式）
@@ -81,6 +81,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     turnRunning: messages.store.turnRunning,
     subagentFacts: messages.store.subagentFacts,
     scrollPend: messages.store.scrollPend,
+    // 座位计划（渲染粒度对齐上游 render entry；逐座位改造的输入，只读）
+    seatPlan: messages.store.seatPlan,
     historyHasMore: messages.store.historyHasMore,
     historyLoading: messages.store.historyLoading,
     historyEvents: messages.store.historyEvents,
@@ -89,6 +91,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     loadOlder: messages.store.loadOlder,
     showNotice: messages.store.showNotice,
     openFile: messages.store.openFile,
+    openAttachment: messages.store.openAttachment,
+    openAttachmentBytes: messages.store.openAttachmentBytes,
     answerApproval: messages.store.answerApproval,
     // 回合级过程折叠的展开态（同回合多段行共享）
     turnFoldOpen: messages.turnFoldOpen,
@@ -134,6 +138,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     addRef: composer.store.addRef,
     removeRef: composer.store.removeRef,
     readImageFile: composer.store.readImageFile,
+    // 光标处插入（语音转写落点；与 `draft` 帧的整条追加刻意分开）
+    insertText: composer.store.insertText,
     // 目录切片
     slashCatalog: catalogs.store.slashCatalog,
     atCatalog: catalogs.store.atCatalog,
@@ -146,7 +152,6 @@ export function createChatStore(host: ChatHost): ChatStore {
     openPopup: selectors.store.openPopup,
     togglePopup: selectors.store.togglePopup,
     openModelSearch: selectors.store.openModelSearch,
-    markSlashPick: selectors.store.markSlashPick,
     closePopups: selectors.store.closePopups,
     selectPerm: selectors.store.selectPerm,
     selectModel: selectors.store.selectModel,

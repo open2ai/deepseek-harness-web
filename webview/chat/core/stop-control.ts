@@ -1,5 +1,5 @@
 // **停止控件的呈现判定**（页面侧）：主钮能不能让出「停止」、要不要另挂一个独立 Stop、输入区要不要
-// 被"父离线"锁住。三条件逐条镜上游 `InputBar` 的同一段判据（版本与行号见 `details/upgrade/10` §8）：
+// 被"父离线"锁住。三条件逐条镜上游 `InputBar` 的同一段判据：
 //
 //   · `primaryStops = running && subagent === null && (empty || blocked !== undefined)`
 //     —— **子会话的主钮永远是「发送」**（子会话不能自己停自己：`session.cancel` 会被服务端拒）；

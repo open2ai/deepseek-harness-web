@@ -31,6 +31,28 @@
        原先借 `--vscode-input-background`：浅色主题下它和编辑器底色同为白 —— 气泡整个看不见，
        看着就像"文字浮在左半边、右边空一大截"（真机 2026-10-07）。这里按上游那两档写死。 */
     --dsh-bubble: rgb(44, 44, 46);
+    /*
+     * 卡片/代码块填充（**2026-10-13 补定义**）。
+     *
+     * 为什么必须在这里定义：`chain.css` 有 **12 处** `var(--dsh-code-fill)`（工具卡/程序块的背景）
+     * 和 1 处 `var(--dsh-inset-fill)`，但**全仓没有定义、也没有 fallback** ——
+     * `var()` 取不到值时**整条声明失效**，于是那些块的背景全是透明（看着像"卡片没底色"）。
+     * 这类问题静态看"规则存在"、真机看"元素命中了规则"，两头都发现不了，只有比"变量定义面"才查得出
+     * （检查脚本 `tmp/_cssvars.probe.mjs`）。
+     *
+     * 取值 = 上游 `--dsw-alias-markdown-code-block`（`ui-theme/src/styles/design-platform.css:230` 浅 /
+     * `:348` 深 → `--dsw-static-neutral-bluish-50` rgb(249,250,251) / `-900` rgb(27,27,28)）；
+     * `--dsh-code-banner` = 上游 `--dsw-alias-markdown-code-block-banner`（`bluish-50` / `bluish-850` rgb(44,44,46)，
+     * 比块体**亮**一档，那是代码块工具条的底）；`--dsh-inset-fill` 是内嵌位（比块体亮一档）。
+     */
+    --dsh-code-fill: rgb(27, 27, 28);
+    --dsh-code-banner: rgb(44, 44, 46);
+    --dsh-inset-fill: rgb(32, 32, 32);
+    /* 排程卡底色 = 上游 `ScheduleCreateCard.module.css` 的 `--card-fill`（浅 `neutral-50` /
+       深 `neutral-850` rgb(33,33,35)），hover 浅 `neutral-100` / 深 `neutral-800` rgb(41,41,41)。 */
+    --dsh-card-fill: rgb(33, 33, 35);
+    /* 触发通知卡底色 = 上游 `--dsw-alias-turn-trigger-bg`（深色档就取 `interactive-bg-hover`）。 */
+    --dsh-trigger-bg: rgba(255, 255, 255, 0.08);
   }
   body.vscode-light {
     --dsh-hairline: rgba(0, 0, 0, 0.1);
@@ -40,6 +62,12 @@
     --dsh-deep-diving-shimmer: rgb(36, 61, 128);
     /* 上游浅色档的 bubble 色（见 `:root` 那段说明） */
     --dsh-bubble: rgb(237, 243, 254);
+    /* 卡片/代码块填充的浅色档（上游 bluish-50 / bluish-100 / neutral-50 / neutral-100） */
+    --dsh-code-fill: rgb(249, 250, 251);
+    --dsh-code-banner: rgb(249, 250, 251);
+    --dsh-inset-fill: rgb(243, 244, 246);
+    --dsh-card-fill: rgb(250, 250, 250);
+    --dsh-trigger-bg: rgb(249, 250, 251);
   }
   body.vscode-high-contrast,
   body.vscode-high-contrast-light {
@@ -47,6 +75,12 @@
     --dsh-hairline-strong: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.4));
     /* 高对比主题不写死颜色：气泡底交给语义变量，保证与前景色的对比度 */
     --dsh-bubble: var(--vscode-input-background, var(--vscode-editor-background, #000000));
+    /* 同上：卡片/代码块填充也交给语义变量（高对比下靠描边区分，不靠底色深浅） */
+    --dsh-code-fill: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, #000000));
+    --dsh-code-banner: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, #000000));
+    --dsh-inset-fill: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, #000000));
+    --dsh-card-fill: var(--vscode-editor-background, #000000);
+    --dsh-trigger-bg: var(--vscode-editor-background, #000000);
   }
 
   * { box-sizing: border-box; }
@@ -197,6 +231,43 @@
      上游聊天区**本就不跳过排版**（`ChatView` 全挂 DOM），撤掉它才是同口径；首屏收成一页之后
      行数也小得多，这个优化不再值得那点滚动抖动。 */
   .turn-anchor { display: block; min-width: 0; }
+  /**
+   * **折起的空行不占位**（2026-10-12；判据见 `tmp/_blankrow.dom.test.mjs` 与真机几何探针 `tmp/_blank.probe.mjs`）。
+   *
+   * 什么形状：已关闭的回合里，除承控制行的那一条之外，其余每条都把过程区与答句折起
+   *（`.chain-body`/`.body` 都是 `hidden`，渲染高度 0），但**行自己的盒子还在** ——
+   * `.chain` 的 margin 加上 `.col` 的相邻块间距，十几条空行就叠成一大块纯空白。
+   * 行渲染时按"这一行还有没有任何可见内容"打 `data-blank="true"`（承控制行的那条不打），这里把它压成零高零距。
+   */
+  .msg-col > .turn-anchor[data-blank='true'] { height: 0; margin-top: 0; overflow: hidden; }
+  /**
+   * 行间间距**逐档写，不用 `gap`**（2026-10-12 修正）。
+   *
+   * `gap` 对 `[hidden]` 的兄弟**照样占位** —— 折起的行会留下 16px 空洞，
+   * 而"折起 = 不占位"正是上面那条要保证的事，两者互相矛盾。
+   * 三档取值与上游实测一致：默认 6px、回答块 12px（含其后那一条）、承控制行 16px。
+   */
+  .msg-col > .turn-anchor:not([hidden]):not(:first-child) { margin-top: 6px; }
+  /**
+   * **承控制行的那条锚恒定 16px 上距**（上游 `ChatView.module.css` 的 turn-process 一档）。
+   * 用 `:not(:first-child)` 是为了让会话首行不留空档（与上游一致）。
+   */
+  .msg-col > .turn-anchor[data-turn-process-head]:not([hidden]):not(:first-child) { margin-top: 16px; }
+  /**
+   * **回答块那一档 12px**（上游 `response + next`）。
+   *
+   * ⚠️ 选择器必须落在**真实承载属性的那一层**：`data-turn-process-answer` 挂在 `.msg` 上，
+   * 而这条规则原先写成 `.turn-anchor[data-turn-process-answer]` —— **永远不匹配**，
+   * 上游那一档从来没生效过（2026-10-12 核对上游时发现的老问题）。
+   */
+  .msg-col > .turn-anchor:has(> .msg[data-turn-process-answer]):not([hidden]) + .turn-anchor:not([hidden]) { margin-top: 12px; }
+  /**
+   * **上一格是"空过程位"时，列内那一档也不留**（2026-10-12）。
+   *
+   * 空过程位 = 这一行**没有终局行**（`.chain-done`）**且**过程区折起（`.chain-body[hidden]`）——
+   * 那一格的 `.chain` 盒子里什么都不剩，再给它留间距就是白洞。
+   */
+  .msg .col > .chain:not(:has(> .chain-done)):not(:has(> .chain-body:not([hidden]))) + * { margin-top: 0; }
 
   /* `scrollbar-gutter: stable` 与上游滚动容器同（`ConversationRoot.module.css`）：滚动条槽位**无条件预留**，
      槽位出现/消失不改 `clientHeight`（否则会触发跟随里的"视口变矮 ⇒ 重钉"，与滚动条互踢）。 */
@@ -208,7 +279,16 @@
      不禁的话，内容长高时浏览器会把视口锚在某个元素上、与我们的"重钉到底"互踢 —— 流式期间就是滚动条抖。
      标记由 `MessageList` 按跟随状态打（`data-dsh-following-tail`）。 */
   #messages[data-dsh-following-tail] { overflow-anchor: none; }
-  .msg-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  /**
+   * 内容列（`#messages` 里那一列行）。
+   *
+   * ⚠️ **这一层不许有 `gap`**（2026-10-13 修）：行间距由**每一行自己的 `margin-top`** 给三档
+   * （默认 6 / 回答块 12 / 回合头 16，见下面 `.msg-col > .turn-anchor` 那几条）。
+   * 这里再写 `gap: 16px` 会与那些 `margin-top` **叠加** —— 真机实测净距 28~32px（= 16+12 / 16+16），
+   * 表现就是「已完成，用时 X 与正文之间、正文与工具行之间各有一大块空白」（维护者截图对照网页端）。
+   * 守卫：`tmp/_blankrow.dom.test.mjs` 同时钉 `.msg .col` 与 `.msg-col` 两处都不许用 `gap`。
+   */
+  .msg-col { display: flex; flex-direction: column; min-width: 0; }
   #messages.hidden { display: none; }
   /**
    * 折起的过程区（终局态摘要行那颗箭头负责开关）：`hidden="until-found"` 的**语义显式写出来**。
@@ -227,7 +307,11 @@
   .msg.user { flex-direction: row-reverse; }
   .msg.user .avatar { background: var(--vscode-badge-background, #3a3a3a); color: var(--vscode-foreground, #ccc); }
   .msg.assistant .avatar { background: var(--vscode-badge-background, #3a3a3a); color: var(--vscode-foreground, #ddd); }
-  .msg .col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  /* 行内（`.msg` 那一层）的间距：**不用 `gap`**，理由见上面 `.msg-col > .turn-anchor` 那一段
+     （`gap` 对 `[hidden]` 的兄弟照样占位，与"折起不占位"矛盾）。这一档是**两个都露着**的相邻块之间的 4px
+     —— 上游 `ChatView.module.css` 同款；上一格是折起 / 空的过程位时由上面那条 `+ * { margin-top: 0 }` 归零。 */
+  .msg .col { display: flex; flex-direction: column; min-width: 0; }
+  .msg .col > :not([hidden]) ~ :not([hidden]) { margin-top: 4px; }
   /* 差异化：发送者(user)内容窄、贴合右侧；回复(assistant)满宽、随对话区自适应 */
   /* `align-items: flex-end` **不能省**（上游 `.userStack` 同款）：列里的附件行最大到 2×240，
      它会把这一列的宽度顶到 78% 上限，而拉伸对齐下**气泡会跟着铺满那一列** ——
@@ -273,6 +357,20 @@
   .msg.user .body .user-img img {
     max-width: 100%; max-height: 240px; border-radius: 8px; display: block;
     border: 1px solid var(--dsh-hairline);
+  }
+  /*
+   * 图片外那层「点开原图」的 button（**2026-10-13 补**）。
+   *
+   * 规格 `07-UI规格` §3.2 早就登记了（"`padding/margin/border` 全 0、`line-height: 0`，
+   * 尺寸仍由 `img` 决定"），但 CSS 里**从未落地** —— 于是它吃浏览器默认样式
+   *（原生 button 有 border/padding/background），图片旁边会多出一圈描边与内距。
+   */
+  .msg.user .body .user-att-btn {
+    padding: 0; margin: 0; border: 0; background: none; line-height: 0;
+    display: block; border-radius: 8px; cursor: pointer;
+  }
+  .msg.user .body .user-att-btn:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder, #4daafc); outline-offset: 2px;
   }
   /* pending 插话气泡（对话列末尾）：与最终用户行同款气泡，只多一层弱化 —— 它还没进日志，
      被取用后由日志里那条真实用户行接位（见 components/message/PendingSteeringRow）。 */
@@ -337,19 +435,227 @@
     border-radius: 4px; padding: 0 4px; font-size: 12px;
     overflow-wrap: anywhere;
   }
-  /* 代码块 */
-  .msg .body pre, .chain-proc-text pre {
+  /* 代码块（**裸 pre**：正文里缩进出来的那种）。
+     ⚠️ `:not(.md-code) > pre` 是**必需的收窄**（2026-10-13）：围栏代码块现在是 `.md-code` 卡片，
+     它内部的 `pre` 由下面那组规则负责；不收窄的话这条（优先级更高）会把卡片的
+     `padding/border/radius/background` 全盖掉，卡片外观就散了。 */
+  .msg .body :not(.md-code) > pre, .chain-proc-text :not(.md-code) > pre {
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.35));
     border: 1px solid var(--dsh-hairline);
     border-radius: 8px; padding: 10px 12px; overflow-x: auto;
     font-size: 12px; line-height: 1.55;
     font-family: var(--vscode-editor-font-family, monospace);
   }
-  .msg .body pre code, .chain-proc-text pre code {
+  .msg .body :not(.md-code) > pre code, .chain-proc-text :not(.md-code) > pre code {
     background: none; border: none; padding: 0;
     font-family: inherit; font-size: inherit; overflow-wrap: normal;
   }
   .msg .body code, .chain-proc-text code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+.md-code {
+  /* 上游 `.card`（`CodeCard.module.css:1-8`）+ `.block`（`CodeBlock.module.css:13-18`）：
+     `position: relative` 是给 sticky 工具条与将来的绝对定位子元素用的锚。 */
+  position: relative;
+  margin: 16px 0;
+  border-radius: 16px;
+  background: var(--dsh-code-fill);
+  color: var(--vscode-foreground);
+  /* 上游 `font: var(--dsw-font-markdown-code-block)` = `11px/19px` 等宽
+     （`ui-theme/src/styles/gradient-shadow-text.css:166`）。整卡继承，pre 不再单独写字号。 */
+  font: 11px/19px var(--vscode-editor-font-family, monospace);
+  /*
+   * ⚠️ **刻意不写 `overflow: hidden`**：上游为此专门留了注释（`CodeBlock.module.css:86-87`）——
+   * 外层 overflow 会把 sticky 的工具条（`.bannerWrap`）毁掉。圆角改由**上下两段各自继承**：
+   * 工具条 `border-top-*-radius: inherit`、代码区 `border-bottom-*-radius: inherit`。
+   * 这样既拿到正确的圆角，又保住 sticky。
+   */
+}
+/**
+ * 卡内的代码区。**四样都要显式重置**（`margin`/`border`/`border-radius`/`background`）：
+ * 既有那条 `.msg .body :not(.md-code) > pre` 虽然已经收窄、不命中卡内，但别的 `pre` 规则仍可能命中，
+ * 不重置就会出现"卡片里又套一个带边框的块"。
+ */
+.md-code pre {
+  margin: 0;
+  border: 0;
+  /* 底部圆角**继承卡片**（上游把上下圆角拆到 `.bannerWrap` 与 `pre` 上，理由见上） */
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+  background: none;
+  padding: 6px 22px 20px;
+  /* 字号/行高/字族继承 `.md-code`（上游 `--dsl-code-block-content-font` 同源） */
+  font: inherit;
+  overflow-x: auto;
+}
+/** **默认自动换行**（`data-code-wrap="true"`，也就是不写这个属性时的口径）。 */
+.md-code pre code {
+  font: inherit;
+  background: none;
+  padding: 0;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+/** 关掉自动换行：长行横向滚动，不再折断（按钮切的就是这一条）。 */
+.md-code[data-code-wrap='false'] pre code {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+/**
+ * 工具条。**粘顶**（上游 `.bannerWrap`：`position: sticky; top: 0; z-index: 6`，
+ * `CodeBlock.module.css:24-31`）—— 长代码块往下滚时，语言名与两个按钮一直可见。
+ * 外层那圈 `background-color` 也是上游的（`--dsw-alias-bg-base`，避免滚动时透出代码）。
+ */
+.md-code-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px 8px 22px;
+  /* 顶部圆角继承卡片（上游 `.header` 的 `border-top-left/right-radius: inherit`） */
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
+  background: var(--dsh-code-banner);
+  color: var(--vscode-descriptionForeground);
+  /* 上游 `.header`：`font: 11px/18px var(--dsw-font-family)` —— 工具条用**系统字体**（不是等宽） */
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.md-code-lang {
+  flex: none;
+  /* 上游 `.language`：`color: var(--dsw-alias-label-tertiary)` */
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.md-code-acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.md-code-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+}
+/**
+ * 图标框：**上游 `size={14}`**（`CodeToolbar.tsx:49-58`）—— 不是 codicon 的 16px。
+ * 四个图标（wrap/nowrap/copy/check）都渲染进 DOM，按下面的规则显隐切换。
+ */
+.md-code-ico {
+  display: inline-flex;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.md-code-ico svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* 换行按钮：按**卡片**状态二选一（上游 `wrapped ? Nowrap : Wrap`，`CodeToolbar.tsx:51`）。
+   `data-code-wrap="true"` = 已开启自动换行 → 显示「取消换行」图标。 */
+.md-code[data-code-wrap='true'] .md-code-ico-wrap { display: none; }
+.md-code[data-code-wrap='false'] .md-code-ico-nowrap { display: none; }
+/* 复制按钮：按**自身**状态二选一（上游 `copied ? Check : Copy`，`CodeToolbar.tsx:56`）。 */
+.md-code-act[data-copied='true'] .md-code-ico-copy { display: none; }
+.md-code-act:not([data-copied='true']) .md-code-ico-check { display: none; }
+
+.md-code-act:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-foreground);
+}
+
+.md-code-act:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #4daafc);
+  /* 上游 `.action:focus-visible` 是 `outline-offset: 2px`（`CodeCard.module.css:74-77`） */
+  outline-offset: 2px;
+}
+  /*
+   * 触发通知卡（**2026-10-13 补**，对齐上游 `ui-chat/src/client/chat/TurnTriggerNodeView.module.css`）。
+   *
+   * 病根同代码块：DOM 已按上游结构写好（`components/message/TriggerRow.ts` 的类名与上游
+   * `.root/.header/.icon/.title/.time/.body/.explanation/.content` 一一对应），但 CSS 一条没写 ——
+   * 真机实测 `.trigger-head`（一个原生 `button`）是 `background rgb(240,240,240)` +
+   * `border 2px outset`，在深色聊天区里就是一个突兀的亮色描边框。
+   */
+  .trigger {
+    border: 0.5px solid var(--dsh-hairline);
+    border-radius: 20px;                  /* 上游 `--dsw-radius-xl` */
+    background: var(--dsh-trigger-bg);    /* 上游 `--dsw-alias-turn-trigger-bg` */
+    transition: background-color 100ms ease;
+  }
+  .trigger:hover { background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12)); }
+  /* 头部是 button：**必须重置原生样式**（border/background/font 三样都吃浏览器默认）。 */
+  .trigger-head {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 12px 16px;                   /* 上游 `.header` */
+    border: 0; background: none; font: inherit; text-align: left; cursor: pointer;
+    color: var(--vscode-descriptionForeground);
+    transition: color 100ms ease;
+  }
+  .trigger-head:hover { color: var(--vscode-foreground); }
+  .trigger-icon { display: inline-flex; flex: none; color: inherit; }
+  .trigger-title { flex: none; font-size: 14px; color: inherit; }
+  .trigger-time { flex: none; margin-left: auto; font-size: 12px; line-height: 18px; color: inherit; }
+  .trigger-chev { flex: none; color: inherit; transition: transform 100ms ease; }
+  .trigger-chev.is-open { transform: rotate(180deg); }
+  .trigger-body { padding: 0 16px 12px 40px; }
+  .trigger-explanation { margin: 8px 0; font-size: 12px; line-height: 18px; color: var(--vscode-descriptionForeground); }
+  .trigger-content {
+    max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: 12px; line-height: 18px;
+  }
+  /*
+   * 排程卡（**2026-10-13 补**，对齐上游 `ui-schedule/src/client/ScheduleCreateCard.module.css`）。
+   *
+   * 插件这边**没有**上游的 `.cardOpen`（整行打开任务详情的覆盖层）与 `.openButton` ——
+   * 本插件没有任务详情页，所以上游那条 `:has(.cardOpen):hover` 的 hover 也**不适用**（不写）。
+   */
+  .schedule-cards { display: flex; flex-direction: column; gap: 6px; }
+  .schedule-card {
+    display: flex; flex-direction: column; gap: 6px; width: 100%;
+    padding: 8px 10px;
+    border: 0.5px solid var(--dsh-hairline);
+    border-radius: 18px;                  /* 上游卡片外壳（交付物卡同源） */
+    background: var(--dsh-card-fill);
+    transition: background-color 120ms ease;
+  }
+  .schedule-card-row { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 44px; }
+  .schedule-card-icon {
+    display: grid; flex: none; place-items: center;
+    width: 40px; height: 40px;            /* 上游 40×40 图标框（不写就是 0 宽，图标看不见） */
+    border: 0.5px solid var(--dsh-hairline);
+    border-radius: 10px;
+    background: var(--dsh-card-fill);
+    color: var(--vscode-descriptionForeground);
+  }
+  .schedule-card-icon svg, .schedule-card-icon .codicon { flex: none; }
+  .schedule-card-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 2px; min-width: 0; }
+  .schedule-card-title {
+    overflow: hidden; font-size: 13px; line-height: 20px; font-weight: 500;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .schedule-card-frequency {
+    overflow: hidden; font-size: 10px; line-height: 16px;
+    color: var(--vscode-descriptionForeground);
+    text-overflow: ellipsis; white-space: nowrap;
+  }
   /* 输入区 */
   #composer {
     position: relative;
@@ -585,6 +891,18 @@
   .mp-back:hover { background: rgba(128,128,128,0.28); color: var(--vscode-foreground, #ddd); }
   .mp-back .codicon { font-size: 13px; line-height: 1; }
   .mp-head-title { font-size: 12px; font-weight: 600; color: var(--vscode-foreground, #ddd); }
+  /*
+   * 模型搜索框的**外距**（样式本体与权限等处的公共搜索框共用，见下面的 `.spicker-search`）。
+   *
+   * 病根（2026-10-13）：`components/ModelPicker.ts` 渲染了 `mp-search` / `mp-search-input`，
+   * 但 `.mp-` 家族里**唯独没有这两个** —— `<input>` 于是吃浏览器原生样式（**白底** + 原生边框 + 默认字体），
+   * 在深色弹层里就是一块白框（维护者截图："这个搜索区域样式怎么这么丑"）。
+   *
+   * 修法：**不再自己写一套**，直接把 `.mp-search-input` 并进公共搜索框那条规则
+   *（`.spicker-search` —— 权限/`/model` 等 SearchPicker 用的就是它）。两个搜索框同一个应用里，
+   * 样式本该一致；共用一条规则也就不会再各自漂移。
+   */
+  .mp-search { padding: 2px 0 6px; }
   /* 第一级的两行：左标签 + 右当前值（省略号）+ 右箭头 */
   .mp-cell {
     display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
@@ -694,12 +1012,20 @@
   /* 公共可搜索选择弹窗（SearchPicker）：顶部搜索框 + 列表 */
   /* 列表自己滚、搜索框钉住：SearchPicker 打开时会自动定位当前项，若让外层 .popup 滚会把搜索框一起滚走 */
   .spicker { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-height: 0; }
-  .spicker-search {
+  /**
+   * **搜索框的唯一一份样式**：SearchPicker（权限 / `/model` 平铺列表等）与模型选择器的两级列表
+   *（`components/ModelPicker.ts` 的 `.mp-search-input`）**共用这一条**（2026-10-13 合并）。
+   *
+   * 为什么合并：这两个搜索框在同一个应用里长得不一样（模型那个原先没样式 ⇒ 吃浏览器原生白底，
+   * 维护者截图"搜索区域样式怎么这么丑"）。共用一条后不会再各自漂移 —— 要改就改这里。
+   */
+  .spicker-search, .mp-search-input {
     box-sizing: border-box; width: 100%; margin: 0 0 2px; padding: 4px 8px; font-size: 12px;
     background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #ddd);
     border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.18)); border-radius: 5px; outline: none;
   }
-  .spicker-search:focus { border-color: var(--vscode-focusBorder, #4daafc); }
+  .spicker-search:focus, .mp-search-input:focus { border-color: var(--vscode-focusBorder, #4daafc); }
+  .spicker-search::placeholder, .mp-search-input::placeholder { color: var(--vscode-input-placeholderForeground, #888); }
   .spicker-list { display: flex; flex-direction: column; gap: 1px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
   .spicker .opt { align-items: baseline; gap: 8px; }
   .spicker .sp-name { flex: none; white-space: nowrap; }
@@ -735,6 +1061,18 @@
 
   /* 环 + 百分比 + 自己的明细弹窗。**两个数（已用/窗口）都拿到才渲染**，见 components/ContextMeter。 */
   .ctx-meter { position: relative; display: inline-flex; flex: none; }
+  /*
+   * 上下文注入行里的「工具增删块」（**2026-10-13 补**）。
+   *
+   * `components/message/ContextInjectionRow.ts` 渲染 `<div class="ctx-tool-changes">` 包两行文案
+   *（新增/移除的工具），但 `.ctx-` 家族里只有上下文环（`.ctx-meter` / `.ctx-trigger`）——
+   * 这个容器没有任何规则，两行字会紧贴在一起、也没有次级色。
+   * 依据同族既有档：次级文字用 `--vscode-descriptionForeground`（与 `.sp-pop-value` 等一致）。
+   */
+  .ctx-tool-changes {
+    display: flex; flex-direction: column; gap: 2px;
+    color: var(--vscode-descriptionForeground, #999);
+  }
   /* 触发器是**胶囊**（环 + 读数并排），照上游 `.trigger`：inline-flex/gap 6/左右内距 8/圆角/无边框。
      字号取插件自己的次级档（12px），不搬上游的 13px —— 本面板整体字号比网页端紧一档。 */
   .ctx-trigger {
@@ -1253,6 +1591,18 @@
   /* 明细卡标题右侧的精确读数（可核对的整数，与下面各行的缩写/千分位同源） */
   .sp-pop-value { font-weight: 400; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground, #ccc); }
   .sp-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  /**
+   * 统计明细卡里的一行：**键次级、值主级**（**2026-10-13 补 `.sp-k`**）。
+   *
+   * 依据（上游 `ui-chat/src/client/chat/stat-dialog.module.css:68-86`，那条 `.details` 被
+   * `StatsPills` 与 `TurnUsagePanel` 共用）：
+   *   `.details { color: var(--dsw-alias-label-tertiary) }` ← **键**是次级色
+   *   `.details dd { color: var(--dsw-alias-label-secondary); text-align: right; font-variant-numeric: tabular-nums }` ← 值
+   * 插件原先只有 `.sp-v` 有样式（值用前景色），`.sp-k` 一条规则都没有 ⇒ **键值同色**，一行里分不出主次。
+   * 上游三级色里 VS Code 只有两档可映射（`foreground` / `descriptionForeground`），
+   * 所以：键 → `descriptionForeground`，值 → `foreground`（保"值比键亮"这个关系）。
+   */
+  .sp-k { color: var(--vscode-descriptionForeground, #999); }
   .sp-v { font-variant-numeric: tabular-nums; color: var(--vscode-foreground, #ddd); }
 
   /* 附件（文件引用，输入框区域内） */

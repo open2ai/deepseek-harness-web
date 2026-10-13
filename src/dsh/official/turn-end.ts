@@ -44,7 +44,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 /**
  * 从一条 `turn/end` 的 `reason` 取出失败事实 —— 镜像上游两处：
- * `conversation-nodes/turn-error.ts` 的 `failureFrom()` 与 `event-projection.ts:149` 的 `displayFailure()`。
+ * 的 `failureFrom` 与 的 `displayFailure`。
  *
  * 两条口径必须保持：
  *  · **`AUTH` 只留 `code`、不留 `message`**（上游原文：原始 AUTH 消息可能回显**被掩码的凭据**，
@@ -52,7 +52,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  *  · `aborted` + `reason.reason.kind === 'hook'` 且 `reason.reason.reason === 'deepseek-account/signed-out'`
  *    时上游**合成**一个 `ACCOUNT_SIGNED_OUT` 失败（界面才有「任务已因退出 DeepSeek 登录而停止。」）。
  *
- * 中文文案**不在这里选**：code → 本地化由页面按上游 locale 决议（`webview/chat/core/turn-copy.ts`）。
+ * 中文文案**不在这里选**：code → 本地化由页面按上游 locale 决议。
  * @param reason - `turn/end.data.reason` 原文。
  * @returns 失败事实；非失败终止返回 undefined。
  */

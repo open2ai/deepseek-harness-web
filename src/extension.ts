@@ -5,12 +5,14 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+import { createHash } from 'crypto';
 import { DshService, DshNoWorkspaceError } from './api/dshService';
 import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
-import { RowDiffer } from './dsh/rows/diff';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
+import { RowDiffer } from './dsh/rows/diff';
 import {
     applyNativeTitlebarContext,
     TITLEBAR_MODE,
@@ -73,14 +75,9 @@ const subagentFrameFields = (
         },
     };
 };
-// 渲染源的唯一通路：宿主把**行**下发给页面，页面据此渲染（旧指令通路已退役，见 docs/design/08 §13）。
-// **只发变动的行**（§3.3）：长会话整表是 13 MB 量级，而每帧真正变的只有个位数行 —— 详 `dsh/rows/diff.ts`。
+// 渲染源 = 宿主行（`rows` 帧）；节点模型是影子对照（`chatEvents`），只建不渲染。
 const rowDiffer = new RowDiffer<{ key: number }>();
-/**
- * 上一帧发给页面的**会话号**：换会话时页面会因 `sessionId` 变了而**丢掉自己的行缓存**
- * （见 `webview/chat/core/store/reducer.ts` 的 `assembleRows`），所以那一帧必须是**整表** ——
- * 否则新页面拿到的是一份"相对上一份缓存"的增量，而它手上根本没有那份缓存。
- */
+// `rowsSession` 用于判「换会话」：会话一变，台账把旧会话未结算的回显按 failed 退休。
 let rowsSession: string | undefined;
 dsh.onRows = (rows, turnActive) => {
     // 带上会话标识：页面靠它判断「本地的乐观行是不是这个会话的」——
@@ -137,10 +134,37 @@ dsh.onRows = (rows, turnActive) => {
         historyEvents: dsh.windowEventCount(),
         sessionOpenError: openError ?? null,
     });
-    // **行帧必须先于退休帧**（真机 2026-10-07「发送后对话区闪了一下」）：上面的 `admitById/admitByText`
-    // 是从**这一帧的行**里认出来的，所以承接那条消息的宿主行就在刚发出去的 `rows` 里；若先把
-    // `submissions`（带 `admitted` 退休）发出去，页面会先丢掉本地回显、而宿主那行还没到 → 那条提问
-    // **消失一帧**、下一帧才回来 = 闪。两帧顺序反过来（页面侧还有按 `rpcId`/同文案认领的那道去重兜底）。
+    // ⚠️ **退休帧不在这里发**（2026-10-10 真机：发送后对话区闪一下）。
+    //
+    // 页面认领本地回显靠的是 `chatEvents`（渲染源），而 `onRows` 永远早于 `onEvents`
+    //（见 dshService 的 `flushRows`）—— 在这里发就成了「先退休、后给行」：本地回显先没、
+    // 承接它的真行还没到，那一拍里这条提问没有任何东西在表示它。
+    // 退休已挪到 `dsh.onSubmissionsAdmitted`（由 `flushRows` 在**事件帧之后**调用）。
+};
+// 保结构事件帧（**渲染源**）：与 `rows` 同刻下发窗口原文，页面据此建节点模型。
+dsh.onEvents = (events, sessionId, turnActive, replaced) => {
+    postToChats({
+        type: 'chatEvents',
+        sessionId,
+        turnActive,
+        events: events as unknown[],
+        // 窗口刚被整份换过（重开订阅的快照）：页面据此丢掉归一化缓存与折叠断点。
+        ...(replaced === true ? { replaced: true } : {}),
+        ...subagentFrameFields(sessionId),
+        historyHasMore: dsh.historyHasMore(),
+        historyLoading: dsh.historyLoading(),
+        historyEvents: dsh.windowEventCount(),
+        sessionOpenError: dsh.sessionOpenFailure() ?? null,
+        changesSummary: Object.fromEntries([...dsh.changesSummaryMap()]),
+    });
+};
+/**
+ * **提交入档的收尾**（退休帧：推 `submissions`）。
+ *
+ * ⚠️ 必须排在 `chatEvents` **之后**（`flushRows` 的调用顺序就是它）：页面读事件帧认领本地回显，
+ * 退休帧一到就收掉回显 —— 顺序反了会闪（见 `dsh.onRows` 那段注释）。
+ */
+dsh.onSubmissionsAdmitted = (sessionId) => {
     pushSubmissions(sessionId);
 };
 // 任务清单（输入框上方的常驻条）：与行同源、同一处派生，页面按整表替换；`null` = 没有清单。
@@ -630,6 +654,13 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
     }
 }
 
+/** 设置文档变化 → 重推 chatInfo 到所有聊天 webview（模型列表 / 预设 / 权限选择器实时跟随上游设置）。 */
+async function refreshChatInfoForAll(): Promise<void> {
+    for (const w of allChatWebviews()) {
+        void postChatInfo(w);
+    }
+}
+
 /** 推偏好（全局，与会话无关）：上游「设置 → 通用设置」的四项
  *  （工作步骤展示 / 性能与用量 / 代码工作工具 / 繁忙时的发送行为）。
  *  整体读到才推：读不到就一个字段都不推，webview 侧维持默认（= 四项的上游默认值）。 */
@@ -681,6 +712,19 @@ function ensureSettingsFollow(): void {
     );
     dsh.subscribeChatPrefs(() => {
         void postChatPrefs();
+    });
+    // 设置文档任何变化（模型/预设/权限等）→ 重推 chatInfo，让选择器实时跟随上游设置（对齐上游：改了即生效）。
+    // 短窗口内合并（防滑杆/连续改动打一串 RPC）；到点只发最后一次。
+    let settingsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    dsh.subscribeSettingsDocument(() => {
+        if (settingsRefreshTimer !== undefined) {clearTimeout(settingsRefreshTimer);}
+        settingsRefreshTimer = setTimeout(() => {
+            settingsRefreshTimer = undefined;
+            // 权限目录是进程级的、可能刚随开关变过（自动授权审查 / 智能体团队…）：
+            // 先失效再重推，否则这一轮会把旧目录推给页面（control 那条 emit 是另一条路，别赌谁后到）。
+            dsh.invalidatePermissionCatalog();
+            void refreshChatInfoForAll();
+        }, 200);
     });
 }
 
@@ -902,16 +946,6 @@ function setupChatWebview(
     webview.onDidReceiveMessage((msg) => {
         if (msg.type === 'ready') {
             readyChats.add(webview);
-            /**
-             * **这个页面手上没有任何行缓存 → 下一帧必须整表。**
-             *
-             * 差分器的基线是"上一个页面收到过什么"（它只有一个实例，见 `rowDiffer` 的注释），而
-             * 页面那边是**按 `key` 覆盖自己的缓存**再按 `rowKeys` 拼（`store/reducer.ts` 的 `assembleRows`）。
-             * 两者一错位就是：新页面收到 `rowDelta: []` + 一串 `rowKeys` → 缓存空 → 拼出**零行** →
-             * 对话区空白（真机：侧栏看的好好的，点「移动到编辑器」后新面板里会话没了；
-             * 侧栏视图被重建时同样如此）。
-             */
-            rowDiffer.requestFull();
             void (async () => {
                 try {
                     await dsh.ensureRunning();
@@ -1135,7 +1169,7 @@ function setupChatWebview(
             })();
         } else if (msg.type === 'copy') {
             void vscode.env.clipboard.writeText(msg.text ?? '');
-            vscode.window.showInformationMessage('已复制');
+            //vscode.window.showInformationMessage('已复制');
         } else if (msg.type === 'feedback') {
             // 消息反馈（👍/👎）：只做 RPC 桥接。业务失败（冲突/超长）**不抛**，按 code 原样回给页面选文案。
             void (async () => {
@@ -1250,13 +1284,100 @@ function setupChatWebview(
             })();
         } else if (msg.type === 'openFile') {
             void openFileInEditor(msg.path, msg.line, msg.cwd);
+        } else if (msg.type === 'openAttachment') {
+            /**
+             * **按附件 id 在编辑区打开附件**（用户消息 / 图片卡里的图与文件只有内容寻址 id，没有本地路径）。
+             *
+             * 两条来路，**先服务端、再本地兜底**：
+             *   ① `session/attachment` RPC 取字节（正路；真机 2026-10-11 修好它的方法名与参数形状后才通）；
+             *   ② RPC 不通时，直接按**内容寻址**去本地对象库取：`~/.dsh/attachments/v1/objects/<id前2位>/<摘要>`
+             *      —— 附件本来就存在磁盘上（实测与 RPC 取回的字节数一致：99,697B），
+             *      没必要因为一次 RPC 失败就让用户"点了没反应"。
+             *
+             * 无论哪条取到，都落到 `~/.dsh/attachments-view/<原名>-<id前12位>.<ext>`（带原名便于辨认、
+             * 同名不同内容靠 id 前缀区分），再交给 `openFileInEditor`：**图片走 VS Code 的图片预览、
+             * 其它文件走普通编辑器**（`vscode.open` 自己按类型分流）。
+             *
+             * ⚠️ **2026-10-12 扩到"文件"**（维护者：文件卡也点开就能在编辑区看）：原来只当图片处理，
+             * 于是 `file` 块（事件里同样带 `attachmentId`）打不开。现在的差别只有两处：
+             * 扩展名优先取**原名**的（`.txt` / `.pdf` 等，不再一律落 `.jpg`），失败文案改成"打开附件"。
+             */
+            void (async () => {
+                const id = String(msg.attachmentId ?? '');
+                const safe = String(msg.name ?? '')
+                    .replace(/[\\/:*?"<>|]/g, '_')
+                    .replace(/^\s+|\s+$/g, '');
+                const stem = safe === '' ? 'attachment' : path.basename(safe, path.extname(safe));
+                const digest = id.replace(/^sha256:/u, '');
+                /** 对象库里的绝对路径（内容寻址：前两位做目录）。 */
+                const objectPath = digest === ''
+                    ? undefined
+                    : path.join(os.homedir(), '.dsh', 'attachments', 'v1', 'objects', digest.slice(0, 2), digest);
+
+                let bytes: Buffer | undefined;
+                let mediaType = '';
+                let serverError = '';
+                try {
+                    const img = await dsh.readImageAttachment(id);
+                    bytes = Buffer.from(img.data, 'base64');
+                    mediaType = img.mediaType;
+                } catch (e) {
+                    serverError = e instanceof Error ? e.message : String(e);
+                }
+                if (bytes === undefined && objectPath !== undefined) {
+                    try {
+                        bytes = await fs.promises.readFile(objectPath);
+                    } catch {
+                        /* 两条都没有：下面统一报错 */
+                    }
+                }
+                if (bytes === undefined) {
+                    void vscode.window.showWarningMessage(
+                        `打开附件失败：服务端取字节失败（${serverError}），本地对象库里也没有 ${digest === '' ? id : digest.slice(0, 12)}`
+                    );
+                    return;
+                }
+                await writeViewAndOpen(stem, digest, mediaType, safe, bytes);
+            })();
+        } else if (msg.type === 'openAttachmentBytes') {
+            /**
+             * **把一段"还没有附件 id"的字节在编辑区打开**（2026-10-12 新增）。
+             *
+             * 用途：**刚发出去、还没进日志的图片**（本地乐观行）只有粘贴/拖进来的 base64，既没有本地路径、
+             * 也没有 `attachmentId`，于是那条路走不了 `openAttachment`。这里把同一段落盘、用同一套
+             * "落 `~/.dsh/attachments-view/` → 编辑器打开"收尾 —— 与上游"点开看全尺寸"的意图对齐，
+             * 落点放在编辑器区（在 VS Code 里比灯箱顺手，与图片卡那条同口径）。
+             */
+            void (async () => {
+                const data = typeof msg.data === 'string' ? msg.data : '';
+                if (data === '') {return;}
+                const safe = String(msg.name ?? '')
+                    .replace(/[\\/:*?"<>|]/g, '_')
+                    .replace(/^\s+|\s+$/g, '');
+                const stem = safe === '' ? 'image' : path.basename(safe, path.extname(safe));
+                const bytes = Buffer.from(data, 'base64');
+                // 摘要只用来给落盘文件名做去重/区分（与上游的内容寻址 id 无关，别混用）
+                const digest = createHash('sha256').update(bytes).digest('hex');
+                await writeViewAndOpen(stem, digest, String(msg.mediaType ?? ''), safe, bytes);
+            })();
         } else if (msg.type === 'attachmentReq') {
-            // 附件大类：webview 按 attachmentId 懒取字节；失败也回帧（渲染侧显示失败态并可重试）
+            /**
+             * 附件大类：webview 按 attachmentId 懒取字节；失败也回帧（渲染侧显示失败态并可重试）。
+             *
+             * ⚠️ **本地兜底与 `openAttachment` 同一条**（2026-10-11）：附件本来就存在
+             * `~/.dsh/attachments/v1/objects/<前2位>/<摘要>`，RPC 不通时直接读盘 ——
+             * 否则一次 RPC 失败就会让会话里所有图都停在「加载失败」。
+             */
             void (async () => {
                 try {
                     const img = await dsh.readImageAttachment(msg.attachmentId);
                     post({ type: 'attachmentBytes', attachmentId: msg.attachmentId, mediaType: img.mediaType, data: img.data });
                 } catch (e) {
+                    const local = await readLocalAttachmentObject(msg.attachmentId);
+                    if (local !== undefined) {
+                        post({ type: 'attachmentBytes', attachmentId: msg.attachmentId, mediaType: local.mediaType, data: local.data });
+                        return;
+                    }
                     post({ type: 'attachmentBytes', attachmentId: msg.attachmentId, error: e instanceof Error ? e.message : String(e) });
                 }
             })();
@@ -1401,10 +1522,13 @@ function setupChatWebview(
                     post({ type: 'slashResult', ok: fallback.ok, command: 'export', message: fallback.text });
                     return;
                 }
-                // 其它命令（含带参 /export foo，上游返回错误）：走 commands/execute 文本回显
+                // 其它命令（/plan /goal /compact …）：commands/execute 会发出 command/run + command/done 事件，
+                // 宿主据此折出 command 行（含 outcome 文本）—— 上游只在对话区显示这一条命令节点，不再另发结果通知。
+                // 只有命令**没执行起来**（服务不可用/无工作区）时才用 slashResult 提示错误（那时没有命令行）。
                 const res = await chatInput.runCommand(line);
-                post({ type: 'slashResult', ok: res.ok, command: commandName, message: res.text });
-                // 成功/失败结果均已随 slashResult 回给 webview，由 store 显示在对话区(不走 VSCode 通知)；
+                if (!res.ok) {
+                    post({ type: 'slashResult', ok: false, command: commandName, message: res.text });
+                }
                 // 状态类命令(/plan /goal)由 refreshChatInfoAfterSlash 轮询投影，让 chip 收敛/消失
                 await refreshChatInfoAfterSlash(webview, commandName);
             })();
@@ -1514,7 +1638,7 @@ async function showApplyOptions(reply: string, ctx: SelectionContext, allowRepla
                     break;
                 case 'copy':
                     await vscode.env.clipboard.writeText(reply);
-                    vscode.window.showInformationMessage('已复制到剪贴板');
+                    //vscode.window.showInformationMessage('已复制到剪贴板');
                     break;
                 case 'open': {
                     const doc = await vscode.workspace.openTextDocument({
@@ -1595,6 +1719,94 @@ async function listAllWorkspaces(): Promise<Array<{ workspaceId: string; path: s
         title: string;
         sessionIds: string[];
     }>;
+}
+
+/**
+ * 从**本地对象库**按内容寻址取一个附件（`~/.dsh/attachments/v1/objects/<摘要前2位>/<摘要>`）。
+ *
+ * 存在理由（2026-10-11）：`session/attachment` RPC 一旦不通（历史上它的方法名与参数形状都错过一次），
+ * 会话里所有图片就会同时停在「加载失败 / 点了没反应」；而附件本体**一直躺在磁盘上**。
+ * 这里只做「按已知布局读一个文件」，读不到就返回 `undefined`（由调用方决定报错还是回失败帧）。
+ *
+ * 媒体类型按**文件头**推测（对象文件名没有后缀），只用于挑 data URL 的类型。
+ * @param attachmentId - `sha256:<64位十六进制>` 形式的内容寻址 id。
+ * @returns base64 字节与推测的媒体类型；文件不存在时 `undefined`。
+ */
+async function readLocalAttachmentObject(attachmentId: string): Promise<{ mediaType: string; data: string } | undefined> {
+    const digest = String(attachmentId ?? '').replace(/^sha256:/u, '');
+    if (!/^[0-9a-f]{8,}$/iu.test(digest)) {
+        return undefined;
+    }
+    const file = path.join(os.homedir(), '.dsh', 'attachments', 'v1', 'objects', digest.slice(0, 2), digest);
+    try {
+        const bytes = await fs.promises.readFile(file);
+        return { mediaType: sniffImageMediaType(bytes), data: bytes.toString('base64') };
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * 把一段附件字节落进 `~/.dsh/attachments-view/` 并**在编辑区打开**（图片走 VS Code 图片预览、其它文件走编辑器）。
+ *
+ * 统一收尾的理由：`openAttachment`（按 id 取字节）与 `openAttachmentBytes`（本地乐观行的裸字节）
+ * 只差"字节从哪来"，落盘与打开这一步必须**只有一份** —— 否则扩展名兜底、失败文案、
+ * 目录约定会各写一遍、迟早分叉（2026-10-12 扩到文件时正是靠这一处收敛）。
+ *
+ * 扩展名：**优先用原名的**（`.txt` / `.pdf` / `.png` …），没有才按 `mediaType` 推，
+ * 都认不出给 `.bin`（此前一律落 `.jpg`，非图片文件会被 VS Code 按图片打开而报错）。
+ *
+ * @param stem - 文件名（不含扩展名；调用方已做过非法字符清洗）。
+ * @param digest - 内容摘要（64 位十六进制或空）：用于同内容去重、同名不同内容区分。
+ * @param mediaType - 上游给的媒体类型（可能为空）。
+ * @param originalName - 清洗后的原名（取扩展名用；可能为空）。
+ * @param bytes - 附件原始字节。
+ */
+async function writeViewAndOpen(stem: string, digest: string, mediaType: string, originalName: string, bytes: Buffer): Promise<void> {
+    const byMedia: Record<string, string> = {
+        'image/png': '.png',
+        'image/jpeg': '.jpg',
+        'image/webp': '.webp',
+        'image/gif': '.gif',
+        'application/pdf': '.pdf',
+        'text/plain': '.txt',
+        'application/json': '.json',
+        'text/markdown': '.md',
+    };
+    const named = path.extname(originalName);
+    const ext = named !== '' ? named : (byMedia[mediaType] ?? '.bin');
+    const short = digest === '' ? Date.now().toString(36) : digest.slice(0, 12);
+    try {
+        const dir = path.join(os.homedir(), '.dsh', 'attachments-view');
+        await fs.promises.mkdir(dir, { recursive: true });
+        const file = path.join(dir, `${stem === '' ? 'attachment' : stem}-${short}${ext}`);
+        await fs.promises.writeFile(file, bytes);
+        await openFileInEditor(file);
+    } catch (e) {
+        void vscode.window.showWarningMessage('打开附件失败：' + (e instanceof Error ? e.message : String(e)));
+    }
+}
+
+/**
+ * 按**文件头**认图片类型（对象文件没有后缀，只能看魔数）。
+ * @param bytes - 附件原始字节。
+ * @returns 认得出的 MIME；认不出给 `application/octet-stream`。
+ */
+function sniffImageMediaType(bytes: Buffer): string {
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+        return 'image/jpeg';
+    }
+    if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+        return 'image/png';
+    }
+    const head6 = bytes.length >= 6 ? bytes.subarray(0, 6).toString('latin1') : '';
+    if (head6 === 'GIF87a' || head6 === 'GIF89a') {
+        return 'image/gif';
+    }
+    if (bytes.length >= 12 && bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP') {
+        return 'image/webp';
+    }
+    return 'application/octet-stream';
 }
 
 /**

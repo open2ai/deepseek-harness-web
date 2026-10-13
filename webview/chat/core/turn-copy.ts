@@ -7,7 +7,7 @@
 // 多画一个带边框的「已停止」（web 同位置什么都没有）。角标、样式与判据一并删除。
 //
 // 上游把失败文案拆成两层，本文件是**第二层**（view）：
-//   · 节点层产出 `{message, code}`（插件对应 `src/dsh/official/turn-end.ts`）；
+// · 节点层产出 `{message, code}`（插件对应）；
 //   · 展示层的 `failureMessage()` —— **只对下面 5 个 code**
 //     换成固定文案，**其余一律回退上游原文**；两个终局节点另给标题。
 // 文案逐字取自网页端字典（`message.failure.*` / `message.turnError` /

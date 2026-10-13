@@ -30,3 +30,5 @@ tmp/
 docs/*
 !docs/design/
 !docs/*.md
+docs/next
+next

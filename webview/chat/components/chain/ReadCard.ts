@@ -6,13 +6,13 @@ import { html } from 'htm/preact'
 import { useEffect, useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
 import { readLabels, type ReadCard as ReadCardData } from '../../core/read-card'
-import { headTail, foldLabels } from '../../core/fold'
+import { CHAT_READ_MAX_LINES, FOLD_ARIA, headTail, foldLabels } from '../../core/fold'
 
 export function ReadCard({ card, store }: { card: ReadCardData; store: ChatStore }) {
   const labels = readLabels()
   const fold = foldLabels()
   const [expanded, setExpanded] = useState(false)
-  const { head, tail, hidden, capped } = headTail(card.lines, undefined, expanded)
+  const { head, tail, hidden, capped } = headTail(card.lines, CHAT_READ_MAX_LINES, expanded)
   useEffect(() => {
     setExpanded(false)
   }, [card.lines.length])
@@ -37,7 +37,7 @@ export function ReadCard({ card, store }: { card: ReadCardData; store: ChatStore
     <div class="read-body">
       ${head.map((l, i) => line(l, String(i)))}
       ${capped
-        ? html`<button type="button" class="read-expand" onClick=${toggle} aria-expanded=${expanded}>
+        ? html`<button type="button" class="read-expand" onClick=${toggle} aria-expanded=${expanded} aria-label=${expanded ? FOLD_ARIA.read.collapse : FOLD_ARIA.read.expand(hidden)}>
             ${expanded ? fold.collapse : fold.expandRest(hidden)}
           </button>`
         : null}

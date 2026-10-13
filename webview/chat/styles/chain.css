@@ -1,5 +1,32 @@
   /* 工具链（过程折叠：头部 + 明细；思考/工具行各自样式见文末追加段） */
   .chain { font-size: 11.5px; color: var(--vscode-descriptionForeground, #888); margin: 2px 0 6px; }
+  /**
+   * ⚠️ **控制行那条链恒定零外边距**（承控制行 = 链里有 `.chain-done`）。
+   *
+   * 为什么：细线（`.chain-done` 的下边框）到下方内容的那一档间距，上游是"控制节点与下一项"的**座位间距**
+   * （`ChatView.module.css:90-95` 恒定 16px / 回答块 12px），而控制节点是**独立座位**、
+   * 盒子与折起态无关。插件把控制行与过程区放在同一行里，若让链的外边距随折起态变，点一下展开
+   * 控制行就会上下跳（真机 2026-10-12：「web 都没闪或位置变动」）。
+   * 展开时那 6px 呼吸改由**链体自己**留（见下一条），折起时它是 0 高、不产生间距。
+   */
+  .chain:has(> .chain-done) { margin-top: 0; margin-bottom: 0; }
+  /**
+   * 展开时：**控制行与它下面第一片之间 = 16px**（上游 `ChatView.module.css:90-95`：
+   * `[data-chat-flow-kind="turn-process"]` 与其**紧邻的下一项**都是 16px）。
+   *
+   * ⚠️ 2026-10-12 由 6px 改成 16px，并同时撤掉 `chat.css` 里"控制行之后**下一条行**也是 16px"那半条 ——
+   * 上游那 16px 的落点是"控制节点紧邻的下一项"，而插件把控制节点与**第一片**放在同一条行里
+   * （片头就在 `.chain-body` 内），所以它该落在**行内**这里；下一条行走"回答块之后 12px"那一档。
+   * 改前真机表现（维护者截图）：第一道片头上方 16px、第二道 12px，看着不一致。
+   */
+  .chain:has(> .chain-done) > .chain-body:not([hidden]) { margin-top: 16px; }
+  /**
+   * 其余行：**过程区没露出来（折起 / 空链）的那一格不占位** —— 上游"隐藏与空的 seat 零高、
+   * 不产生间距"（`ChatView.module.css:65-71` 与 `:97-101`；此前的 `data-blank` 处理的是整行，
+   * 这里处理的是行内那一格）。答句行在折起态下正好命中它：链 0 高、`.col` 也不再给它那 4px，
+   * 于是"细线 → 正文"只剩座位那一档 12px。
+   */
+  .chain:not(:has(> .chain-done)):not(:has(> .chain-body:not([hidden]))) { margin-top: 0; margin-bottom: 0; }
   /* 「回答收得紧不紧」（上游 `compactAnswer`）：过程区间里有人插话 / 追加提问（`wide`）时把链与正文拉开，
      否则沿用本插件的紧凑节奏（6px）。上游同名的 flow-gap 取值是 8px 对 16px，这里按本插件自己的刻度取。 */
   .msg.assistant[data-turn-process-answer='wide'] .chain { margin-bottom: 12px; }
@@ -67,14 +94,18 @@
   /* **完成态摘要行**（上游回合级过程控制节点：`已完成，用时 {d}` + 行尾 chevron + 下面一条细线）：
      形状按真机截图 —— 文案在左、chevron **紧贴文案之后**（不是贴右边缘）、下面一条贯穿内容宽度的细线。
      它不是折叠头：不参与"片数 = 头数"，但它是**回合级**的展开/收起开关（与片内的头互不干扰）。
-     细线走 `--dsh-hairline`（主题契约，见 docs/design/07 §0）—— 用 `--vscode-panel-border` 在浅色主题会消失。 */
+     细线走 `--dsh-hairline`（主题契约）—— 用 `--vscode-panel-border` 在浅色主题会消失。 */
   /* ⚠️ **细线是这个行盒子的下边框**，不是它后面的另一个块 —— 否则线会掉到下一行去
      （真机反馈「处理失败那个横线为啥不是一行」）。上游也是这么画的：控制行自己
      `display:flex` + `border-bottom: 0.5px solid <细线色>`，文案与 chevron 都在这一行里。 */
   .chain-done {
     box-sizing: border-box; display: flex; align-items: center; gap: 4px;
     width: 100%; min-width: 0;
-    margin: 2px 0 6px; padding-bottom: 5px;
+    /* ⚠️ **下边距为 0**：细线就是这一档的终点，下面的间距一律交给**座位**那一档
+       （回答块 12px / 控制行下 16px）—— 这里再留 6px 会把"细线 → 正文"顶到 18px，
+       而网页端实测那一档是 12px（2026-10-12 逐格量过）。展开态与片头之间的 6px 呼吸
+       改由 `.chain:has(> .chain-done) > .chain-body:not([hidden])` 提供。 */
+    margin: 2px 0 0; padding-bottom: 5px;
     border-bottom: 0.5px solid var(--dsh-hairline);
   }
   .chain-done-btn {
@@ -85,6 +116,11 @@
   /* 上游 `TurnProcessNodeView.module.css`：`disabled` 只把光标改回默认（**不压暗**），
      折不动时按钮仍在、只是没有 chevron 也不可点。 */
   .chain-done-btn:disabled { cursor: default; }
+  /* 箭头**不换字形、只旋转**（上游 `[data-open] .chevron { transform: rotate(180deg) }`）：
+     收起态朝下、展开态朝上；两态都有箭头（收起动作靠它）。 */
+  .chain-done-chev { flex: none; display: inline-flex; align-items: center; transition: transform 100ms ease; }
+  .chain-done-btn[data-open] .chain-done-chev { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .chain-done-chev { transition: none; } }
   .chain-done-btn:hover:not(:disabled) .chain-done-text { color: var(--vscode-foreground, #ddd); }
   .chain-done-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .chain-done-chev { flex: none; display: inline-flex; align-items: center; }
@@ -226,12 +262,19 @@
      输入=调用参数(pretty JSON)，输出=调用结果；两段之间一条 hairline。 */
   /* 纵向 margin 交给外层 .chain-disclosure-body（2px）：若在这里再设更大的值，
      会与父级 margin 折叠取较大者，2px 就失效了。左侧 4px 是缩进，保留。 */
+  /* 代码卡（`run_code` 的 `code` 变体）：**程序块 + 输出区**，输入段不出。
+     程序块上限 260px 与上游 `.bodyScroll` 同档；横幅/圆角/底色沿用 `.md-code`（同一套 code block 外观）。 */
+  .chain-code-card { display: flex; flex-direction: column; margin: 0 0 0 4px; }
+  .chain-code-program { max-height: 260px; overflow-y: auto; }
+  .chain-code-program .md-code { margin: 0; }
+  .chain-code-card .chain-io-card { margin: 4px 0 0; }
+
   .chain-io-card {
     display: flex; flex-direction: column;
     margin: 0 0 0 4px;
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px; line-height: 1.55;
   }
@@ -265,7 +308,7 @@
     margin: 0 0 0 4px;
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     padding: 8px 12px;
     font-size: 12px; line-height: 1.55;
     color: var(--vscode-foreground, #ddd);
@@ -324,10 +367,14 @@
   .detail-field dt { color: var(--vscode-descriptionForeground, #999); white-space: nowrap; }
   .detail-field dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   .detail-lines { margin: 0; padding-left: 18px; }
-  /* 等宽块（job 输出 / agent 回复 / 结果 JSON） */
+  /* 富文本正文（子智能体回复 / lsp hover）：走 markdown，不是等宽块（镜像上游 ToolDetails `.prose`） */
+  .detail-prose { margin-top: 8px; max-width: 100%; font-size: 13px; overflow-wrap: anywhere; }
+  .detail-prose > :first-child { margin-top: 0; }
+  .detail-prose > :last-child { margin-bottom: 0; }
+  /* 等宽块（job 输出 / 结果 JSON） */
   .detail-code {
     margin: 2px 0 0; padding: 6px 8px; border-radius: 6px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px; line-height: 1.55;
     white-space: pre-wrap; word-break: break-word;
@@ -368,7 +415,7 @@
     margin: 0 0 0 4px; padding: 8px 10px;
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     color: var(--vscode-foreground, #ddd);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px; line-height: 1.55;
@@ -439,17 +486,44 @@
     .chain-row-head[data-state='running']::after { animation: none; }
   }
 
+  /* ===== 技能行（上游 `ui-skill/SkillRow.module.css` 的 instructionsCard）=====
+     展开体就是一张「说明」卡：小标题 + 等宽正文（结果文本原样，不折行）。 */
+  .chain-skill-card {
+    margin: 6px 0 2px; border: 1px solid var(--dsh-hairline); border-radius: 6px;
+    background: var(--dsh-inset-fill); overflow: hidden;
+  }
+  .chain-skill-head {
+    padding: 5px 10px; font-size: 11px; font-weight: 600;
+    color: var(--vscode-descriptionForeground, #999);
+    border-bottom: 1px solid var(--dsh-hairline);
+  }
+  .chain-skill-body {
+    margin: 0; padding: 8px 10px; max-height: 320px; overflow: auto;
+    font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere; color: var(--vscode-foreground, #ddd);
+  }
+  .chain-skill-body[data-error] { color: var(--vscode-errorForeground, #f48771); }
+
+  /* ===== 嵌套调用（上游 `ToolCallTree` 的 `.subCalls`）=====
+     缩进一层、左侧一条导引线：父调用的卡片之后、按序排开，各自仍是完整的一行。 */
+  .chain-subcalls {
+    display: flex; flex-direction: column; gap: 2px;
+    margin: 2px 0 2px 10px; padding-left: 10px;
+    border-left: 1px solid var(--dsh-hairline);
+  }
+
   /* ===== Terminal 卡（官方 TerminalBlock.module.css 复刻）=====
-     值取自官方：radius 12、line-height 22、gutter 30、块 padding 9/14/输出 12/14；
-     输出体本插件改为自适应宽高（不限高/不折叠/超宽折行），不跟 224 帽 + 16 行折叠的做法；
-     深浅主题用 --vscode-* / --vscode-* 语义变量。 */
+     值取自官方：radius 12、line-height 22、gutter 30、块 padding 9/14、输出 12/14；
+     **输出体 = 上限 224px + 纵向内滚，行不折、超宽走横滚**（见下 `.term-output`/`.term-line`）。
+     行折叠那套**上游对话区不用** —— 它给终端卡传的是 `maxLines={Infinity}`（`ui-tool/ToolRow.tsx`），
+     `DEFAULT_TERMINAL_MAX_LINES = 16` 只服务别的表面。深浅主题用语义变量。 */
   .term {
     position: relative;
     margin: 4px 0 4px 4px;            /* 官方 bash-sample .terminal 的 4px 缩进（代替原语独立 margin） */
     padding-left: 30px;               /* --dsl-terminal-gutter：状态点独立列 */
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     color: var(--vscode-foreground, #ddd);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 12px;
@@ -496,13 +570,14 @@
   /* 退出码/信号 Pill：贴定到横幅顶部，错误色 */
   .term-status { flex: none; position: sticky; top: 0; height: 22px; line-height: 22px; color: var(--vscode-errorForeground, #f14c4c); }
   .term-copy {
-    flex: none; position: sticky; top: 0; border: none; background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    flex: none; position: sticky; top: 0; border: none; background: var(--dsh-code-fill);
     padding: 0; margin: 0; color: var(--vscode-descriptionForeground, #999); cursor: pointer; font: inherit;
     line-height: 22px;
   }
   .term-empty { padding: 12px 14px 12px 0; color: var(--vscode-descriptionForeground, #999); }
   /* 输出体：**上限 224px + 纵向内滚**（输出可能上千行，全展开会把消息流撑没）。
-     仍**不折叠**行（上游另有 16 行折中段 + 「… 其余 n 行」）——内滚已足够查看，不必再叠一层折叠。
+     仍**不折叠**行 —— 与上游一致：对话区的终端卡上游传的是 `maxLines={Infinity}`
+     （`ui-tool/ToolRow.tsx`），折中段那套只给别的表面用。
      **横滚与纵滚并存**（上游 `.output{overflow-x:auto;overflow-y:auto}` 同）：超宽行不折，见下条 `.term-line`。 */
   .term-output { max-height: 224px; overflow-y: auto; overflow-x: auto; padding: 12px 14px 12px 0; }
   .term-output::-webkit-scrollbar-thumb { border: 2px solid transparent; background-clip: padding-box; border-radius: 6px; }
@@ -512,38 +587,58 @@
   .term-line { min-height: 22px; white-space: pre; }
 
   /* ===== 差异卡（上游 DiffBlock.module.css 复刻；write / edit 的文件改动）=====
-     与终端卡同口径：**不折叠、不限高**（上游对话行按 8 行截断 + 「… 其余 n 行」，本插件有意不跟）；
+     布局不限高；**行折叠**在组件里做（上限上游 `CHAT_DIFF_MAX_LINES = 9`）；
      超宽由折行处理（差异行不是代码正文，折行不破坏阅读）。 */
   .diff-block {
     position: relative;
     margin: 4px 0 4px 4px;
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 12px; line-height: 22px;
   }
+  /* 横幅：与读文件卡同款（上游两处都是 `CodeCard.header` + `CodeToolbar`）——
+     左边语言标签（`languageForPath` 得出，`.md` → `markdown`）、右边复制。
+     独立底色 + 顶部圆角；VS Code 无对应 token，用中性叠层兜底。 */
+  .diff-banner {
+    display: flex; align-items: baseline; gap: 8px; padding: 9px 14px;
+    background: rgba(128, 128, 128, 0.06);
+    border-top-left-radius: 12px; border-top-right-radius: 12px;
+    color: var(--vscode-descriptionForeground, #999); font-size: 13px;
+  }
+  .diff-lang { flex: none; }
   .diff-copy {
-    position: absolute; top: 8px; right: 12px; z-index: 1;
-    border: none; padding: 0; margin: 0; cursor: pointer; font: inherit;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
-    color: var(--vscode-descriptionForeground, #999);
+    flex: none; margin-left: auto; border: none; padding: 0; cursor: pointer;
+    font-family: inherit; font-size: 13px;
+    background: none; color: var(--vscode-descriptionForeground, #999);
   }
   .diff-copy:hover { color: var(--vscode-foreground, #ddd); }
   /* 横滚不折行（上游 `.line{white-space:pre}` + `.body{overflow-x:auto}`） */
-  .diff-body { padding: 12px 14px; overflow-x: auto; }
+  .diff-body { padding: 8px 14px 12px; overflow-x: auto; }
   .diff-line { min-height: 22px; white-space: pre; }
-  /* 文件头：加粗 + 右侧留给浮在角上的复制按钮 */
-  .diff-line.is-path { font-weight: 600; padding-right: 56px; }
+  /* 文件头（**卡体第一行**，上游 `buildRows:114` 原样画出 `diffs[].path`）：加粗、不折叠 */
+  .diff-line.is-path { font-weight: 600; }
   .diff-line.is-gap { color: var(--vscode-descriptionForeground, #999); }
-  /* 删除/新增：**符号与整行正文同时着色**（上游对 `.del`/`.add` 本身也设 color）。
-     符号 + 颜色双通道表意，不靠颜色单独区分——色盲用户也能靠 -/+ 读。 */
-  .diff-line.is-del,
-  .diff-line.is-del::before { color: var(--vscode-errorForeground, #f14c4c); }
-  .diff-line.is-del::before { content: '- '; }
-  .diff-line.is-add,
-  .diff-line.is-add::before { color: var(--vscode-charts-green, #89d185); }
-  .diff-line.is-add::before { content: '+ '; }
+  /* 未变行（hunk 的上下文行）：无前缀、居中；色阶比正文弱一档（上游 `.context`） */
+  .diff-line.is-context { color: var(--vscode-descriptionForeground, #999); }
+  .diff-line.is-context::before { content: '  '; }
+  /* 删除/新增：**文字色 + 底色 + 左侧 3px 色条**三件套（上游 `DiffBlock.module.css:38-56`
+     对 `.del`/`.add` 同时设 color / background / inset box-shadow）。
+     只上文字色会变成"整片亮绿/亮红"，反而比网页端难读 —— 底色把行区分出来，文字色才立得住。
+     符号（`- `/`+ `）由伪元素画：符号 + 颜色双通道表意，色盲用户也能读。 */
+  .diff-line.is-del {
+    color: var(--vscode-errorForeground, #f14c4c);
+    background: var(--vscode-diffEditor-removedLineBackground, rgba(241, 76, 76, 0.12));
+    box-shadow: inset 3px 0 0 var(--vscode-errorForeground, #f14c4c);
+  }
+  .diff-line.is-del::before { content: '- '; color: var(--vscode-errorForeground, #f14c4c); }
+  .diff-line.is-add {
+    color: var(--vscode-charts-green, #89d185);
+    background: var(--vscode-diffEditor-insertedLineBackground, rgba(137, 209, 133, 0.12));
+    box-shadow: inset 3px 0 0 var(--vscode-charts-green, #89d185);
+  }
+  .diff-line.is-add::before { content: '+ '; color: var(--vscode-charts-green, #89d185); }
   .diff-footer { padding: 0 14px 12px; color: var(--vscode-descriptionForeground, #999); }
   /* 折叠按钮：整行可点，次级色，hover 转前景色（上游 .expand） */
   .diff-expand {
@@ -559,7 +654,7 @@
     margin: 4px 0 4px 4px;
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 12px; line-height: 22px;
   }
@@ -601,7 +696,7 @@
     margin: 4px 0 4px 4px;
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 12px; line-height: 22px;
   }
@@ -679,7 +774,7 @@
     max-height: 141px; margin: 4px 0 0 22px;
     overflow: auto; padding: 10px 16px 12px 12px;
     border: none; border-radius: 8px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     color: var(--vscode-descriptionForeground, #888);
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px; line-height: 1.45;
@@ -719,7 +814,7 @@
   .web {
     margin: 4px 0 4px 4px; padding: 12px 14px;
     color: var(--vscode-foreground, #ddd);
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     border-radius: 12px;
     font-size: 13px;
   }
@@ -818,7 +913,7 @@
   .img-card {
     display: flex; flex-direction: column; gap: 8px;
     margin: 4px 0 4px 4px; padding: 12px 14px;
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.3));
+    background: var(--dsh-code-fill);
     border-radius: 12px; font-size: 13px;
   }
   .img-label { color: var(--vscode-foreground, #ddd); font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; word-break: break-all; }

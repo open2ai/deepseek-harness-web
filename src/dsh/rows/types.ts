@@ -1,6 +1,6 @@
 // 行模型的形状（适配上游 0.1.7-rc.2）——**只类型、零运行时代码**。
 //
-// 独立成文件是为了让页面侧能 `import type` 取用而不把实现打进包（见 docs/design/08 §9）。
+// 独立成文件是为了让页面侧能 `import type` 取用而不把实现打进包。
 import type { FileRef, ImageRef } from '../official/result-text';
 
 /** 过程链上的一项（只放渲染所需的事实；标题/摘要这类**展示派生**由页面按需算）。 */
@@ -57,7 +57,7 @@ export type DshRowItem =
     | { kind: 'text'; key: number; step?: number; text: string };
 
 /**
- * 一回合的「过程 / 回答」事实（见 docs/design/08 §12）——折叠判定的输入，与上游同构。
+ * 一回合的「过程 / 回答」事实 ——折叠判定的输入，与上游同构。
  * 锚点多数是源事件的 `seq`；上游的**合成锚点**用小数偏移（中断回答 −0.9 等），本插件只复制
  * **中断回答**那一项（见 `turn-process.ts`），其余以「区间 + 布尔事实」表达。
  *
@@ -112,6 +112,26 @@ export interface DshTurnProcess {
     groups?: DshRowGroup[];
 }
 
+/**
+ * 一片的**活动汇总**（上游 `ProcessGroupData.summary`，由官方 `processActivity` 那一份算出来）。
+ *
+ * ⚠️ 它与「按链项现算」那份的差别是**口径**，不是风格：
+ *   · 按 **time** 取运行中/准备中的那个（链序取的是「最后一个 running 链项」）；
+ *   · 计数**递归 `subCalls`**（PTC 嵌套调用也算）并按 `callId` 去重；
+ *   · 没有运行中工具时，实时细节退回**运行中那一步**的思考末段。
+ * 上游片头的 label/detail/icon 全部读它，所以片级呈现该以它为准。
+ */
+export interface DshRowGroupSummary {
+    /** 类别计数（已按「调用数降序、同数按首次出现」排好） */
+    counts: Array<{ kind: string; count: number }>;
+    /** 运行中/准备中的类别（**未关闭**的片才有） */
+    running?: string;
+    /** 实时细节（未关闭的片才有；已关闭时是空串） */
+    runningDetail?: string;
+    /** 是否「准备中」（参数还没到） */
+    preparing?: boolean;
+}
+
 /** 一片（上游 step-group）的过程事实：与回合级**同一套判据**，只是区间不同。 */
 export interface DshRowGroupFacts {
     /** 该片的回答锚点 = 收口那一步的定稿（或首条可见）证据序号 */
@@ -130,6 +150,17 @@ export interface DshRowGroupFacts {
     hasExternalProcess: boolean;
     /** 片区间内是否有人插话（上游 `compactAnswer` 的片级形态） */
     compactAnswer: boolean;
+    /**
+     * **这一片自己收口了没**（上游 `ChatGroupSeat` 的 `data.closed` = 组收口 || 回合关闭）。
+     *
+     * ⚠️ 与回合级的 `done` **不是一回事**：一个还在跑的回合里也会有已收口的片
+     *（节点模型在「带回答内容的步」处 `flush(true)`）。分组头的**文案/图标/实时细节**都该看它，
+     * 看 `done` 会让已收口的片显示成进行时（真机 2026-10-10：网页端「向用户提出了问题」、
+     * 插件「正在分析请求」）。缺省 = 未知 → 调用方退回回合级 `done`。
+     */
+    closed?: boolean;
+    /** 这一片自己的活动汇总（上游 `data.summary`）——片头文案/图标/实时细节以它为准 */
+    summary?: DshRowGroupSummary;
 }
 
 /** 一片过程：稳定身份 + 它覆盖的步区间 + 它自己的过程事实。 */
@@ -300,12 +331,12 @@ export type DshStreamRow =
     /**
      * 回合**终局通知**行（**独立行**，镜像上游两个节点：`turn-error` 与 `turn-max-tokens`）。
      *
-     * 两者上游都是独立节点、都在 `conversation-nodes/process-groups.ts:13` 的 `INDEPENDENT` 集合里
+     * 两者上游都是独立节点、都在 的 `INDEPENDENT` 集合里
      * （结束前面的过程组、作为独立根保留、**不被折进过程组**），渲染也共用同一套布局
      * （两个独立终局节点）→ 插件用一个行 + `tone` 表达：
      * · `error`（`turn-error`）：由 `turn/start` + `turn/end` 建，**与本回合有没有内容无关**；带 `message`/`code`；
      * · `warning`（`turn-max-tokens`）：`turn/end` 的 `reason.kind === 'max-tokens'`；文案固定，无 `message`/`code`。
-     * 位置 = 该回合末尾（回答行之后）。文案由页面决议（`webview/chat/core/turn-copy.ts`）。
+     * 位置 = 该回合末尾（回答行之后）。文案由页面决议。
      */
     | {
         kind: 'turnNotice';
@@ -349,7 +380,7 @@ export type DshStreamRow =
         turnStartMs?: number;
         /** 折叠判定的事实（回合关闭时写入；进行中的回合没有它 → 与控制条「回合已关」门控一致） */
         process?: DshTurnProcess;
-        /** **消息级**「这条回答被中断」（上游 `assistant/message.data.interrupted`，见 `conversation-nodes/assistant.ts:207`）：
+        /** **消息级**「这条回答被中断」（上游 `assistant/message.data.interrupted`，见）：
          *  正文末尾据此出「已停止」（与上游同位）。 */
         interrupted?: true;
         /** 回答锚点的事件序号（本回合最后一条**带文本**的 append 结算消息）：
@@ -377,7 +408,7 @@ export type DshStreamRow =
          *
          * 上游的「改动文件卡」就是这份摘要渲染出来的（`ChangedFiles`：相对路径 + `+x/-y` 行数）；
          * 拿不到摘要就**不渲染那张卡**（`docs/design/12` §2.1.7）。取回与缓存见
-         * `src/api/dshService.ts` 的 `withChangesSummaries`。
+         * 的 `withChangesSummaries`。
          */
         changesSummary?: DshChangesSummary;
     };

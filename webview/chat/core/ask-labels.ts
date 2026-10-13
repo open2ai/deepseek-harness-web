@@ -6,13 +6,14 @@ export interface AskLabels {
   cancelledDetail: string
   interrupted: string
   interruptedDetail: string
-  /**
-   * 等待超时、工作已继续（上游 0.2.0 timed 等待的 `wait.continued`）。
-   * 摘要与结论都取上游 locale 原文，不自造同义词。
-   */
+  /** 等待超时、工作已继续（上游 `ask.pending`）。 */
   continued: string
-  /** 该问题的结论行（上游 `review.skipped` 原文）。 */
-  continuedDetail: string
+  /** 超时后**仍可补答**时的结论行（上游 `ask.pendingDetail`）。 */
+  pendingDetail: string
+  /** 超时后**已不可补答**时的摘要（上游 `ask.closed`）。 */
+  closed: string
+  /** 已不可补答时的结论行（上游 `ask.closedDetail`）。 */
+  closedDetail: string
   /**
    * 提问卡上的**补答入口**文案（上游 `ask.reopen` 原文）。
    * 只在「该条仍在投影的可补答清单里」时出现 —— 超时后卡片是唯一的作答入口。
@@ -20,13 +21,6 @@ export interface AskLabels {
   reopen: string
   answered: (answered: number, total: number) => string
   skipped: string
-  /**
-   * 结果文本取不到（`output` 缺失/坏形）时，提问卡仍能读出参数里的问题清单，
-   * 此时用「未取到回答」呈现问题列表 —— 上游无此态（它落回通用「输入/输出」区的原始 JSON），
-   * 属本插件有意偏离，理由与去向见 docs/design/06。
-   */
-  unread: string
-  unreadDetail: string
 }
 export function askLabels(): AskLabels {
   return {
@@ -37,11 +31,11 @@ export function askLabels(): AskLabels {
     interrupted: '已中断',
     interruptedDetail: '本轮已中断，未提交回答',
     continued: '已继续工作，仍可回答',
-    continuedDetail: '这道问题当时被跳过。',
+    pendingDetail: '等待中的问题仍可在输入框中回答',
+    closed: '已结束',
+    closedDetail: '该问题已结束，结果见下方对话',
     reopen: '回答',
     answered: (answered: number, total: number) => `${answered}/${total} 已回答`,
     skipped: '未回答',
-    unread: '未取到回答',
-    unreadDetail: '本条提问没有拿到回答数据，以下是当时问的问题',
   }
 }

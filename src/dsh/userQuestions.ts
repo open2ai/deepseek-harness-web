@@ -9,7 +9,7 @@
 //   · `REPLY_QUEUED` = 同一题已有排队中的回复 —— 也**不是失败**（用户会看到回复在队列里）；
 //   · `BAD_ANSWER` = 批次没有恰好覆盖每道题一次（本地按题构造，正常不该出现）→ 真失败。
 //
-// 页面侧那一半（从 `userQuestions` 投影里挑出可补答的调用）在 `webview/chat/core/late-answer.ts`：
+// 页面侧那一半（从 `userQuestions` 投影里挑出可补答的调用）在 ：
 // 一个管 wire、一个管展示数据，分开才能各自被守卫直接喂用例。
 
 /** 一条作答（与上游 `AskUserQuestionAnswerItem` 同形，也与既有提问提交体一致）。 */

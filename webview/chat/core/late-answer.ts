@@ -9,7 +9,7 @@
 // 不猜、不编造（fail-closed）。
 //
 // 本文件只管**展示数据**（从投影里挑出可补答的调用、校验题目形状）；wire 那一半
-// （补答 args 的平铺形状、结果判读）在宿主侧 `src/dsh/userQuestions.ts`，两边各自被守卫直接喂用例。
+// （补答 args 的平铺形状、结果判读）在宿主侧，两边各自被守卫直接喂用例。
 
 /** 选项（与上游 `AskUserQuestionOption` 同形）。 */
 export interface LateAnswerOption {

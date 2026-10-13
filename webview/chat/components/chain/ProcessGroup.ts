@@ -1,6 +1,6 @@
 // 过程**一片**（上游 step-group）的组件 —— B′ 按片渲染的落点。
 //
-// 一片 = 链上两个「步骤文本边界」之间的一段过程（切片判据在 `core/process-groups.ts`，别在这里重算）。
+// 一片 = 节点模型成员表分组里的一组链项（分组由 `nodeGroups` 直接给出，别在这里重算）。
 // 本组件承担上游「每个分组 seat」的那一份：
 //   · 自己的折叠头（文案/图标按**片内**的项算，判据在 `core/process-group-view.ts`）；
 //   · 自己的展开态（store 里按 `${turn}:${group.key}` 存，各片独立）；
@@ -13,7 +13,7 @@ import { html } from 'htm/preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import type { DshRowGroup } from '../../../../src/dsh/rows/types'
 import type { ChatRow, ChatStore, DshTurnProcessItem } from '../../core/store/chat'
-import { processGroupView } from '../../core/process-group-view'
+import { processGroupView, sliceClosedOf } from '../../core/process-group-view'
 import { scrollEdges, type ScrollEdges } from '../../core/scroll-edges'
 import { titleHoldMs } from '../../core/step-process-title'
 import { activityGlyph, chevronGlyph } from './ProcessIcons'
@@ -59,10 +59,15 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
   const stored = turn === undefined ? undefined : store.groupFoldOpen?.value.get(`${String(turn)}:${group.key}`)
   // 默认**收起**：上游的分组头用 `useDisclosure`，初始即收 —— **与回合是否已关闭无关**。
   const open = stored ?? false
+  /**
+   * 这一片自己的收口态（判据见 `core/process-group-view.ts` 的 `sliceClosedOf`）。
+   * 组件里两处要按**片**判、不能按回合判：展开预定位、标题微光 —— 上游都用 `data.closed`。
+   */
+  const sliceClosed = sliceClosedOf(group.facts, row.done)
   const setOpen = (next: boolean): void => {
-    // 手动展开时按上游做一次**预定位**：未关闭的回合停在底部（看最新动静）、已关闭的停在顶部。
-    // 真正的写入在渲染后的 layout effect 里（那时元素才存在）。
-    if (next) pendingInit.current = row.done ? 'top' : 'bottom'
+    // 手动展开时按上游做一次**预定位**（：`initialize(closed === false ? 'bottom' : 'top')`）：
+    // **这一片**还没收口停在底部（看最新动静）、已收口停在顶部。真正的写入在渲染后的 layout effect 里。
+    if (next) pendingInit.current = sliceClosed ? 'top' : 'bottom'
     if (turn !== undefined) store.setGroupFoldOpen?.(turn, group.key, next)
   }
 
@@ -116,7 +121,9 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
     const timer = setTimeout(commit, hold)
     return () => { clearTimeout(timer) }
   }, [desiredTitle.label])
-  const headText = row.done ? desiredTitle.label : shownTitle.label
+  // 上游只对**未收口**的片做标题稳定延迟（`useStableLiveProcessTitle(..., !data.closed)`）：
+  // 收口那一刻要**立刻**换成已收口文案，否则会晚一个 150ms 的保持窗口才换（`view.closed` 见 process-group-view）。
+  const headText = view.closed ? desiredTitle.label : shownTitle.label
 
   // 明细体：这一片自己的滚动状态（两端渐隐判据与整回合路径同一份 `scrollEdges`）。
   const [edges, setEdges] = useState<ScrollEdges>({ up: false, down: false })
@@ -165,12 +172,19 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
           <span class="chain-summary-act" data-step-process-icon>${activityGlyph(view.activity)}</span>
           <span class="chain-summary-chev" data-step-process-chevron>${chevronGlyph(open)}</span>
         </span>
-        <${ShimmerText} text=${headText} className="chain-summary-text" active=${!row.done} />
+        <${ShimmerText} text=${headText} className="chain-summary-text" active=${!sliceClosed} />
       </button>`
     : null
 
-  return html`<div class="chain-group" data-group-key=${group.key}>
+  /**
+   * 分组容器上的锚点：与节点侧同一套约定（上游 给分组 seat 落
+   * `data-chat-anchor-key={`group:${groupKey}`}`）—— 作用是"**每个分组一个稳定且唯一的锚点，
+   * 且与节点锚点可区分**"。插件这里沿用已有的 `data-group-key`（值就是该分组的稳定 key），
+   * 再按同一约定补一个 `data-chat-anchor-key`，前缀 `group:` 表明它是分组而不是节点。
+   */
+  return html`<div class="chain-group" data-group-key=${group.key}
+    data-chat-anchor-key=${`group:${String(group.key)}`} data-chat-flow-key=${String(group.key)}>
     ${head}
-    ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: row.done, store, tail })}
+    ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: sliceClosed, store, tail })}
   </div>`
 }

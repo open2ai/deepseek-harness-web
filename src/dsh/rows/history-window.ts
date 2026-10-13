@@ -7,7 +7,7 @@
 //
 // **窗口不按条数裁剪**（与上游一致）：上游 `session-controller/src/client` 只设取数页大小
 //（`PAGE_MESSAGES = 50` / `JUMP_PAGE_MESSAGES = 200`），窗口按 `seq` 合并、**从不删**
-//（`client/contract/events.ts` 的 `publish`），显示量交给渲染层虚拟化。
+// （`publish`），显示量交给渲染层虚拟化。
 //
 // 为什么这里**一个裁剪都不留**：
 //   · 按条数裁是私加的限制（上游没有），违反「不得私自加限制」；
@@ -44,6 +44,14 @@ export interface WindowChange {
     dropped: number;
     /** 裁剪方向（恒为 `undefined`：不裁剪）。 */
     trimmedEnd?: TrimEnd;
+    /**
+     * **整份替换**（只有 `replace()` 会置真）。
+     *
+     * 为什么必须往上报：页面侧为了不每帧重折上百万条事件，缓存了"归一化结果 + 折叠断点"，
+     * 而它自己只能看**头 seq 与长度**。新快照可能与旧窗口**同头同长而内容不同**
+     *（压缩落定、消息替换、重开订阅），那种情况页面看不出来 —— 所以由这里显式告诉它。
+     */
+    replaced?: boolean;
 }
 
 /**
@@ -92,7 +100,8 @@ export class HistoryWindow<E extends WindowEventLike> {
     replace(events: readonly E[], hasMore: boolean): WindowChange {
         this.events = [...events];
         this.more = hasMore;
-        return { added: this.events.length, dropped: 0 };
+        // `replaced` 是给**页面侧缓存**的失效信号（见 `WindowChange.replaced` 的说明）。
+        return { added: this.events.length, dropped: 0, replaced: true };
     }
 
     /**

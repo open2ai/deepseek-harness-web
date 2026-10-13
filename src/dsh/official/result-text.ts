@@ -94,16 +94,26 @@ export function imageRefsOf(content: unknown): ImageRef[] {
     return refs;
 }
 
-/** 文件附件的展示信息（历史回放用：只有名字与字节数，没有本地路径）。 */
+/** 文件附件的展示信息（历史回放：名字、字节数，以及用来取字节的**内容寻址 id**）。 */
 export interface FileRef {
     name: string;
     bytes?: number;
+    /**
+     * 附件的**内容寻址 id**（`sha256:…`）。
+     *
+     * ⚠️ 2026-10-12 更正这里的旧注释：原先写"字节与本地路径都不在事件里（事件里只有内容寻址引用）" ——
+     * **前半句是错的**：`user/message` 的 `file` 块**带 `attachment.attachmentId`**
+     * （真机取样：`{"type":"file","attachment":{"attachmentId":"sha256:a8e2…","name":"…png","bytes":29582}}`），
+     * 与 `image` 块同形，只是没有 `mediaType`/`width`/`height`。
+     * 于是"历史里的文件卡点不开"并不是数据的限制 —— 宿主可以照图片那条路
+     * （`session/attachment` 取字节 → 落临时文件 → 编辑器打开）把它打开。
+     */
+    attachmentId?: string;
 }
 
 /**
  * 从内容块里取出**文件**附件（`user/message` 的 `data.content` 里 `{type:'file',attachment}`）。
- * 只搬运不判定：缺名字的块跳过。字节与本地路径都不在事件里（事件里只有内容寻址引用），
- * 所以历史回放只能显示名字/大小 —— 这与上游消息里的文件卡一致（不可点开）。
+ * 只搬运不判定：缺名字的块跳过。**`attachmentId` 一并搬**（渲染侧据此调 `openAttachment` 在编辑区打开）。
  * @param content - 事件的 content 块数组。
  * @returns 按顺序的文件展示信息。
  */
@@ -118,7 +128,12 @@ export function fileRefsOf(content: unknown): FileRef[] {
         const name = typeof a['name'] === 'string' && a['name'] !== '' ? a['name'] : undefined;
         if (name === undefined) { continue; }
         const bytes = typeof a['bytes'] === 'number' ? a['bytes'] : undefined;
-        refs.push({ name, ...(bytes === undefined ? {} : { bytes }) });
+        const id = typeof a['attachmentId'] === 'string' && a['attachmentId'] !== '' ? a['attachmentId'] : undefined;
+        refs.push({
+            name,
+            ...(bytes === undefined ? {} : { bytes }),
+            ...(id === undefined ? {} : { attachmentId: id }),
+        });
     }
     return refs;
 }

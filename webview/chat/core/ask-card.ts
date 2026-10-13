@@ -140,6 +140,8 @@ function answeredSummary(text: unknown): string | null {
 /**
  * 从 tool item 派生提问卡模型；仅 ask_user_question 非 null。
  * @param item - tool item（name/argsRaw/output/status/error）。
+ * @param answerable - 该条此刻是否仍在投影的可补答清单里（上游 `useProjection('userQuestions')` 的 `answerable`）：
+ *   超时后的两支（`ask.pending` / `ask.closed`）靠它分。
  */
 export function askCardModel(item: {
   name: string
@@ -147,7 +149,7 @@ export function askCardModel(item: {
   output?: string
   status: string
   error?: string
-}): AskCard | null {
+}, answerable = false): AskCard | null {
   if (item.name !== 'ask_user_question') return null
   const labels: AskLabels = askLabels()
   if (item.status === 'running') {
@@ -179,13 +181,22 @@ export function askCardModel(item: {
   const pending = pendingQuestionOf(item.output)
   if (pending !== null) {
     const questions = questionEntries(item.argsRaw)
+    // 超时之后分两支，判据是**投影**给不给补答（上游 `ask-question-row.tsx` 的
+    // `pending && answerable` → `ask.pending` + `ask.pendingDetail`；
+    //  `pending && !answerable` → `ask.closed` + `ask.closedDetail`）：
+    // 「已继续工作，仍可回答」只在**还能答**时才对；答不了还这么说，用户会去点一个不存在的入口。
+    const transcript = questions === null
+      ? null
+      : {
+          mode: 'unanswered' as const,
+          questions: questions.map((q) => ({ id: q.id, question: q.question })),
+          verdict: answerable ? labels.pendingDetail : labels.closedDetail,
+        }
     return {
-      summary: labels.continued,
+      summary: answerable ? labels.continued : labels.closed,
       state: 'ok', // 工作已继续，不是失败；上游同口径
       ...(pending.callId === undefined ? {} : { lateCallId: pending.callId }),
-      transcript: questions === null
-        ? null
-        : { mode: 'unanswered', questions: questions.map((q) => ({ id: q.id, question: q.question })), verdict: labels.continuedDetail },
+      transcript,
     }
   }
   if (item.status === 'ok') {
@@ -204,19 +215,9 @@ export function askCardModel(item: {
       return { summary: summary ?? '', transcript: null }
     }
   }
-  // 结果文本取不到（answers 都解析不出）时，参数里的**问题清单仍是可信的** → 用它渲染可读的问题列表。
-  // 上游此处落回通用「输入/输出」区的原始 JSON；本插件按真机反馈改成可读（偏离，理由记 docs/design/06）。
-  // 连问题都读不出（参数坏形/缺失）才交回 ToolRow，落通用区保留原始数据。
-  const questions = questionEntries(item.argsRaw)
-  if (questions === null) {
-    return { summary: '', transcript: null }
-  }
-  return {
-    summary: labels.unread,
-    transcript: {
-      mode: 'unanswered',
-      questions: questions.map((q) => ({ id: q.id, question: q.question })),
-      verdict: labels.unreadDetail,
-    },
-  }
+  // 结果文本取不到（`answers` 都解析不出）→ **照上游落回通用卡**：
+  // 上游 `ask-question-row.tsx` 的兜底是 `summary = presentation?.summary ?? answeredSummary(text) ?? model.summary`、
+  // `transcript = null`，即行摘要用通用摘要、正文用「输入/输出」区的原始数据。
+  // （插件曾在这里改成「可读问题列表」，属偏离，已按上游还原。）
+  return { summary: '', transcript: null }
 }

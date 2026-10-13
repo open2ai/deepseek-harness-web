@@ -7,6 +7,7 @@ import type {
   DshTurnProcess as DshRowProcess,
   DshPresentedFile,
   DshRowGroup,
+  DshRowGroupFacts,
   DshTodoItem,
   DshChangesSummary,
 } from '../../../../src/dsh/rows/types'
@@ -26,8 +27,17 @@ import type {
   ContextBreakdown,
   ContextPressure,
 } from '../protocol'
+// 座位计划的形状只有一处定义（`render-plan.ts` 的 `RenderSeatKeys`）——
+// 原先在 store 里内联了五份匿名类型，那种重复迟早漂开。
+import type { RenderSeatKeys as SeatPlanEntry } from '../nodes/render-plan'
 
 // ---------- 消息行模型(不可变替换,组件用 stable key) ----------
+
+/**
+ * 嵌套调用项（上游 `ToolCallTree` 的 `ToolCallBranch`）：与工具行**同一个形状**，
+ * 所以可以直接用同一个 `ToolRow` 递归渲染；区别只在它没有自己的 `step`（属于父调用那一格）。
+ */
+export type ToolSubCall = Extract<DshTurnProcessItem, { kind: 'tool' }>
 
 /** 一条 assistant 回合的过程动作（上游"回合过程"里的成员；reasoning 或 tool 各一条，按发生顺序）。 */
 export type DshTurnProcessItem =
@@ -43,8 +53,16 @@ export type DshTurnProcessItem =
       argsRaw?: string
       status: 'preparing' | 'running' | 'ok' | 'error' | 'stopped'
       error?: string
+      /** 嵌套调用的父调用 id（PTC 从 `run_code` 里派发的块才有）：专属卡的门与图片卡的路径回退靠它 */
+      parentCallId?: string
+      /** 本调用派发的嵌套调用（上游 `ToolCallBlock.subCalls`）：渲染在卡片之后，递归 */
+      subCalls?: ToolSubCall[]
       /** 错误名（`tool/result.data.error.name`）；交付文件行的兜底正文用它和错误码拼 */
       errorName?: string
+      /** 错误码（`tool/result.data.error.code`）：Auto review 拒绝靠它辨认 */
+      errorCode?: string
+      /** 错误原因原文（`tool/result.data.error.reason`）：Auto review 的「原因：…」用它 */
+      errorReason?: string
       /** tool/result 的结果文本（Terminal/Read 等展开卡展示输出） */
       output?: string
       /** 退出码（输出末尾 marker 解析；Terminal 卡 Pill 展示；输出已剥 marker） */
@@ -77,6 +95,19 @@ export type DshTurnProcessItem =
       step?: number
       /** **非回答步**的输出文本（过程文本）：一回合只开一条行时，中间步的正文靠它才显示得出来 */
       text: string
+    }
+  /**
+   * **过程链上的命令行 / 手动压缩**（上游 `command` / `manual-compaction` 节点当片成员的形态）。
+   *
+   * 与顶层那条独立行（下面 `ChatRow` 的 `kind: 'command'`）**共用同一个组件**（`CommandRow`）与同一份
+   * 文案决议（`core/command-copy.ts`）；区别只在装在哪里：属于某一片 → 这里是链项、跟着片折叠；
+   * 不属于任何回合（会话级 `/plan`、`/compact`）→ 走顶层那条。字段口径见 `ChatRow` 那一支。
+   */
+  | {
+      kind: 'command'
+      key: number
+      name: string | null
+      outcome?: { kind: 'success' | 'error'; text?: string }
     }
 
 /** 过程折叠计数（三个计数：toolCallCount=非 subagent 工具调用数；
@@ -112,7 +143,17 @@ export type ChatRow =
       /** 历史恢复来的图片附件引用（字节不在事件里，由附件层按需取）；实时路径的图在 `images`（内联 base64） */
       imageRefs?: AttachmentRef[];
       /** 随该消息发出的文件（文件上送）：只留显示信息与本地路径，点它用编辑器打开 */
-      files?: Array<{ name: string; path?: string; bytes?: number }>;
+      files?: Array<{
+        name: string;
+        /** 本地绝对路径（**实时发送**的那条回显行有；历史回放没有） */
+        path?: string;
+        bytes?: number;
+        /**
+         * 内容寻址 id（历史回放**有**：`user/message` 的 `file` 块带 `attachment.attachmentId`）。
+         * 有它就能像图片那样"取字节 → 落临时文件 → 在编辑区打开"，不必依赖本地路径。
+         */
+        attachmentId?: string;
+      }>;
       /**
        * 「@」引用贴片的**本地快照**（只在本面板刚发出的那条上有）。
        *
@@ -232,6 +273,14 @@ export type ChatRow =
        * 上游锚的是**回合开始时刻**（不是页面挂载时刻），所以面板中途打开/切回来不会从 0 重新计。
        */
       turnStartMs?: number
+      /**
+       * 本行的**时刻**（epoch 毫秒）。
+       *
+       * `time` 只是它的显示串（`formatMsgClock` 的 "10:00"），两个都要有：已定稿摘要行算
+       * 「已完成，用时 X」时用**数值**那一份（`Chain` 的 `wallMs` 兜底：`turnStartMs` ↔ `timeMs`）。
+       * 只带显示串的话，节点模型这条路上时长会整段消失（真机 2026-10-10：「已完成」没有用时）。
+       */
+      timeMs?: number
       /** 折叠判定的事实（宿主下发，见 docs/design/08 §12）：回答锚点非空 = 末步是有回答内容的定稿步 */
       process?: DshRowProcess
       /**
@@ -241,6 +290,22 @@ export type ChatRow =
        * 没有 → 退回整回合一条头的既有形态（旧宿主 / 单回答步的回合）。
        */
       groups?: DshRowGroup[]
+      /**
+       * **节点模型分组**（渲染源切换后的最终形态）：每片的成员表（链项 key 列表）+ 该片自己的折叠事实。
+       * 有它 → 页面按**成员表**渲染（不按步区间近似）；没有 → 退回 `groups`（步区间）→ 整回合单头。
+       */
+      nodeGroups?: Array<{ key: number; itemKeys: number[]; facts: DshRowGroupFacts }>
+      /**
+       * **本行属于哪个「世代」**（一段连续过程 + 它的回答 = 一个世代；插话才开新世代）。
+       *
+       * 用途只有一个：`MessageList` 判「这个回合是不是被插话切成了多段」（外层折叠要关）。
+       * ⚠️ **不能改用行数**：对齐上游之后一个世代本身就会切成多行（每个回答步一行 ——
+       * 上游 把回答步发射成独立 entry），行数 > 1 不再等于「被插话切开」，
+       * 拿行数当判据会让**每个多片回合**的外层折叠失效。
+       */
+      generation?: number
+      /** 本回合已创建的定时任务（上游 `ui-schedule` 的回合尾部卡）：标题 + 重复规则。 */
+      scheduleCreated?: Array<{ id: string; title: string; frequency: string }>
       /** 回答锚点的事件序号：仅在「显示层」用于「从此处分叉」的禁用判定与传参（宿主侧 fork 的 atSeq） */
       seq?: number
       /** 回答锚点的消息标识：消息反馈（👍/👎）的目标；缺失即该条不提供反馈 */
@@ -278,6 +343,7 @@ export type ChatRow =
       toolName?: string
     }
   | { kind: 'question'; key: number; rpcId: string; sessionId?: string; questions: QuestionSpec[]; disabled: boolean }
+  | { kind: 'trigger'; key: number; source: unknown; content: unknown[]; time: string }
   | { kind: 'notice'; key: number; text: string; command?: string; tone?: 'error' | 'ok' }
 
 /** 本地「发送中」条目里的附件：比权威条目多一份**本地图片预览**（内联 base64，只有本地回显拿得到）。 */
@@ -418,7 +484,7 @@ export interface GoalView {
 /**
  * 目标条的 activation（`{id?, revision?, activation?}`）。
  *
- * 来源是宿主的一次读 + 边沿订阅（宿主 `src/dsh/goal-activation.ts`），随 `projections` 帧到达。
+ * 来源是宿主的一次读 + 边沿订阅（宿主），随 `projections` 帧到达。
  * `{}` = 没有当前目标 / 还没读到（两种在 wire 上同形）。
  *
  * ⚠️ 用时**必须按 `(id, revision)` 与投影里的活跃目标对账**：它与投影是两条来路，
@@ -430,6 +496,9 @@ export interface GoalActivationView {
   activation?: 'armed' | 'disarmed'
 }
 
+/**
+ * 聊天 store 的完整面对外形状：各切片自己声明一块，这里组合。
+ */
 export interface ChatStore {
   // 信号
   messages: Signal<ChatRow[]>
@@ -540,6 +609,13 @@ export interface ChatStore {
   submitLateAnswer(callId: string, answers: LateAnswerItem[]): void
   /** 主动触底请求计数：用户发送/恢复会话时 +1（MessageList 消费后清零并强制滚到底） */
   scrollPend: Signal<number>
+  /**
+   * **座位计划**（上游 render entry 同形：一条 entry 一项，项内按序带行 key）。
+   *
+   * 渲染按座位判：位次 / 间距 / 折叠 / 可见性在座位这一层判一次，
+   * 而不是每一条都在"行"上重复近似。类型只有一处定义（`SeatPlanEntry`），别处不要再内联一份。
+   */
+  seatPlan: Signal<ReadonlyArray<SeatPlanEntry>>
   /** 更早的历史还没进窗口（宿主事实）：列表顶端据此出「加载更早」。 */
   historyHasMore: Signal<boolean>
   /** 「加载更早」这一页是否在飞（宿主事实）：按钮据此禁用并换成进行时文案。 */
@@ -648,17 +724,26 @@ export interface ChatStore {
   requestAttachment(attachmentId: string): void
   /** 在编辑器区打开文件（相对路径按 cwd 解析；line 为 1 起的行号） */
   openFile(path: string, line?: number, cwd?: string): void
+  /** 按附件 id 在编辑区打开图片（用户消息/图片卡里的图只有 id，没有本地路径）。 */
+  openAttachment(attachmentId: string, name?: string): void
+  /** 把**还没有附件 id** 的字节在编辑区打开（本地乐观行里刚粘贴/拖进来的图；进日志后走 `openAttachment`）。 */
+  openAttachmentBytes(data: string, mediaType?: string, name?: string): void
   removeAttachment(key: string): void
   /** 添加一条 @ 引用贴片（文件/目录/会话） */
   addRef(kind: RefChip['kind'], label: string, token: string, detail?: string): void
   removeRef(key: number): void
   readImageFile(file: File): void
+  /**
+   * 在**光标处**插入一段纯文本（语音转写的落点）。
+   *
+   * 与 `draft` 帧那条路（`appendDraft`：整条追加、另起一行）刻意分开：语音要"就地插进用户
+   * 正在写的这句话里"，并且**不覆盖**已有草稿。
+   */
+  insertText(insert: string): void
   togglePopup(w: 'perm' | 'model' | 'mode'): void
   /** 打开「仅模型列表的可搜索弹窗」（/model 斜杠入口用；与按钮的完整模型弹窗区分） */
   openModelSearch(): void
-  /** 标记下一次 selectModel 是「/」菜单发起（结果追加到对话区）；按钮入口不调用。
-   *  权限不在此列：切权限在对话区不显示任何行（上游 `isVisibleChatNode()` 排除权限命令）。 */
-  markSlashPick(kind: 'model'): void
+
   closePopups(): void
   selectPerm(value: string): void
   selectModel(provider: string, model: string, effort?: string): void

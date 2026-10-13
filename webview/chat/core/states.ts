@@ -56,13 +56,6 @@ export type TypingIndicator = (typeof TypingIndicator)[keyof typeof TypingIndica
 /** 菊花旋转（codicon-loading + codicon-modifier-spin）。 */
 export const Spinner = { Loading: 'codicon-loading codicon-modifier-spin' } as const
 
-// ---------- 3. 语音与实时交互 ----------（[未接线] 当前是文本对话插件，无语音通道）
-export const VoiceState = {
-  Listening: 'listening', // 聆听中（声波动画）
-  Speaking: 'speaking', // 讲话中/播报中（播放控制）
-} as const
-export type VoiceState = (typeof VoiceState)[keyof typeof VoiceState]
-
 // ---------- 4. Agent 任务执行与工具状态 ----------
 /** 单条工具调用生命周期。 */
 export const ToolState = {

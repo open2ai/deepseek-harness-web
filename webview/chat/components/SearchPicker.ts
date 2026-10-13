@@ -4,6 +4,7 @@
 import { html } from 'htm/preact'
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { keepRowVisible } from '../core/scroll'
+import { rankByName } from '../core/rank-by-name'
 
 export interface SearchOption {
   value: string
@@ -27,7 +28,10 @@ export interface SearchPickerProps {
 
 export function SearchPicker({ title, options, currentId, placeholder = '搜索…', emptyText = '没有可匹配的选项', onPick, onClose }: SearchPickerProps) {
   const [q, setQ] = useState('')
-  // 打开时键盘光标直接落到当前值（有意偏离上游 active=0，理由见 docs/design/03）：少按几次 ↓。
+  // 打开时键盘光标落到**当前值**那一行 —— 与上游一致（不是偏离）：
+  // 的 `activeModelIndex = Math.min(highlightedIndex ?? Math.max(0, currentVisibleIndex), …)`，
+  // 且 `:181-184` 明写「The checked row is the value in use; a pane without one opens on its first row.」
+  //（旧注释写的「上游 active=0」是错的，已删。）
   // 惰性初始化：组件每次打开都重新挂载，之后不随 currentId 变化跳位；搜索输入仍回第 0 项
   const [idx, setIdx] = useState(() => {
     const i = options.findIndex((o) => o.value === currentId)
@@ -38,13 +42,16 @@ export function SearchPicker({ title, options, currentId, placeholder = '搜索�
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
-  const lower = q.trim().toLowerCase()
-  const list = useMemo(() => {
-    const base = lower
-      ? options.filter((o) => (o.name || o.value).toLowerCase().includes(lower) || o.value.toLowerCase().includes(lower))
-      : options
-    return base
-  }, [options, lower])
+  const list = useMemo(
+    // 与上游同口径（`rankByName`：前缀命中 → 对齐分 → 源序），不再是自己写的子串过滤。
+    // 名字与 value 都当搜索键 —— 对应上游的 `name` 与可选 `label`。
+    () =>
+      rankByName(
+        options.map((o) => ({ name: o.name || o.value, ...(o.name === undefined ? {} : { label: o.value }), option: o })),
+        q.trim()
+      ).map((entry) => entry.option),
+    [options, q]
+  )
   const n = list.length
   const active = n === 0 ? 0 : Math.min(Math.max(idx, 0), n - 1)
   // 光标移动/过滤变化后把高亮行滚进列表可视区。依赖要带 list：过滤后即使 active 数值没变也要回到正确位置

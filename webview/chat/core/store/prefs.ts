@@ -2,7 +2,7 @@
 // 与 status 的区别：这里的量**跨会话有效**，所以不参与 chat.ts 的 reset 串联——
 // 换会话不该把偏好重置回默认，那是全局设置而不是会话状态。
 //
-// 取值归一化（四档 → 两档等）在**宿主**（`src/dsh/chat-prefs.ts`，纯函数有守卫）；这里只存生效值。
+// 取值归一化（四档 → 两档等）在**宿主**，纯函数有守卫）；这里只存生效值。
 import { signal } from '@preact/signals'
 import type { ChatStore } from './types'
 

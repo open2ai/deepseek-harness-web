@@ -33,6 +33,9 @@ let inflight: Promise<DshChatPrefs | undefined> | undefined;
 
 const subscribers = new Set<(prefs: DshChatPrefs) => void>();
 
+/** 设置文档任何命名空间变化都要通知的订阅者（chatInfo 刷新用，不按命名空间过滤）。 */
+const documentSubscribers = new Set<() => void>();
+
 /** $events 流的订阅句柄（首个订阅者建立、无人订阅时释放）。 */
 let unsubscribeStream: (() => void) | undefined;
 
@@ -80,9 +83,20 @@ export function readChatPrefs(): Promise<DshChatPrefs | undefined> {
 }
 
 /** emit 分发：只在**确证**是别的命名空间时跳过——形状不符时保守重读，避免上游换帧形状后这里永不更新。 */
+function onReady(): void {
+    void readChatPrefs();
+    for (const d of documentSubscribers) {
+        d();
+    }
+}
+
 function onEmit(event: string, args: readonly unknown[]): void {
     if (event !== SETTINGS_UPDATED_EVENT) {
         return;
+    }
+    // 设置文档任何命名空间变化都先通知「文档订阅者」（模型/预设/权限选择器的刷新走这条），再按命名空间过滤偏好。
+    for (const cb of documentSubscribers) {
+        cb();
     }
     const ns = args[0];
     if (typeof ns === 'string' && !PREF_NAMESPACES.includes(ns)) {
@@ -101,16 +115,37 @@ export function subscribeChatPrefs(cb: (prefs: DshChatPrefs) => void): () => voi
     if (unsubscribeStream === undefined) {
         unsubscribeStream = dshEvents.subscribeStream({
             onEmit,
-            // 断线期间的 emit 不补发：重连后重读一次对齐
-            onReady: () => {
-                void readChatPrefs();
-            },
+            // 断线期间的 emit 不补发：重连后重读一次对齐（偏好 + 文档订阅者都通知，不依赖谁先开流）
+            onReady,
         });
     }
     void readChatPrefs(); // 立即读一次，让新订阅者尽快拿到当前值
     return () => {
         subscribers.delete(cb);
-        if (subscribers.size === 0 && unsubscribeStream !== undefined) {
+        if (subscribers.size === 0 && documentSubscribers.size === 0 && unsubscribeStream !== undefined) {
+            unsubscribeStream();
+            unsubscribeStream = undefined;
+        }
+    };
+}
+
+/**
+ * 订阅**设置文档任何变化**（不按命名空间过滤）：模型列表 / 预设 / 权限等 UI 选择器据此实时刷新。
+ * 与 `subscribeChatPrefs` 共享同一条 $events 流；两者都退订时才释放流。
+ * @param cb - 变化回调（无参数，收到即表示设置文档变了）
+ * @returns 退订函数
+ */
+export function subscribeSettingsDocument(cb: () => void): () => void {
+    documentSubscribers.add(cb);
+    if (unsubscribeStream === undefined) {
+        unsubscribeStream = dshEvents.subscribeStream({
+            onEmit,
+            onReady,
+        });
+    }
+    return () => {
+        documentSubscribers.delete(cb);
+        if (subscribers.size === 0 && documentSubscribers.size === 0 && unsubscribeStream !== undefined) {
             unsubscribeStream();
             unsubscribeStream = undefined;
         }

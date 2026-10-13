@@ -26,6 +26,7 @@ export interface ComposerSlice {
     | 'addRef'
     | 'removeRef'
     | 'readImageFile'
+    | 'insertText'
   >
   /** 宿主草稿消息到达：并入输入框文本并触发焦点。 */
   appendDraft(draft: string | undefined): void
@@ -59,6 +60,21 @@ export function createComposer(host: ChatHost): ComposerSlice {
    * ⚠️ **不能只留宿主那条**：宿主那条只要有一环失效（webview 未聚焦、宿主侧写入被拒），页面这边
    * 就完全静默 —— 按钮看着能点、内容却进不了剪贴板。两条并用时，任一条成功即成功。
    */
+  /**
+   * 复制一段文本。**两条路都走（无条件）**，任一条成功即成功。
+   *
+   * ⚠️ **这里曾经是"浏览器成功就返回、只有被拒才回落宿主"** —— 真机反馈「复制按钮点了没反应」。
+   * 那种写法漏掉了 VS Code webview 最常见的一种失败：`navigator.clipboard.writeText`
+   * 的 Promise **成功 resolve、却没写进系统剪贴板**（webview 未聚焦 / 权限策略）。
+   * 于是宿主那条永远不走，页面这边也拿不到任何失败信号 —— 按钮的"复制成功"提示照出，
+   * 剪贴板却是空的（假成功）。
+   *
+   * 现在两条**无条件并行**：浏览器那条负责上游口径（`navigator.clipboard`），
+   * 宿主那条（`{type:'copy'}` → VS Code 剪贴板 API）兜底；重复写同样的内容是幂等的，
+   * 不会互相覆盖出问题。任一条真的写进去，用户粘贴时就拿得到。
+   *
+   * @param c - 要复制的文本（空串直接忽略）。
+   */
   const copy = (c: string): void => {
     if (!c) return
     const viaHost = (): void => {
@@ -70,12 +86,11 @@ export function createComposer(host: ChatHost): ComposerSlice {
       viaHost()
       return
     }
+    // **先发宿主那条**（同步发出，不受浏览器那条的 Promise 影响），再走浏览器那条。
+    viaHost()
     void writeText.call(nav?.clipboard, c).then(
       () => undefined,
-      // 浏览器那条被拒（未聚焦 / 权限）：退回宿主，别让用户看到"点了没反应"
-      () => {
-        viaHost()
-      }
+      () => undefined
     )
   }
   const pickFile = (): void => {
@@ -156,6 +171,42 @@ export function createComposer(host: ChatHost): ComposerSlice {
     focusTick.value++
   }
 
+  /**
+   * 在**光标处**插入一段纯文本（语音转写的落点，对齐上游 `InputActions.insertText`）。
+   *
+   * 与 `appendDraft` 的区别是刻意的：`appendDraft` 是宿主推来的草稿（整条追加、另起一行），
+   * 而这里要**就地插入**到用户当前光标/选中处，并且**不覆盖**用户已经写的字。
+   *
+   * 选区取当下的真实 DOM 选区（`#input` 的 selectionStart/End）；拿不到（焦点不在输入框）
+   * 就落到末尾 —— 与"接着说"的直觉一致。
+   *
+   * ⚠️ 插入必须让 store 的 `text` 与 DOM 的 value 同步（textarea 是受控的），并给一次 focusTick
+   * 让输入框重新聚焦、光标落到插入文本之后，否则用户得自己再点一下输入框。
+   *
+   * @param insert - 要插入的文本（调用方负责 trim 与非空）。
+   */
+  function insertText(insert: string): void {
+    if (insert === '') return
+    const el = typeof document === 'undefined' ? null : (document.getElementById('input') as HTMLTextAreaElement | null)
+    const current = text.value
+    const start = el !== null && el.selectionStart !== null ? Math.min(el.selectionStart, current.length) : current.length
+    const end = el !== null && el.selectionEnd !== null ? Math.min(el.selectionEnd, current.length) : current.length
+    const next = current.slice(0, start) + insert + current.slice(Math.max(start, end))
+    text.value = next
+    focusTick.value++
+    if (el !== null) {
+      const caret = start + insert.length
+      queueMicrotask(() => {
+        try {
+          el.focus()
+          // ⚠️ `setSelectionRange` 在有的 DOM 实现里没有（linkedom 就没有）：光标定位是**锦上添花**，
+          // 不能让它在守卫里抛出去把整套断言带走。
+          if (typeof el.setSelectionRange === 'function') el.setSelectionRange(caret, caret)
+        } catch { /* 光标定不上不影响文本已插入 */ }
+      })
+    }
+  }
+
   /** 新会话清空：只清输入区四项，不动 focusTick 与内部 refKey。 */
   function reset(): void {
     attachments.value = []
@@ -182,6 +233,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
       retryUpload,
       addRef,
       removeRef,
+      insertText,
       readImageFile,
     },
     receiveUpload,
