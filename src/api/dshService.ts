@@ -1810,6 +1810,17 @@ export class DshService {
                 this.seenSeqs.add(e.seq);
             }
         }
+        /*
+         * **持久游标必须跟着快照重建**（上游 `ClientAssistantStream.replace`：`durableCursor = max(entries.seq)`）。
+         *
+         * `resetEvents()` 把它置成 -1，而快照里的记录是带序号的 —— 不重建就"没定基"：
+         * 紧随快照而来的**实时增量帧**（无持久序号）会按 `durableSeq + 1 - 1/(k+1)` 合成出**负序号**，
+         * 而 `appendEvents` 那条"插进来的不在末尾就排序"会把它们升序排到窗口**最前面** ——
+         * 表现是**正在流出的正文跑到提问之前、整个会话顺序错位**（真机：侧栏与编辑区两边都错，网页端正常）。
+         * 实测：快照 seq 1..5 时，增量帧拿到 -0.5 → 排到第 1 位（应在末尾）。
+         */
+        this.durableSeq = this.window.newestSeq() ?? -1;
+        this.transientInGap = 0;
         console.log(
             `[dsh-rows] 快照窗口已应用：记录=${String(win.events.length)} 事件=${String(this.streamEvents.length)} ` +
                 `hasMore=${String(this.window.hasMore())} ` +
@@ -2000,20 +2011,31 @@ export class DshService {
         if (members.length === 0) {
             return;
         }
-        this.pushTransient({ type: 'assistant-stream', frame: { type: 'start', step } });
+        // 基线的合成序号与实时帧同一口径（见 official/live-chunk-seq），基准是上一步刚重建的持久游标。
+        const batch: DshStreamEvent[] = [];
+        this.transientInGap += 1;
+        batch.push({
+            type: 'assistant-stream',
+            frame: { type: 'start', step },
+            seq: liveChunkSeq(this.durableSeq, this.transientInGap),
+        });
         for (const member of members) {
-            this.pushTransient({
+            this.transientInGap += 1;
+            batch.push({
                 type: 'assistant-stream',
                 time: member.time,
                 frame: { type: 'chunk', step, chunk: member.chunk },
+                seq: liveChunkSeq(this.durableSeq, this.transientInGap),
             });
         }
-    }
-
-    /** 合成序号的入列（基线回放用）：口径见 official/live-chunk-seq。 */
-    private pushTransient(event: DshStreamEvent): void {
-        this.transientInGap += 1;
-        this.streamEvents.push({ ...event, seq: liveChunkSeq(this.durableSeq, this.transientInGap) });
+        /*
+         * **基线成员要进窗口**（上游同口径：`replace()` 把重建的增量直接 push 进**返回的窗口数组**）。
+         *
+         * 为什么不能走旁路只塞进 `streamEvents`：那个数组每次窗口变动都会被整份重拷
+         *（`applyWindowChange` 的 `[...window.list()]`）—— 旁路塞进去的成员会在下一次
+         * 实时追加/前插一页时**凭空消失**，表现是"打开正在生成的会话，正文前半截一会儿就没了"。
+         */
+        this.applyWindowChange(this.window.append(batch));
     }
 
     /**

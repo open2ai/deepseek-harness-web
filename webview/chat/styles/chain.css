@@ -595,30 +595,40 @@
     border: 0.5px solid var(--dsh-hairline);
     border-radius: 12px;
     background: var(--dsh-code-fill);
+    /* 上游 `.block { overflow: hidden }`（`DiffBlock.module.css:1-3`）：横滚条的圆角要裁在卡片里 */
+    overflow: hidden;
     font-family: var(--vscode-editor-font-family, monospace);
-    font-size: 12px; line-height: 22px;
+    /* **11/19**（上游 `.body { font: var(--dsw-font-markdown-code-block) }`，`DiffBlock.module.css:9`）——
+       与代码卡同一档；早先这里是 12/22，两张卡并排就"不是一个东西"（2026-10-14 对齐）。 */
+    font-size: 11px; line-height: 19px;
   }
-  /* 横幅：与读文件卡同款（上游两处都是 `CodeCard.header` + `CodeToolbar`）——
-     左边语言标签（`languageForPath` 得出，`.md` → `markdown`）、右边复制。
-     独立底色 + 顶部圆角；VS Code 无对应 token，用中性叠层兜底。 */
-  .diff-banner {
-    display: flex; align-items: baseline; gap: 8px; padding: 9px 14px;
-    background: rgba(128, 128, 128, 0.06);
-    border-top-left-radius: 12px; border-top-right-radius: 12px;
-    color: var(--vscode-descriptionForeground, #999); font-size: 13px;
+  /* 横幅（语言 + 换行 + 复制）：**直接用代码卡那套类**（`.md-code-head` / `.md-code-lang` /
+     `.md-code-acts` / `.md-code-act` / `.md-code-ico*`，定义在 `chat.css`）——上游 `DiffBlock.tsx:6`
+     就是复用 `CodeToolbar`，两处一张脸；这里不再另写一份样式（此前是一个文字「复制」按钮，
+     与代码卡并排就不一致，2026-10-14 对齐）。 */
+  /*
+   * 横滚不折行（上游 `.line{white-space:pre}` + `.body{overflow-x:auto}`）。
+   *
+   * ⚠️ **body 必须是 `grid` + `minmax(max-content, 1fr)`**（上游 `DiffBlock.module.css:5-11`）：
+   * 这样**每一行的宽度 = 最宽那一行**（且不小于容器宽），横滚到右边时行底色仍然铺满。
+   * 普通 block 行只有**容器宽**，一往右滚就整片滚出视口 —— 露出没上过色的底，
+   * 真机现象就是"拖到右边背景色没有了"（2026-10-13 维护者截图）。
+   * 行内距也从 body 挪到**行**上：底色画在行盒上，内距留在 body 会让色块短一截。
+   */
+  .diff-body {
+    display: grid;
+    grid-template-columns: minmax(max-content, 1fr);
+    padding: 6px 0 20px;
+    overflow-x: auto;
   }
-  .diff-lang { flex: none; }
-  .diff-copy {
-    flex: none; margin-left: auto; border: none; padding: 0; cursor: pointer;
-    font-family: inherit; font-size: 13px;
-    background: none; color: var(--vscode-descriptionForeground, #999);
-  }
-  .diff-copy:hover { color: var(--vscode-foreground, #ddd); }
-  /* 横滚不折行（上游 `.line{white-space:pre}` + `.body{overflow-x:auto}`） */
-  .diff-body { padding: 8px 14px 12px; overflow-x: auto; }
-  .diff-line { min-height: 22px; white-space: pre; }
-  /* 文件头（**卡体第一行**，上游 `buildRows:114` 原样画出 `diffs[].path`）：加粗、不折叠 */
-  .diff-line.is-path { font-weight: 600; }
+  .diff-line { box-sizing: border-box; min-height: 1lh; padding: 0 22px; white-space: pre; }
+  /* 换行模式（上游 `.block[data-code-wrap='true']`，`DiffBlock.module.css:20-27`）：
+     行盒改成"不小于容器"并允许折行 —— 长行不再横滚；关掉即回到上面的 `pre` + 横滚。 */
+  .diff-block[data-code-wrap='true'] .diff-body { grid-template-columns: minmax(0, 1fr); }
+  .diff-block[data-code-wrap='true'] .diff-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* 文件头（**卡体第一行**，上游 `buildRows:114` 原样画出 `diffs[].path`）：字重 500 + 次级色
+     （上游 `.path { color: var(--dsw-alias-label-secondary); font-weight: 500 }`，`DiffBlock.module.css:29-32`）。 */
+  .diff-line.is-path { font-weight: 500; color: var(--vscode-descriptionForeground, #999); }
   .diff-line.is-gap { color: var(--vscode-descriptionForeground, #999); }
   /* 未变行（hunk 的上下文行）：无前缀、居中；色阶比正文弱一档（上游 `.context`） */
   .diff-line.is-context { color: var(--vscode-descriptionForeground, #999); }

@@ -9,8 +9,10 @@ import { formatMsgClock } from '../format'
 import type { DshStreamRow } from '../../../../src/dsh/rows/types'
 import type { SubagentFacts } from '../stop-control'
 import { toChatRows } from './host-rows'
-import type { ChatRow, ChatStore, RefSnap } from './types'
+import type { ChatRow, ChatStore, PendingEcho, RefSnap } from './types'
 import type { RenderSeatKeys } from '../nodes/render-plan'
+
+
 
 /**
  * 座位计划的一项：类型只有**一处**定义（`render-plan.ts` 的 `RenderSeatKeys`）。
@@ -21,6 +23,8 @@ export type SeatPlanEntry = RenderSeatKeys
 export interface MessagesSlice {
   store: Pick<
     ChatStore,
+    | 'pendingEchoes'
+    | 'visibleRows'
     | 'messages'
     | 'view'
     | 'processing'
@@ -128,46 +132,6 @@ export interface MessagesSlice {
   foldOuter: (turn: number) => void
 }
 
-/** 本地时刻串（实时上送用；历史恢复走事件自带时刻）。 */
-const nowTime = (): string => formatMsgClock(Date.now())
-
-/**
- * 本地回显**既没被宿主行认领、也不在提交台账里**时，最多还留多久（毫秒）。
- *
- * 为什么要有这条上限：本地乐观行本来靠两条权威事实回收 —— 宿主行里的 `rpcId`（入档回显）与台账的
- * 退休增量。两条都没有的旧回显原先**无限期留着**，而它又会被插到「未定稿回答行之前」，
- * 于是每一轮跑起来就重新冒出来一次（真机 2026-10-07：最早那条提问又出现在「思考 / 求索中」上方）。
- * 台帐帧在提交后几个毫秒内就到，所以这个宽限期只兜"这条回显谁也不认识"的情形：
- * 真入档的消息由宿主那条行表示，没入档的由台账标 `failed`，都不是这里丢的。
- */
-const UNKNOWN_ECHO_GRACE_MS = 10_000
-
-/**
- * 宿主行表里**同一条提交标识只留一行**（页面的最后一道闸）。
- *
- * 为什么放在页面这一层：宿主已经按消息 id 挡了一道，但页面拿到的是
- * 拼装后的整表 —— 窗口整表替换、行缓存与差分帧交错这些来路都在宿主与页面之间，多一道廉价的闸
- * 比在真机上再看到一次"提问重复"划算。同一 `rpcId` 的两行内容必然相同（它就是那一次提交的回显），
- * 而**用户真的连发两条同文案**时两条的 `rpcId` 不同、不受影响。
- */
-function dropDuplicateUserRows(rows: ChatRow[]): ChatRow[] {
-  const seen = new Set<string>()
-  const out: ChatRow[] = []
-  for (const row of rows) {
-    if (row.kind === 'user' && row.rpcId !== undefined) {
-      if (seen.has(row.rpcId)) {
-        if (typeof console !== 'undefined') {
-          console.warn(`[chat] 宿主行里同一条提交标识出现两次（rpcId=${row.rpcId}）：只留第一行`)
-        }
-        continue
-      }
-      seen.add(row.rpcId)
-    }
-    out.push(row)
-  }
-  return out
-}
-
 export function createMessages(host: ChatHost): MessagesSlice {
   const messages = signal<ChatRow[]>([])
   /**
@@ -200,12 +164,87 @@ export function createMessages(host: ChatHost): MessagesSlice {
   const runAnchorMs = signal<number | undefined>(undefined)
   /** 宿主权威的「一轮在跑」：只喂停止/插话门控。 */
   const turnRunning = signal(false)
-  /**
-   * 「宿主谁也不认识这条本地回显」的起点时刻（`rpcId` → epoch ms）：只由宽限期那条路读写
-   *（见 `UNKNOWN_ECHO_GRACE_MS`），行被认领/退休后随即清掉，不会无界增长。
-   */
-  const unknownEchoAt = new Map<string, number>()
+  /** 「请把视口钉到底」的脉冲（触底语义独立于行表：清空消息不清它）。 */
   const scrollPend = signal(0)
+  /**
+   * **会话级本地回显**（上游 `SessionSnapshot.pendingSubmissions` + `PendingSubmission` 的等价物）。
+   *
+   * 上游把回显放在**会话状态**里、由渲染层推导可见性（`ChatView.tsx:187-193`：
+   * `pendingSubmissions.filter(s => !observed.rpcIds.has(s.requestId))`）——不是时间线里的一行。
+   * 插件过去把它 push 进行表，于是必须靠「留住未认领的本地行 + 10s 宽限 + 文案兜底」三份补丁维持，
+   * 认领/退休一错拍就是「两个气泡」或「一闪而没」（docs/design/08 §A1）。
+   */
+  const pendingEchoes = signal<ReadonlyArray<PendingEcho>>([])
+  /** 回显行的行 key（负数域，与宿主正数 key 不冲突；同一条回显恒用同一个 key，避免每帧重挂）。 */
+  const echoKeys = new Map<string, number>()
+  let echoKeySeq = -1_000_000
+  const echoKeyOf = (rpcId: string): number => {
+    let k = echoKeys.get(rpcId)
+    if (k === undefined) { echoKeySeq -= 1; k = echoKeySeq; echoKeys.set(rpcId, k) }
+    return k
+  }
+  /**
+   * **渲染用的行表（推导）**：耐久行 + 还没有耐久对应物的会话级回显（上游 `ChatView.tsx:187-193` 同口径）。
+   *
+   * 判定只看一件事：行表里有没有**同 `rpcId`** 的用户行 —— 有 ⇒ 那条回显已经进日志，当场不画
+   *（**不删行、不记账**，所以没有认领/退休竞态）；没有 ⇒ 补在「本轮未定稿回答行」**之前**
+   *（一律追加到末尾的话，回显比回答晚到一步就会出现「回答在上、我发的问题在下」，真机 2026-10-07）。
+   * `queued` 那档整类排除（由队列卡表示，上游同款）。
+   */
+  const visibleRows = computed<ReadonlyArray<ChatRow>>(() => {
+    const dedupe = (list: ReadonlyArray<ChatRow>): ReadonlyArray<ChatRow> => {
+      const seen = new Set<string>()
+      let out: ChatRow[] | undefined
+      for (let i = 0; i < list.length; i += 1) {
+        const r = list[i]
+        if (r !== undefined && r.kind === 'user' && r.rpcId !== undefined) {
+          if (seen.has(r.rpcId)) { if (out === undefined) out = list.slice(0, i); continue }
+          seen.add(r.rpcId)
+        }
+        out?.push(r as ChatRow)
+      }
+      return out ?? list
+    }
+    const rows = dedupe(messages.value)
+    const echoes = pendingEchoes.value
+    if (echoes.length === 0) return rows
+    const inLog = new Set<string>()
+    for (const r of rows) {
+      if (r.kind === 'user' && r.rpcId !== undefined) inLog.add(r.rpcId)
+    }
+    /**
+     * **可见性以台账为准**（上游 `ChatView.tsx:190-191` 读的就是 `pendingSubmissions`）：
+     * 提交那一刻页面猜的 `placement` 只用于「台账帧还没到」那一拍；台账一旦有这条，就用台账的位置 ——
+     * 否则「忙时排队」那条会先在对话区冒出来、再被收走（真机 2026-10-06 的现象）。
+     */
+    const placementOf = new Map(pendingSubmissions.value.map((x) => [x.rpcId, x.placement]))
+    const extra: ChatRow[] = []
+    const added = new Set<string>()
+    for (const e of echoes) {
+      const placement = placementOf.get(e.rpcId) ?? e.placement
+      if (placement === 'queued' || inLog.has(e.rpcId) || added.has(e.rpcId)) continue
+      added.add(e.rpcId)
+      extra.push({
+        kind: 'user',
+        key: echoKeyOf(e.rpcId),
+        text: e.text,
+        images: e.images,
+        time: formatMsgClock(e.time),
+        rpcId: e.rpcId,
+        ...(e.failed === true ? { failed: true } : {}),
+        ...(e.refs !== undefined ? { refs: e.refs } : {}),
+        ...(e.imageRefs !== undefined ? { imageRefs: e.imageRefs as never } : {}),
+        ...(e.files !== undefined ? { files: e.files } : {}),
+      } as ChatRow)
+    }
+    if (extra.length === 0) return rows
+    let at = rows.length
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i]
+      if (row !== undefined && row.kind === 'assistant' && !row.done) { at = i; break }
+    }
+    return [...rows.slice(0, at), ...extra, ...rows.slice(at)]
+  })
   /**
    * **座位计划**（`RenderSeatKeys[]`：一条 entry 一项，项内按序带行 key）。
    *
@@ -279,6 +318,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
   let rowKey = 1
   /** 本地乐观用户行的 key：用**负数**域，与宿主行（正数）永不冲突，认领时可直接复用、不触发 preact 重挂载。 */
   let optUserKey = -1
+  /** 本地时刻的展示文案（与宿主行的 `time` 同格式）。 */
+  const nowTime = (): string => formatMsgClock(Date.now())
   /** 当前列表属于哪个会话：会话一变就丢弃本地乐观行（见 applyHostRows） */
   let rowsSessionId: string | undefined
   /** 上一次宿主下发里出现过的提交标识：判「这条本地行是否已被服务端回显认领」 */
@@ -359,18 +400,26 @@ export function createMessages(host: ChatHost): MessagesSlice {
   }
 
   // ---------- 消息流动作(本地渲染) ----------
-  function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string): void {
+  function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string, placement: PendingEcho['placement'] = 'transcript'): void {
+    // **有提交标识 = 刚发出去、还没进日志那条**：只登记会话级回显，**不进行表**
+    //（上游 `ChatView.tsx:187-193` 同口径：回显是会话状态，行表里只有日志里的东西）。
+    if (rpcId !== undefined && rpcId !== '') {
+      pendingEchoes.value = [...pendingEchoes.value, { rpcId, placement, text: textMsg, time: time ?? Date.now(), images: imgs, ...(imageRefs !== undefined && imageRefs.length > 0 ? { imageRefs } : {}), ...(files !== undefined && files.length > 0 ? { files } : {}), ...(refs !== undefined ? { refs } : {}) }]
+      return
+    }
+    // 历史恢复那条路（没有提交标识）：照旧直接进行表
     // 实时本地上送用本地时刻;恢复历史时传入事件自带时间戳,不覆盖为"现在"
     push({ kind: 'user', key: optUserKey--, text: textMsg, images: imgs, time: time !== undefined ? formatMsgClock(time) : nowTime(), refs, ...(imageRefs && imageRefs.length > 0 ? { imageRefs } : {}), ...(files && files.length > 0 ? { files } : {}), ...(rpcId !== undefined ? { rpcId } : {}) })
   }
   /**
    * 接受宿主下发的行（阶段 4，见 docs/design/08 §11）：**整表替换** —— 宿主是行列表的唯一权威。
-   * 只有一种例外：本地已出、但尚未被回显认领的**乐观行**要留住（否则刚发出去的消息会一闪而没）。
-   * 认领判定用提交标识：宿主行里已有同标识 → 已被认领；没有 → 还没回显，保留在末尾。
+   * **没有例外**：本地回显不在这张表里 —— 它在 `pendingEchoes`（会话级状态），由 `visibleRows` 按 `rpcId`
+   * 推导可见性（宿主行里已有同标识 ⇒ 那条回显当场不画，上游 `ChatView.tsx:187-193` 同口径）。
+   * 所以这里不再有「留住未认领乐观行」那条例外、也没有随之而来的 10s 宽限。
    */
   /** 接受宿主下发的行：映射成 ChatRow 后整表替换（宿主是行列表的唯一权威）。 */
 function applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
-    installMappedRows(dropDuplicateUserRows(toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : [])), sessionId, turnActive, subagent)
+    installMappedRows(toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : []), sessionId, turnActive, subagent)
 }
 
 /** 接受节点模型映射出的 ChatRow：与 applyHostRows 同一条整表替换 + 认领。 */
@@ -378,7 +427,7 @@ function applyNodeRows(rows: ChatRow[], sessionId?: string, turnActive?: boolean
     // 座位计划与行表**同帧更新**：它是行的"分组说明书"（哪些行属于同一项），
     // 分两帧更新就会出现"计划指向已经不在的行"这种中间态。
     seatPlan.value = seats ?? []
-    installMappedRows(dropDuplicateUserRows(rows), sessionId, turnActive, subagent)
+    installMappedRows(rows, sessionId, turnActive, subagent)
 }
 
 function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
@@ -410,8 +459,9 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
         // 本地乐观行的台账镜像属于**上一个会话**：换会话必须清
         pendingSubmissions.value = []
         retiredSubmissions.value = []
-        // 宽限期那张表同理（键是 `rpcId`，属于上一个会话）
-        unknownEchoAt.clear()
+        // 会话级回显同理（上游把回显挂在**会话**上，换会话天然不残留）
+        pendingEchoes.value = []
+        echoKeys.clear()
         // 子会话事实也属于上一个会话：先清掉，等宿主把新的那一份随行帧发来（否则会拿旧会话的
         // "这是子会话"去判新会话的主钮）
         subagentFacts.value = undefined
@@ -436,142 +486,29 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
         .filter((id): id is string => id !== undefined)
     )
     claimedRpcIds = claimed
-    // 认领时把**本地行独有**的附件信息并回宿主行：内联图（base64）与文件的**本地路径**
-    // （宿主事件里只有附件引用、名字与字节数，路径点不开）。不回填则「发图 / 发文件」后这两样立刻消失。
-    const localByRpc = new Map<string, Extract<ChatRow, { kind: 'user' }>>()
-    for (const r of messages.value) {
-      if (r.kind === 'user' && r.rpcId !== undefined) localByRpc.set(r.rpcId, r)
-    }
+    // 认领时把**本地独有**的信息并回宿主行（回填源 = **会话级回显**，不再是本地行）：
+    //   · `refs`（@ 引用快照）—— 宿主事件里没有，不回填则发出后 chip 立刻消失；
+    //   · 文件的**本地绝对路径** —— 宿主的文件只有附件 id（点开要走附件层取字节）；
+    //   · **行 key 复用** —— 同一件事换 key 会让 preact 卸载再挂载那一行（首发送「闪一下」的来路）。
+    // 图片来源**不回填**：宿主行自带 `imageRefs`，附件层那张才是要显示的那张（维护者定案）。
+    const echoByRpc = new Map(pendingEchoes.value.map((e) => [e.rpcId, e]))
     const merged = host.map((r): ChatRow => {
       if (r.kind !== 'user' || r.rpcId === undefined) return r
-      const local = localByRpc.get(r.rpcId)
-      if (local === undefined) return r
+      const echo = echoByRpc.get(r.rpcId)
+      if (echo === undefined) return r
+      const files = r.files !== undefined && echo.files !== undefined
+        ? r.files.map((f) => {
+            const local = echo.files?.find((x) => x.name === f.name && x.path !== undefined)
+            return local?.path === undefined ? f : { ...f, path: local.path }
+          })
+        : r.files
       return {
         ...r,
-        // 认领时**复用本地 key**：本地行与宿主行是同一件事，换 key 会让 preact 卸载再挂载那一行
-        //（首发送「会话区闪一下」的来源）。本地 key 在负数域，与宿主正数 key 永不冲突。
-        key: local.key,
-        ...(local.images.length > 0 ? { images: local.images } : {}),
-        ...(local.files !== undefined ? { files: local.files } : {}),
-        ...(local.refs !== undefined ? { refs: local.refs } : {}),
+        key: echoKeyOf(r.rpcId),
+        ...(echo.refs !== undefined ? { refs: echo.refs } : {}),
+        ...(files !== undefined ? { files } : {}),
       }
     })
-    const pending = messages.value.filter(
-      (r): r is Extract<ChatRow, { kind: 'user' }> =>
-        r.kind === 'user' && r.rpcId !== undefined && !claimed.has(r.rpcId)
-    )
-    /**
-     * 本地乐观行的**落位**：插到本轮未定稿的回答行**之前**，而不是一律追加到末尾。
-     *
-     * 为什么：这条路只在「回显还没到」或「回显永远不会到」时才有行可放。
-     * 一律追加到末尾的话，一旦回显没来（丢帧，或提交与回显之间出过错），这条提问就会留在列表最后 ——
-     * **看起来就是「回答在上面、我发的问题在下面」**（真机现象）。
-     * 插到本轮回答行之前，「提问 → 回答」的顺序在任何情况下都成立；宿主真没这一行时它也仍在对话里可见。
-     * 往回答行**之后**找是取最靠下的那条未定稿行，保证插在当前这一轮而不是更早的残留行旁边。
-     */
-    let openAssistantAt = -1
-    for (let i = merged.length - 1; i >= 0; i -= 1) {
-      const row = merged[i]
-      if (row !== undefined && row.kind === 'assistant' && !row.done) {
-        openAssistantAt = i
-        break
-      }
-    }
-    /**
-     * 兜底去重（**只在标识认领没生效时才会用到**）：宿主已经有一条**同文案**的用户行，
-     * 就说明本地这条是重复的 —— 丢掉它，而不是继续贴在末尾。
-     *
-     * 为什么需要：认领靠提交标识配对，一旦配不上（回显没带标识、或标识不一致），
-     * 本地这条既不会被认领、又不该留在列表里 —— 留着就会出现在本轮回答**下面**
-     * （真机现象：回答在上面、我发的问题在下面）。宿主那条位置本来就是对的。
-     *
-     * 代价：同一文案连发两次时，第二条在回显到达前会短暂消失（随之由宿主行补上）；
-     * 这比"永久错位"轻。**这是兜底**，标识配对正常时它一次都不会触发。
-     */
-    const hostUserTexts = new Map<string, number>()
-    for (const r of merged) {
-      if (r.kind === 'user') hostUserTexts.set(r.text, (hostUserTexts.get(r.text) ?? 0) + 1)
-    }
-    const pendingKept = pending.filter((r) => {
-      const seen = hostUserTexts.get(r.text) ?? 0
-      if (seen === 0) return true
-      hostUserTexts.set(r.text, seen - 1)
-      console.warn(`[chat] 本地行未被标识认领，按同文案去重（宿主已有该消息，位置以宿主为准）`)
-      return false
-    })
-    /**
-     * **本地在等这条腿由宿主台账说了算**（真机 2026-10-06 的卡死来路）。
-     *
-     * 上游的规则是：回显的**位置**（`transcript` / `queued` / `steering`）在提交那一刻由**会话**推导，
-     * 并由会话在四个时刻退休（入档 / 队列接受 / 失败或被放弃 / 销毁）。页面原先靠"`rpcId` 认领 + 同文案
-     * 兜底"两条路回收本地行，缺"这条永远不会来了"那一条 → 页面判忙/闲与宿主不一致时（竞态），
-     * 本地行永远认领不到，`processing` 被一条没人回收的腿撑住：一直「深度求索中」（且没有时长锚点）、
-     * 停止按钮点了也没反应（`session.cancel` 对"本来没有在跑的回合"是空操作）。
-     *
-     * 现在：台账下发的 `retired` 是**权威的退休事件**（`admitted` → 宿主那条行已经在列表里；
-     * `queued` → 队列卡接管；`failed` → 标「未提交成功」），页面只消费，不再推断。
-     */
-    /** 台账刚退休的那几条（`rpcId` → 去向）：决定本地行是"消失"还是"标未提交成功"。 */
-    const justRetired = new Map<string, string>()
-    for (const entry of retiredSubmissions.value) {
-      justRetired.set(entry.rpcId, entry.outcome)
-    }
-    const retired = pendingKept.flatMap((r): Array<Extract<ChatRow, { kind: 'user' }>> => {
-      if (r.rpcId === undefined) {
-        return [r]
-      }
-      if (pendingSubmissions.value.some((p) => p.rpcId === r.rpcId)) {
-        // 台账里还挂着：`queued` 交给队列卡表示（对话区这条退休）；`transcript` / `steering` 留着
-        const entry = pendingSubmissions.value.find((p) => p.rpcId === r.rpcId)
-        return entry?.placement === 'queued' ? [] : [r]
-      }
-      const outcome = justRetired.get(r.rpcId)
-      if (outcome === undefined) {
-        // 台账没交代它（帧还没到，或宿主没登记过）→ 先留着：宁可多留一会儿，也不要把正常提交标成失败。
-        // **但只留一个宽限期**（见 `UNKNOWN_ECHO_GRACE_MS`）：无限期留着的话，一条宿主行表早就不含它
-        // （入档那条行已经在加载窗口之外）、台账早已把它的退休增量吐完的旧回显，会在**每一轮**
-        // 「未定稿回答行之前」重新插出来 —— 真机 2026-10-07：发新问题时最早那条提问又冒出来一次。
-        const since = unknownEchoAt.get(r.rpcId)
-        if (since === undefined) {
-          unknownEchoAt.set(r.rpcId, Date.now())
-          return [r]
-        }
-        if (Date.now() - since < UNKNOWN_ECHO_GRACE_MS) {
-          return [r]
-        }
-        if (typeof console !== 'undefined') {
-          console.warn(`[chat] 本地回显既没被宿主行认领、也不在提交台账里（rpcId=${r.rpcId}）：超过 ${String(UNKNOWN_ECHO_GRACE_MS)}ms，丢弃`)
-        }
-        return []
-      }
-      if (outcome === 'failed') {
-        return [{ ...r, failed: true }]
-      }
-      // `admitted` / `queued`：回显退休（宿主那条行、或队列卡已经在表示它）
-      return []
-    })
-    // 宽限期那张表的**清理**：只保留这一帧还在等认领的那些 id（行一被认领/退休/丢弃就随之删掉）
-    if (unknownEchoAt.size > 0) {
-      const waiting = new Set(pendingKept.map((r) => r.rpcId).filter((id): id is string => id !== undefined))
-      for (const id of [...unknownEchoAt.keys()]) {
-        if (!waiting.has(id)) {
-          unknownEchoAt.delete(id)
-        }
-      }
-    }
-    /**
-     * **本地独有行**：宿主行里根本不会有的那些 —— 审批卡、斜杠结果/错误提示。
-     *
-     * 为什么必须在这里挑出来：本函数是**整表替换**（`messages.value = ...`），而 `merged` 只是宿主行、
-     * `pendingKept` 只留用户乐观行 —— 不显式保留的话，审批卡会在**宿主下一次推行的瞬间被整段丢掉**。
-     *
-     * 这正是真机现象「审批请求到了、授权卡却不出现」的成因：提权发生在回合进行中，
-     * 而回合进行中每一步都会推一次行（`tool/call`、流式增量…），所以卡片几乎立刻被冲掉。
-     * 帧侧是好的（`$events` 已收到、agentId 与会话键一致），坏的是这里。
-     *
-     * 位置：统一附在**末尾**。审批卡是「等你操作」的交互卡，不随时间线滚动，附末尾最直观
-     * （上游的审批是覆盖层，也不在时间线里）。会话切换时由上面的分支整表清空，不会带到别的会话。
-     */
     const localOnly = messages.value.filter(
       (r) => r.kind === 'approval' || r.kind === 'notice'
     )
@@ -586,14 +523,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
      * 结论：占位行只活在"发送当帧 → 宿主第一帧"这一拍（宿主一到就由它代表），
      * 闪一下是可接受的**观感**代价，正文重复是不可接受的**数据**错误。
      */
-    const localPlaceholder: ChatRow[] = []
-    messages.value = [
-      ...(openAssistantAt === -1
-        ? [...merged, ...retired]
-        : [...merged.slice(0, openAssistantAt), ...retired, ...merged.slice(openAssistantAt)]),
-      ...localPlaceholder,
-      ...localOnly,
-    ]
+    messages.value = [...merged, ...localOnly]
     // 提交失败的行（`failed`）留在列表里可读，但**不参与「处理中」** —— 那一栏只看下面三条腿。
     const lastAssistant = [...messages.value].reverse().find((r) => r.kind === 'assistant')
     /**
@@ -637,6 +567,14 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
   ): void {
     pendingSubmissions.value = pending
     retiredSubmissions.value = retired
+    if (retired.length > 0) {
+      // **退休单点**（上游 `finishSubmission`，`session.ts:864-873`）：`admitted` / `queued` ⇒ 回显当场消失；
+      // `failed` ⇒ **留着并标失败**（渲染层据此显示「未提交成功」）。同一条只会退休一次（宿主台账有 latch）。
+      const outcomeOf = new Map(retired.map((r) => [r.rpcId, r.outcome]))
+      pendingEchoes.value = pendingEchoes.value
+        .filter((e) => { const o = outcomeOf.get(e.rpcId); return o !== 'admitted' && o !== 'queued' })
+        .map((e) => (outcomeOf.get(e.rpcId) === 'failed' ? { ...e, failed: true } : e))
+    }
   }
 
   /**
@@ -731,7 +669,6 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     runAnchorMs.value = undefined
     pendingSubmissions.value = []
     retiredSubmissions.value = []
-    unknownEchoAt.clear()
     subagentFacts.value = undefined
     turnRunning.value = false
     turnFoldOpen.value = new Map<number, boolean>()
@@ -755,6 +692,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
       subagentFacts,
       scrollPend,
       seatPlan,
+      pendingEchoes,
+      visibleRows,
       historyHasMore,
       historyLoading,
       historyEvents,

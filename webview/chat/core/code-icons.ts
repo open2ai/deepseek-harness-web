@@ -1,10 +1,8 @@
 /**
  * 代码块工具栏的四个图标 —— **逐字节取自上游 artwork**（不是近似自绘）。
  *
- * 出处：`packages/client/ui-primitives/src/icons/index.tsx` 的 `IconWrapFillArtwork` /
- * `IconNowrapFillArtwork` / `IconCopyOutlineArtwork` / `IconCheckOutlineArtwork`；
- * 用法出处：同包的 `CodeToolbar.tsx:49-58` —— 上游在那里用 `size={14}`，
- * 且**换行按钮按 `wrapped` 在 Wrap/Nowrap 之间二选一、复制按钮按 `copied` 在 Copy/Check 之间二选一**。
+ * 出处与用法（四个 artwork 的名字、那次用的是 14 这一档、换行按 `wrapped` 在 Wrap/Nowrap 之间二选一、
+ * 复制按 `copied` 在 Copy/Check 之间二选一）。
  *
  * 插件为什么把四个都放进 DOM、用 CSS 显隐切换（而不是像上游那样按状态二选一渲染）：
  * 工具栏是**靠事件委托**工作的（`core/code-toolbar.ts`，见那里的理由），点一下只改

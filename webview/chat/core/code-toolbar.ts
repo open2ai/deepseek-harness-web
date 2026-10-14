@@ -36,34 +36,32 @@ export function handleCodeToolbarClick(event: Event, copy: (text: string) => voi
     const code = block.querySelector('pre')?.textContent ?? ''
     copy(code)
     /**
-     * 确认窗口：**只换图标 + 换 `aria-label`，到点还原**。
+     * 确认窗口：**打上 `data-copied` + 换 `aria-label`，到点还原**。
+     *
+     * 图标不在这里换：对勾/复制两个图标都渲染进了 DOM，由 CSS 按 `data-copied` 二选一显隐
+     *（上游是按 `copied` 状态二选一渲染，插件用 CSS 达到同一视觉，理由见 `core/code-icons.ts`）。
+     * 可访问名**跟随状态**（复制中读作"复制成功"，与上游同口径）。
      *
      * ⚠️ **不碰 `title`**（2026-10-11 维护者："按钮不要提示'复制成功'，上游都没有"）：
      * 上游的提示是自绘 `Tooltip`，它的 `onClick` 分支会**把气泡撤掉**
-     * （：`cancelShow` 后 `withdraw`）—— 所以上游点完
-     * 根本看不到"已复制"气泡，反馈只有按钮上的对勾。插件的 `title` 是**浏览器原生提示**，
-     * 原生提示**不随点击消失** → 把 `title` 改成"复制成功"就会一直挂在那儿。
-     * 原来 `title` 里的"复制"保持不变：它是**悬停**时的提示，与上游悬停看到的一致。
+     *（`cancelShow` 后 `withdraw`）—— 所以上游点完根本看不到"已复制"气泡，反馈只有按钮上的对勾。
+     * 插件的 `title` 是**浏览器原生提示**，原生提示**不随点击消失** → 把 `title` 改成"复制成功"
+     * 就会一直挂在那儿。原来 `title` 里的"复制"保持不变：它是**悬停**时的提示，与上游悬停看到的一致。
      */
-    const icon = button.querySelector('.codicon')
     button.setAttribute('data-copied', 'true')
     button.setAttribute('aria-label', CODE_COPY_LABELS.copied)
-    icon?.classList.remove('codicon-copy')
-    icon?.classList.add('codicon-check')
     window.setTimeout(() => {
       button.removeAttribute('data-copied')
       button.setAttribute('aria-label', CODE_COPY_LABELS.copy)
-      icon?.classList.remove('codicon-check')
-      icon?.classList.add('codicon-copy')
     }, COPIED_MS)
     return true
   }
 
   if (button.hasAttribute('data-code-wrap-btn')) {
     /*
-     * 上游 `CodeToolbar.tsx:50`：`aria-pressed={wrapped}`、**`aria-label` 固定是 `labels.wrapLabel`**
-     * （不随状态改成"取消自动换行"）—— 这里照上游，标签**不跟随**状态；变的是 `title`
-     * （上游那里是 Tooltip 的文案，它按 `wrapped` 二选一，见 `CodeToolbar.tsx:39`）。
+     * **照上游的可访问名口径**：`aria-pressed` 跟随 `wrapped`，而 `aria-label` **固定**是
+     * 「自动换行」——**不随状态**改成"取消自动换行"；变的是 `title`（上游那里是悬停气泡的文案，
+     * 它按 `wrapped` 二选一）。
      *
      * 图标不在这里换：四个图标都渲染进了 DOM，由 CSS 按卡片上的 `data-code-wrap` 显隐
      *（上游是按状态二选一渲染，插件用 CSS 达到同一视觉，理由见 `core/code-icons.ts`）。

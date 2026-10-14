@@ -23,11 +23,16 @@ import { useEffect, useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
 import { diffRows, diffCopyText, diffLabels, languageForPath, type DiffCard as DiffCardData } from '../../core/diff-card'
 import { CHAT_DIFF_MAX_LINES, FOLD_ARIA, headTail, foldLabels } from '../../core/fold'
+import { CODE_COPY_LABELS } from '../../core/code-toolbar'
+import { CODE_ICON_CHECK, CODE_ICON_COPY, CODE_ICON_NOWRAP, CODE_ICON_WRAP } from '../../core/code-icons'
 
 export function DiffCard({ card, store }: { card: DiffCardData; store: ChatStore }) {
   const labels = diffLabels()
   const fold = foldLabels()
   const [expanded, setExpanded] = useState(false)
+  // 换行开关与复制确认：**卡片自己持有状态**（上游 `DiffBlock.tsx:170-172` 的 `useState`，`CodeToolbar` 只是展示件）
+  const [wrapped, setWrapped] = useState(false)
+  const [copied, setCopied] = useState(false)
   const { rows, added, removed, files } = diffRows(card.diffs)
   // 差异内容变化（running → 定稿拿到 meta.diffs）时回到折叠态
   useEffect(() => {
@@ -36,6 +41,9 @@ export function DiffCard({ card, store }: { card: DiffCardData; store: ChatStore
   const { head, tail, hidden, capped } = headTail(rows, CHAT_DIFF_MAX_LINES, expanded)
   const copy = (): void => {
     store.copy(diffCopyText(rows))
+    // 确认窗口与代码卡同量级（`code-toolbar.ts` 的 `COPIED_MS`）：图标由 CSS 按 `data-copied` 二选一
+    setCopied(true)
+    window.setTimeout(() => { setCopied(false) }, 1500)
   }
   const toggle = (): void => setExpanded((e) => !e)
   const line = (r: (typeof rows)[number], key: string): unknown =>
@@ -43,10 +51,29 @@ export function DiffCard({ card, store }: { card: DiffCardData; store: ChatStore
   // 横幅语言标签：所有 diff 指向同一种语言才显示它，否则按上游退回「代码块」
   const first = card.diffs[0] === undefined ? undefined : languageForPath(card.diffs[0].path)
   const language = card.diffs.every((d) => languageForPath(d.path) === first) ? first : undefined
-  return html`<div class="diff-block" data-diff>
-    <div class="diff-banner">
-      <span class="diff-lang">${language ?? labels.codeLabel}</span>
-      <button type="button" class="diff-copy" onClick=${copy}>${labels.copy}</button>
+  return html`<div class="diff-block" data-diff data-code-wrap=${wrapped ? 'true' : 'false'}>
+    ${/* 横幅 = **与代码卡同一套工具条**（上游 `DiffBlock.tsx:6` 直接复用 `CodeToolbar`，样式取自
+         `CodeCard.module.css` 的 header/heading/language/actions/action）：语言标签 + 换行开关 + 复制，
+         两个 24×24 图标钮、14px 图标、hover/focus 同款。图标按 `data-code-wrap` / `data-copied` 由 CSS
+         二选一显隐（同 `core/code-icons.ts` 的口径），可访问名与上游逐字同款（换行的 `aria-label`
+         **固定**「自动换行」、只有 `aria-pressed`/`title` 随状态走）。 */ ''}
+    <div class="md-code-head">
+      <span class="md-code-lang">${language ?? labels.codeLabel}</span>
+      <span class="md-code-acts">
+        <button type="button" class="md-code-act" data-diff-wrap
+          aria-label=${CODE_COPY_LABELS.wrap} aria-pressed=${wrapped ? 'true' : 'false'}
+          title=${wrapped ? CODE_COPY_LABELS.unwrap : CODE_COPY_LABELS.wrap}
+          onClick=${() => setWrapped((w) => !w)}>
+          <span class="md-code-ico md-code-ico-wrap">${CODE_ICON_WRAP}</span>
+          <span class="md-code-ico md-code-ico-nowrap">${CODE_ICON_NOWRAP}</span>
+        </button>
+        <button type="button" class="md-code-act" data-diff-copy data-copied=${copied ? 'true' : undefined}
+          aria-label=${copied ? CODE_COPY_LABELS.copied : CODE_COPY_LABELS.copy} title=${CODE_COPY_LABELS.copy}
+          onClick=${copy}>
+          <span class="md-code-ico md-code-ico-copy">${CODE_ICON_COPY}</span>
+          <span class="md-code-ico md-code-ico-check">${CODE_ICON_CHECK}</span>
+        </button>
+      </span>
     </div>
     <div class="diff-body">
       ${head.map((r, i) => line(r, String(i)))}

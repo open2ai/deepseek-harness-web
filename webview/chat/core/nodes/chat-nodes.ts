@@ -762,90 +762,147 @@ function buildTurnStats(events: readonly SessionEvent[]): Map<number, Record<str
 }
 
 /**
- * 顺序扫描事件，在**遇到每条 `user/message` 的那一刻**记下它是否被收件箱认领
- *（镜像上游 `message.ts` 的 `reader.previous('inbox-next-step'/'inbox-next-turn')`）。
- * 不能先整窗折完再判：后面的 claim 会覆盖前面的认领状态，真机上会让触发卡全丢。
+ * 收件箱认领读数（**状态化**：跨切片带着走，不整窗重扫）。
  *
+ * 与上游同构：`model/steering-history.ts` 的 `SteeringHistory` 就是逐事件推进的状态机
+ *（`inbox[target]` 数组 + `claimedNextStep` 集合），`message.ts` 再读
+ *`reader.previous('inbox-next-step'/'inbox-next-turn')` 的状态。原先这里每次都对**整段事件**
+ * 重扫一遍（全量路径没问题），但续折只重折**最后一个 `turn/start` 起**的尾巴 —— 而
+ * "进收件箱"的那条 `agent/inbox/spliced` 常落在尾巴**之前**、"认领"的那条落在尾巴**之内**，
+ * 尾巴里那次 pop 落空 ⇒ 这条非人类消息不被认领 ⇒ 被折成 `context`（`turn-trigger` 丢了），
+ * 要等后面某一帧逼出整表重折才补上。真机现象（2026-10-13）：**定时任务的「自动化任务」触发卡
+ * 要等下一轮开始才冒出来**（执行过程中看不到）。
+ *
+ * 判定口径不变：
  * - `next-step` 认领 → 插话（steering）；
  * - `next-turn` 认领 → 唤醒本轮（waking，非 human 源升成 `turn-trigger`）；
  * - `idleSteer`：回合第 1 步里被 next-step 认领、而认领批不含人类 → 也算唤醒。
  */
-function inboxClaimsByMessage(events: readonly SessionEvent[]): { steering: Set<string>; waking: Set<string> } {
-    interface Msg { id: string; human: boolean }
-    type Pending =
-        | { kind: 'snapshot'; msgs: Msg[] }
-        | { kind: 'splice'; previous: Pending; start: number; removedCount: number; inserted: Msg[] }
-    const materialize = (state: Pending): Msg[] => {
-        const splices: Array<Extract<Pending, { kind: 'splice' }>> = []
-        let cur = state
-        while (cur.kind === 'splice') { splices.push(cur); cur = cur.previous }
-        const out = [...cur.msgs]
-        for (const s of splices.reverse()) out.splice(s.start, s.removedCount, ...s.inserted)
-        return out
+interface InboxClaimMsg { id: string; human: boolean }
+type InboxClaimPending =
+    | { kind: 'snapshot'; msgs: InboxClaimMsg[] }
+    | { kind: 'splice'; previous: InboxClaimPending; start: number; removedCount: number; inserted: InboxClaimMsg[] }
+interface InboxClaimFold { pending: InboxClaimPending; current: Set<string>; claimSeq: number; claimedHuman: boolean }
+/** 认领读数的状态（`NodesCheckpoint` 里带一份，续折接着推进）。 */
+export interface InboxClaimState {
+    folds: Record<string, InboxClaimFold>
+    /** 当前回合的 `turn/start` 序号（`idleSteer` 拿它跟认领序号比）。 */
+    curTurnStartSeq: number | undefined
+    curStep: number
+}
+function materializePending(state: InboxClaimPending): InboxClaimMsg[] {
+    const splices: Array<Extract<InboxClaimPending, { kind: 'splice' }>> = []
+    let cur = state
+    while (cur.kind === 'splice') { splices.push(cur); cur = cur.previous }
+    const out = [...cur.msgs]
+    for (const s of splices.reverse()) out.splice(s.start, s.removedCount, ...s.inserted)
+    return out
+}
+function inboxClaimMsgs(raw: unknown): InboxClaimMsg[] {
+    return (Array.isArray(raw) ? raw : []).map((m) => {
+        const rec = m as { id?: unknown; source?: { kind?: unknown } } | null | undefined
+        return { id: typeof rec?.id === 'string' ? rec.id : '', human: rec?.source?.kind === 'user' }
+    }).filter((m) => m.id !== '')
+}
+function makeInboxClaimFold(): InboxClaimFold {
+    return { pending: { kind: 'snapshot', msgs: [] }, current: new Set<string>(), claimSeq: -1, claimedHuman: false }
+}
+export function createInboxClaimState(): InboxClaimState {
+    return { folds: { 'next-step': makeInboxClaimFold(), 'next-turn': makeInboxClaimFold() }, curTurnStartSeq: undefined, curStep: 0 }
+}
+/** 深拷一份：续折在副本上继续推进，断点里那份必须保持可复用。 */
+export function cloneInboxClaimState(state: InboxClaimState): InboxClaimState {
+    const fold = (f: InboxClaimFold): InboxClaimFold =>
+        ({ pending: f.pending, current: new Set(f.current), claimSeq: f.claimSeq, claimedHuman: f.claimedHuman })
+    return {
+        folds: { 'next-step': fold(state.folds['next-step'] as InboxClaimFold), 'next-turn': fold(state.folds['next-turn'] as InboxClaimFold) },
+        curTurnStartSeq: state.curTurnStartSeq,
+        curStep: state.curStep,
     }
-    const makeMsgs = (raw: unknown): Msg[] =>
-        (Array.isArray(raw) ? raw : []).map((m) => {
-            const rec = m as { id?: unknown; source?: { kind?: unknown } } | null | undefined
-            return { id: typeof rec?.id === 'string' ? rec.id : '', human: rec?.source?.kind === 'user' }
-        }).filter((m) => m.id !== '')
-    interface Fold { pending: Pending; current: Set<string>; claimSeq: number; claimedHuman: boolean }
-    const makeFold = (): Fold => ({ pending: { kind: 'snapshot', msgs: [] }, current: new Set<string>(), claimSeq: -1, claimedHuman: false })
-    const folds: Record<string, Fold> = { 'next-step': makeFold(), 'next-turn': makeFold() }
+}
+/** 读一条事件并推进状态；消息的判定写进 `steering` / `waking`（调用方给了才写）。 */
+export function applyInboxClaimEvent(state: InboxClaimState, ev: SessionEvent, steering?: Set<string>, waking?: Set<string>): void {
+    const folds = state.folds
+    const d = ev.data as { target?: unknown; start?: unknown; removedCount?: unknown; inserted?: unknown; outcome?: unknown; turn?: unknown; step?: unknown; id?: unknown; source?: { kind?: unknown } } | undefined
+    if (ev.type === 'turn/start') {
+        if (typeof d?.turn === 'number') { state.curTurnStartSeq = ev.seq; state.curStep = 0 }
+        return
+    }
+    if (ev.type === 'step/start') {
+        if (typeof d?.step === 'number') state.curStep = d.step
+        return
+    }
+    if (ev.type === 'agent/inbox/spliced') {
+        const fold = typeof d?.target === 'string' ? folds[d.target] : undefined
+        if (fold === undefined || typeof d?.start !== 'number') return
+        const start = d.start
+        const removedCount = typeof d.removedCount === 'number' ? d.removedCount : 0
+        const inserted = inboxClaimMsgs(d.inserted)
+        if (removedCount > 0 && d.outcome !== 'canceled') {
+            const msgs = materializePending(fold.pending)
+            const claimed = msgs.splice(start, removedCount, ...inserted)
+            fold.pending = { kind: 'snapshot', msgs }
+            fold.current = new Set(claimed.map((m) => m.id))
+            fold.claimSeq = ev.seq
+            fold.claimedHuman = claimed.some((m) => m.human)
+        } else {
+            for (const m of inserted) fold.current.delete(m.id)
+            fold.pending = { kind: 'splice', previous: fold.pending, start, removedCount, inserted }
+        }
+        return
+    }
+    if (ev.type !== 'user/message') return
+    const id = typeof d?.id === 'string' ? d.id : ''
+    if (id === '') return
+    const srcKind = typeof d?.source?.kind === 'string' ? d.source.kind : ''
+    const nextStep = folds['next-step'] as InboxClaimFold
+    const nextTurn = folds['next-turn'] as InboxClaimFold
+    if (srcKind === 'user') {
+        if (nextStep.current.has(id)) steering?.add(id)
+        return
+    }
+    // idleSteer（镜像上游 message.ts）：回合第 1 步、该 turn 由 next-step 认领开始（next-turn 认领早于回合起点）、
+    // 认领批不含人类，且本条在认领批里 —— 这三条一起才算「唤醒本轮」。
+    const tStart = state.curTurnStartSeq
+    const idleSteer = state.curStep === 1 && tStart !== undefined
+        && nextStep.claimSeq > tStart && nextTurn.claimSeq < tStart
+        && nextStep.claimedHuman === false && nextStep.current.has(id)
+    if (nextTurn.current.has(id) || idleSteer) waking?.add(id)
+}
+/**
+ * 读一段事件里的认领。全量路径 = 整窗（`from` = 0）；**续折路径 = 从断点那份状态接着读尾巴**。
+ * @param events - 事件表。
+ * @param from - 起始下标。
+ * @param state - 起始状态（续折传断点里那份的**副本**）。
+ * @param snapshotAt - 读到这个下标**之前**留一份状态快照（断点用；-1 = 不留）。
+ * @returns 本段的 steering/waking、推进后的状态，以及 `snapshotAt` 处的那份快照。
+ */
+export function readInboxClaims(
+    events: readonly SessionEvent[],
+    from = 0,
+    state: InboxClaimState = createInboxClaimState(),
+    snapshotAt = -1
+): { steering: Set<string>; waking: Set<string>; state: InboxClaimState; atSnapshot: InboxClaimState } {
     const steering = new Set<string>()
     const waking = new Set<string>()
-    const turnStartSeq = new Map<number, number>()
-    let curTurn = 0
-    let curStep = 0
-    for (const ev of events) {
-        const d = ev.data as { target?: unknown; start?: unknown; removedCount?: unknown; inserted?: unknown; outcome?: unknown; turn?: unknown; step?: unknown; id?: unknown; source?: { kind?: unknown } } | undefined
-        if (ev.type === 'turn/start') {
-            if (typeof d?.turn === 'number') { curTurn = d.turn; curStep = 0; turnStartSeq.set(d.turn, ev.seq) }
+    let atSnapshot = cloneInboxClaimState(state)
+    for (let i = from; i < events.length; i += 1) {
+        if (i === snapshotAt) {
+            atSnapshot = cloneInboxClaimState(state)
             continue
         }
-        if (ev.type === 'step/start') {
-            if (typeof d?.step === 'number') curStep = d.step
-            continue
-        }
-        if (ev.type === 'agent/inbox/spliced') {
-            const fold = typeof d?.target === 'string' ? folds[d.target] : undefined
-            if (fold === undefined || typeof d?.start !== 'number') continue
-            const start = d.start
-            const removedCount = typeof d.removedCount === 'number' ? d.removedCount : 0
-            const inserted = makeMsgs(d.inserted)
-            if (removedCount > 0 && d.outcome !== 'canceled') {
-                const msgs = materialize(fold.pending)
-                const claimed = msgs.splice(start, removedCount, ...inserted)
-                fold.pending = { kind: 'snapshot', msgs }
-                fold.current = new Set(claimed.map((m) => m.id))
-                fold.claimSeq = ev.seq
-                fold.claimedHuman = claimed.some((m) => m.human)
-            } else {
-                for (const m of inserted) fold.current.delete(m.id)
-                fold.pending = { kind: 'splice', previous: fold.pending, start, removedCount, inserted }
-            }
-            continue
-        }
-        if (ev.type !== 'user/message') continue
-        const id = typeof d?.id === 'string' ? d.id : ''
-        if (id === '') continue
-        const srcKind = typeof d?.source?.kind === 'string' ? d.source.kind : ''
-        const nextStep = folds['next-step']
-        const nextTurn = folds['next-turn']
-        if (srcKind === 'user') {
-            if (nextStep.current.has(id)) steering.add(id)
-            continue
-        }
-        // idleSteer（镜像上游 message.ts）：回合第 1 步、该 turn 由 next-step 认领开始（next-turn 认领早于回合起点）、
-        // 认领批不含人类，且本条在认领批里 —— 这三条一起才算「唤醒本轮」。
-        const tStart = turnStartSeq.get(curTurn)
-        const idleSteer = curStep === 1 && tStart !== undefined
-            && nextStep.claimSeq > tStart && nextTurn.claimSeq < tStart
-            && nextStep.claimedHuman === false && nextStep.current.has(id)
-        if (nextTurn.current.has(id) || idleSteer) waking.add(id)
+        applyInboxClaimEvent(state, events[i] as SessionEvent, steering, waking)
     }
-    return { steering, waking }
+    return { steering, waking, state, atSnapshot }
 }
-export function buildChatNodes(events: readonly SessionEvent[]): ChatNodeModel {
+
+/**
+ * 全量建节点。
+ * @param events - 事件表。
+ * @param inboxState - 收件箱认领的**起始状态**：续折路径传断点那份的副本（尾巴之外发生的
+ *   认领只有它知道，重扫尾巴推不出来）；全量路径省略 = 从零开始读整窗。
+ */
+export function buildChatNodes(events: readonly SessionEvent[], inboxState?: InboxClaimState, capture?: { at: number; state?: InboxClaimState }): ChatNodeModel {
     const timeline = buildTimeline(events)
     // 事件 seq → 时刻（合成节点靠最近真实事件的时刻）。
     const timeOfSeq = new Map<number, number>()
@@ -892,7 +949,10 @@ export function buildChatNodes(events: readonly SessionEvent[]): ChatNodeModel {
         if (turn !== undefined && typeof ev.seq === 'number') turnChanges.set(turn, ev.seq)
     }
     // 收件箱认领（按每条消息所在位置判）：next-step = 插话（steering）、next-turn = 唤醒本轮（waking）。
-    const inboxClaims = inboxClaimsByMessage(events)
+    // 从 `inboxState` 起读：续折时它带着切片起点**之前**的收件箱状态（见 `readInboxClaims`）。
+    const inboxClaims = readInboxClaims(events, 0, inboxState === undefined ? createInboxClaimState() : inboxState, capture === undefined ? -1 : capture.at)
+    // 捎带给调用方的「折到 `capture.at` 之前」的状态快照（续折断点要用；不再为它多跑一趟扫描）。
+    if (capture !== undefined) capture.state = inboxClaims.atSnapshot
     // 每回合用量/计时（镜像宿主 buildStats 口径）。
     const turnStats = buildTurnStats(events)
     // 1. assistant-step：按 (turn, step) 累积块。
@@ -1286,6 +1346,14 @@ export interface NodesCheckpoint {
     windowHeadSeq: number | undefined
     windowLen: number
     prefix: ChatNodeModel
+    /**
+     * 尾巴起点**之前**的收件箱认领状态（见 `readInboxClaims`）。
+     *
+     * 必须有：续折只重折 `tailStart` 起的尾巴，而「进收件箱」的 `agent/inbox/spliced` 常在尾巴之前、
+     * 「认领」的那条在尾巴之内 —— 少了这份状态，那次认领在尾巴里推不出来，触发卡会晚整整一轮
+     *（真机 2026-10-13）。全量时留的是折到 `tailStart` 那一刻的快照。
+     */
+    inboxState: InboxClaimState
 }
 
 function mergeModels(a: ChatNodeModel, b: ChatNodeModel): ChatNodeModel {
@@ -1317,11 +1385,16 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
         windowHeadSeq === checkpoint.windowHeadSeq &&
         windowLen >= checkpoint.windowLen
     if (usable && checkpoint !== undefined) {
-        const tail = buildChatNodes(events.slice(checkpoint.tailStart))
+        // 尾巴从断点的收件箱状态**接着读**（喂副本：断点那份要留给下一帧复用）。
+        const tail = buildChatNodes(events.slice(checkpoint.tailStart), cloneInboxClaimState(checkpoint.inboxState))
         const model = mergeModels(checkpoint.prefix, tail)
-        return { model, checkpoint: { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix: checkpoint.prefix } }
+        return { model, checkpoint: { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix: checkpoint.prefix, inboxState: checkpoint.inboxState } }
     }
-    const model = buildChatNodes(events)
+    // 断点要留下的「尾巴起点之前」的收件箱状态：让全量那次读数**捎带**一份快照 ——
+    // 不额外多跑一趟扫描（打开大会话的路径上，多一趟线性读数就是白付一次 O(窗口)）。
+    const capture: { at: number; state?: InboxClaimState } = { at: lastTurnStart }
+    const model = buildChatNodes(events, undefined, capture)
+    const inboxState = capture.state ?? createInboxClaimState()
     // `prefix` = 最后一条 `turn/start` 之前（已定稿回合）的模型，供**后续帧**续折用。
     //
     // ⚠️ **2026-10-12 去掉一次重复折叠**：原先这里是 `buildChatNodes(events.slice(0, lastTurnStart))`，
@@ -1359,7 +1432,7 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
     })()
     return {
         model,
-        checkpoint: lastTurnStart >= 0 ? { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix } : undefined,
+        checkpoint: lastTurnStart >= 0 ? { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix, inboxState } : undefined,
     }
 }
 

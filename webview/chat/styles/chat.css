@@ -365,7 +365,12 @@
    * 尺寸仍由 `img` 决定"），但 CSS 里**从未落地** —— 于是它吃浏览器默认样式
    *（原生 button 有 border/padding/background），图片旁边会多出一圈描边与内距。
    */
-  .msg.user .body .user-att-btn {
+  /* 本地内联那张（**只在还没入档时兜底**）：与附件层 `.att-item` 同款 —— 无边框、圆角、不铺满。
+   少了它，原生 `<button>` 会带一圈亮边框、`<img>` 会按气泡宽度铺满（真机 2026-10-14："上面那个带边框的图"）。 */
+.msg.user .user-atts .user-img { line-height: 0; }
+.msg.user .user-atts .user-att-btn { display: block; padding: 0; border: none; background: none; cursor: zoom-in; border-radius: 8px; overflow: hidden; }
+.msg.user .user-atts .user-att-btn img { display: block; max-width: 100%; max-height: 240px; border: none; border-radius: 8px; }
+.msg.user .body .user-att-btn {
     padding: 0; margin: 0; border: 0; background: none; line-height: 0;
     display: block; border-radius: 8px; cursor: pointer;
   }
@@ -569,9 +574,10 @@
   height: 100%;
 }
 /* 换行按钮：按**卡片**状态二选一（上游 `wrapped ? Nowrap : Wrap`，`CodeToolbar.tsx:51`）。
-   `data-code-wrap="true"` = 已开启自动换行 → 显示「取消换行」图标。 */
-.md-code[data-code-wrap='true'] .md-code-ico-wrap { display: none; }
-.md-code[data-code-wrap='false'] .md-code-ico-nowrap { display: none; }
+   `data-code-wrap="true"` = 已开启自动换行 → 显示「取消换行」图标。
+   选择器**只看属性、不限卡片种类**：代码卡与差异卡共用同一套工具条（上游两处都是 `CodeToolbar`）。 */
+[data-code-wrap='true'] .md-code-ico-wrap { display: none; }
+[data-code-wrap='false'] .md-code-ico-nowrap { display: none; }
 /* 复制按钮：按**自身**状态二选一（上游 `copied ? Check : Copy`，`CodeToolbar.tsx:56`）。 */
 .md-code-act[data-copied='true'] .md-code-ico-copy { display: none; }
 .md-code-act:not([data-copied='true']) .md-code-ico-check { display: none; }

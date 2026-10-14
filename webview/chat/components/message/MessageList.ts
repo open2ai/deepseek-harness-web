@@ -162,7 +162,7 @@ export function MessageList({ store }: { store: ChatStore }) {
     if (next === held.top) return
     el.scrollTop = next
     followRef.current?.settle()
-  }, [store.messages.value])
+  }, [(store.visibleRows ?? store.messages).value])
 
   /**
    * **行 → 座位**：每一条渲染行都带上"它属于哪个座位"。
@@ -212,7 +212,9 @@ export function MessageList({ store }: { store: ChatStore }) {
   }
 
   if (!visible) return null
-  const rows = store.messages.value
+  // **渲染只读推导后的行表**：耐久行 + 还没进日志的会话级回显（上游 `ChatView` 的 visible × pending 合并）。
+  // `?? store.messages`：只给「手搭桩 store 的老夹具」留一条退路（真实 store 两个切片都在，见 `messages.ts`）。
+  const rows = (store.visibleRows ?? store.messages).value
   /**
    * **回合座位事实**（座位层，见 `core/nodes/seat-facts.ts`）：头 / 段数 / 当前世代由**座位计划**说话。
    *

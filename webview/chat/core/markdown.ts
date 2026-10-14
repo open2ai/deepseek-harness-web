@@ -1,8 +1,8 @@
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import katex from 'katex'
-// 代码块工具栏的四个图标：**逐字节取自上游 artwork**（`ui-primitives/src/icons/index.tsx`），
-// 不是近似自绘 —— 上游 `CodeToolbar.tsx:51,56` 用的就是这四个，尺寸 `size={14}`。
+// 代码块工具栏的四个图标：**逐字节取自上游 artwork**（不是近似自绘；尺寸那一档是 14）。
+// 图标串本身在 `./code-icons`（与上游 artwork 逐字节同形）。
 import { CODE_ICON_CHECK, CODE_ICON_COPY, CODE_ICON_NOWRAP, CODE_ICON_WRAP } from './code-icons'
 // 样式在**入口**引入（`chat.ts`）：这里只留 JS 依赖，Node 侧守卫打包本模块时不会牵进字体资源。
 // 上游在 内联引 CSS；插件按自己的打包方式把这条挪到入口，效果同（样式仍在同一份 chat.css 里）。
@@ -163,7 +163,7 @@ md.renderer.rules.fence = (tokens, idx, _options, env) => {
   /*
    * **四个图标都进 DOM、由 CSS 按状态显隐**（上游是按状态二选一渲染）——
    * 工具栏走 document 级事件委托，点一下只改属性、不动 vdom，CSS 显隐天然避开"重渲染把就地改的状态冲掉"。
-   * 取值逐条对齐上游 `CodeToolbar.tsx:49-58`：
+   * 取值逐条对齐上游：
    *   · 换行按钮：`aria-label` **固定**是 `labels.wrapLabel`（不随状态改），跟随状态的是
    *     `aria-pressed={wrapped}`（默认 `data-code-wrap="true"` ⇒ `"true"`）与 Tooltip 文案（这里用 `title`）；
    *   · 复制按钮：可访问名 `copied ? copiedLabel : copyLabel`，这里初始为 `copy`。

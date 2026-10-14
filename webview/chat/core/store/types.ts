@@ -499,9 +499,34 @@ export interface GoalActivationView {
 /**
  * 聊天 store 的完整面对外形状：各切片自己声明一块，这里组合。
  */
+/**
+ * 一条**会话级本地回显**（上游 `PendingSubmission` 同构：`requestId` + `placement` + 内容）。
+ * `placement` 与上游同义（`session.ts:230`）：空闲直发 = `transcript`；忙时排队 = `queued`；
+ * 忙时插话 = `steering`。`queued` 那类由队列卡表示、**不进对话流**（上游 `ChatView.tsx:191` 同款排除）。
+ */
+export interface PendingEcho {
+  readonly rpcId: string
+  readonly placement: 'transcript' | 'queued' | 'steering'
+  readonly text: string
+  readonly time: number
+  readonly images: ImageAttachment[]
+  readonly imageRefs?: AttachmentRef[]
+  readonly files?: Array<{ name: string; path?: string; bytes?: number; attachmentId?: string }>
+  readonly refs?: RefSnap[]
+  /** 本地失败或被放弃（宿主台账退休为 `failed`）：留着但标成「未提交成功」。 */
+  readonly failed?: boolean
+}
+
 export interface ChatStore {
   // 信号
   messages: Signal<ChatRow[]>
+  /**
+   * **会话级本地回显**（上游 `SessionSnapshot.pendingSubmissions` 同构）：刚发出去、还没进日志那条。
+   * 退休由 `applySubmissions` 单点负责（见 `08` §13.3）。
+   */
+  pendingEchoes: Signal<readonly PendingEcho[]>
+  /** **渲染用的行表（推导）**：耐久行按 `rpcId` 去重 ∪ 未进日志的回显；渲染只读它，不读 `messages`。 */
+  visibleRows: Signal<readonly ChatRow[]>
   view: Signal<'welcome' | 'chat'>
   processing: Signal<boolean>
   /**

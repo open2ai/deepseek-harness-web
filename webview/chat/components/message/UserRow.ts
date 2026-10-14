@@ -31,14 +31,21 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
   return html`<div class="msg user${latest ? ' latest' : ''}"><div class="col">
     ${hasAtts
       ? html`<div class="user-atts">
-          ${row.images.map(
-            (img: ImageAttachment) =>
-              html`<div class="user-img" key=${img.name}><button type="button" class="user-att-btn"
-                title=${img.name || '在编辑区打开'}
-                onClick=${() => store.openAttachmentBytes(img.data, img.mediaType, img.name)}>
-                <img src=${`data:${img.mediaType};base64,${img.data}`} alt=${img.name || '图片'} />
-              </button></div>`
-          )}
+          ${/* 图片**只画一次**，且**优先权威那一路**：认领时 `messages.ts:454` 会把本地内联字节搬到权威行上，
+               而权威行自带 `imageRefs`（内容寻址）—— 两条路都画就是同一张图出现两遍（真机 2026-10-14）。
+               维护者定案：**要附件层那张、不要本地内联那张**（本地那张是 `<img src="data:…">` 套一个
+               原生 `<button>`，铺满且带按钮边框）。只有还没入档（行上没有 `imageRefs`）时才退回本地字节 ——
+               否则刚粘贴的那一瞬间会没有图。 */ ''}
+          ${row.imageRefs && row.imageRefs.length > 0
+            ? html`<div class="user-img"><${AttachmentGallery} store=${store} images=${row.imageRefs} /></div>`
+            : row.images.map(
+                (img: ImageAttachment) =>
+                  html`<div class="user-img" key=${img.name}><button type="button" class="user-att-btn"
+                    title=${img.name || '在编辑区打开'}
+                    onClick=${() => store.openAttachmentBytes(img.data, img.mediaType, img.name)}>
+                    <img src=${`data:${img.mediaType};base64,${img.data}`} alt=${img.name || '图片'} />
+                  </button></div>`
+              )}
           ${row.files && row.files.length > 0
             ? html`<div class="user-files">${row.files.map((f, i) => {
                 const meta = [fileExt(f.name), fileSizeText(f.bytes)].filter(Boolean).join(' ')
@@ -58,9 +65,7 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
                       onClick=${open}>${inner}</button>`
               })}</div>`
             : null}
-          ${row.imageRefs && row.imageRefs.length > 0
-            ? html`<div class="user-img"><${AttachmentGallery} store=${store} images=${row.imageRefs} /></div>`
-            : null}
+          ${/* （附件层那条已挪到上面与本地字节同一个三元里：两条路只走一条。） */ ''}
         </div>`
       : null}
     <div class="body">

@@ -83,6 +83,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     scrollPend: messages.store.scrollPend,
     // 座位计划（渲染粒度对齐上游 render entry；逐座位改造的输入，只读）
     seatPlan: messages.store.seatPlan,
+    pendingEchoes: messages.store.pendingEchoes,
+    visibleRows: messages.store.visibleRows,
     historyHasMore: messages.store.historyHasMore,
     historyLoading: messages.store.historyLoading,
     historyEvents: messages.store.historyEvents,
