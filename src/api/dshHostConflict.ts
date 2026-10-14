@@ -1,12 +1,23 @@
 // 「同一份 ~/.dsh 上已经跑着别的 dsh 宿主」的判据与文案（**纯函数，无依赖**，便于守卫直测）。
 //
-// 为什么要有这道门（2026-10-10 取证结论）：工作区归属只存在于 `~/.dsh/storages/workspace.json` 的成员表，
-// 而**每个 dsh 宿主进程各持一份"canonical cwd 索引"**——落盘时会把本进程索引里不认识的 id
-// **从成员表里物理删掉**（运行态 `dsh-workspace/lib/types/entity.js` 的 `mutate()`）。
-// 于是两个宿主共用一份 `~/.dsh` 时：A 挂上的会话，B 看不见、还会在下一次写这条记录时把它抹掉。
-// 真机表现正是「新会话跑到未分组」（10/8–10/9 那批 cwd 完全等于工作区路径、却不在成员表里的会话）。
+// 为什么要有这道门：**归属是投影** —— 每个 dsh 宿主只认自己进程内的 live 索引
+//（`packages/workspace/workspace/src/entity.ts`：`rememberSessionPath` 登记、`sessionIds` getter 按它过滤）⇒
+// 两个宿主共用一份 `~/.dsh` 时**各看各的**：对方挂上的会话不显示、新建的会话可能先落「未分组」。
+//
+// ⚠️ **不是"互相删"**（2026-10-10 旧结论，2026-10-14 按上游源码更正）：写回成员表是**合并**，
+// 「本进程不认识」的 id **原样保留**（`index.ts:700-703`）⇒ 归属不会被抹掉，回到原宿主仍在。
+// 10/8–10/9 那份磁盘缺失取证仍是事实，但归因改为同机路径归一化 / live 索引不一致（见 `13` §6）。
 //
 // 插件自起 `dsh web`（随机端口）与用户自己的 DSH Desktop 并存，就是这个地基。
+
+/**
+ * 桌面应用的命令行指纹（**三平台共用一条**）：
+ *   · Windows `…\DeepSeek Harness.exe`；
+ *   · macOS `…/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness`；
+ *   · Linux `deepseek-harness`（也见 `dsh-desktop`，单独一条）。
+ * 只匹配**应用名**，不匹配它加载的插件路径 —— 命中的辅助进程由调用方按 `--type=` 剔除。
+ */
+const DESKTOP_APP_RE = /deepseek[ _-]?harness(\.exe)?/i;
 
 /** 一个正在跑的进程（探测的产物）。 */
 export interface DshHostProcess {
@@ -18,8 +29,13 @@ export interface DshHostProcess {
 /**
  * 从进程列表原文里挑出**别的** dsh 宿主。
  *
- * 判据刻意放宽到"命令行里同时出现 dsh 与 web / dsh-desktop-host"：
+ * 判据刻意放宽到"命令行里出现 dsh / deepseek harness，且像是 web 宿主或桌面应用"：
  * 宁可多报一条（用户点「仍然启动」即可），也不要漏报 —— 漏报的代价是**静默丢工作区归属**。
+ *
+ * ⚠️ **必须跨平台**（2026-10-14）：桌面应用的命令行形状三家都不同 ——
+ * Windows `…\DeepSeek Harness.exe`、macOS `…/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness`、
+ * Linux `deepseek-harness`。原先的候选门只认 `dsh` 子串，而 **macOS 的应用路径里没有 `dsh`**，
+ * 于是那条最该防的"静默丢归属"在 mac 上完全不设防。
  *
  * 支持三种列表形态（各平台/命令的实际输出）：
  *   · `tasklist` 表格式：`映像名称  PID  会话名 …`；
@@ -27,25 +43,35 @@ export interface DshHostProcess {
  *   · `wmic process get ProcessId,CommandLine /format:list`：`CommandLine=…` 与 `ProcessId=1234` **成对分行**。
  *
  * @param listOutput - 原始输出（认不出的行直接跳过，**绝不抛**）。
- * @param selfPid - 本扩展宿主进程 pid（自己的子进程不算"别的宿主"）。
+ * @param selfPid - 本扩展宿主进程 pid。
+ * @param ownPids - **自己人**的 pid（插件自起的 `dsh web` 子进程、以及上一次会话落盘的那个实例）。
+ *   为什么不靠 `selfPid` 一条排除：子进程的 pid 与扩展宿主**必然不同**，命令行又完全长成
+ *   "`bin.js web`"，于是"自己起的那份"会被报成"另一个 DSH" —— 真机表现就是
+ *   「重载窗口/开第二个窗口后弹『检测到另一个 DSH 在运行』」（2026-10-14）。
  * @returns 别的 dsh 宿主（同一 pid 只算一次）。
  */
-export function otherDshHosts(listOutput: string, selfPid: number): DshHostProcess[] {
+export function otherDshHosts(listOutput: string, selfPid: number, ownPids: readonly number[] = []): DshHostProcess[] {
     const out: DshHostProcess[] = [];
     const seen = new Set<number>();
     const lines = listOutput.split(/\r?\n/);
     /** 认一条候选：命令行 + pid；判据都在这一个地方。 */
+    const own = new Set<number>(ownPids.filter((n) => Number.isSafeInteger(n) && n > 0));
     const consider = (command: string, pid: number): void => {
-        if (!Number.isSafeInteger(pid) || pid <= 0 || pid === selfPid || seen.has(pid)) {
+        if (!Number.isSafeInteger(pid) || pid <= 0 || pid === selfPid || own.has(pid) || seen.has(pid)) {
             return;
         }
         const lower = command.toLowerCase();
-        if (!lower.includes('dsh')) {
+        // 候选门：命令行里有 `dsh`，**或**是三家平台各自形态的桌面应用名
+        if (!lower.includes('dsh') && !DESKTOP_APP_RE.test(command)) {
             return;
         }
         // 「dsh web」（插件自起的那种）或 DSH Desktop 宿主
         const isWebHost = lower.includes('bin.js') && /\bweb\b/.test(lower);
-        const isDesktopHost = lower.includes('dsh-desktop-host') || lower.includes('dsh_desktop');
+        const isDesktopHost =
+            lower.includes('dsh-desktop-host') ||
+            lower.includes('dsh_desktop') ||
+            /\bdsh-desktop\b/.test(lower) ||
+            DESKTOP_APP_RE.test(command);
         if (!isWebHost && !isDesktopHost) {
             return;
         }
@@ -77,7 +103,8 @@ export function otherDshHosts(listOutput: string, selfPid: number): DshHostProce
         if (line === '') {
             continue;
         }
-        if (!line.toLowerCase().includes('dsh')) {
+        // 同 `consider` 的候选门：`dsh` 或三平台各自的桌面应用名（mac/Linux 的路径里没有 `dsh`）
+        if (!line.toLowerCase().includes('dsh') && !DESKTOP_APP_RE.test(line)) {
             continue;
         }
         const m = /^(?:"?[^\s"]+"?\s+)?(\d{2,7})\b/.exec(line);
@@ -105,7 +132,9 @@ export function hostConflictDecision(others: readonly DshHostProcess[]): { confi
         return { confirm: false, message: '' };
     }
     const isAux = (command: string): boolean => /--type=/.test(command);
-    const desktop = others.filter((o) => !isAux(o.command) && /deepseek harness\.exe/i.test(o.command));
+    const desktop = others.filter(
+        (o) => !isAux(o.command) && (DESKTOP_APP_RE.test(o.command) || /\bdsh-desktop\b/i.test(o.command))
+    );
     const webHosts = others.filter((o) => /bin\.js/i.test(o.command) && !isAux(o.command));
     const parts: string[] = [];
     if (desktop.length > 0) {
@@ -119,8 +148,8 @@ export function hostConflictDecision(others: readonly DshHostProcess[]): { confi
     return {
         confirm: true,
         message:
-            `检测到另一个 DSH 在运行：${what}。` +
-            `两个宿主共用 ~/.dsh 会互相删掉工作区归属，新会话会掉「未分组」。` +
-            `先关掉它，或把 dsh.port 指向它复用。`,
+            `检测到另一个 DSH 正在运行：${what}。` +
+            `两个一起跑时各自只看得到自己的会话（新会话可能落到「未分组」）。` +
+            `建议关掉它，或把 dsh.port 指向它复用。`,
     };
 }

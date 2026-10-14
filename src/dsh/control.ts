@@ -32,6 +32,14 @@ const RECONNECT_DELAY_MS = 1500;
 const STREAM_TIMEOUT_MS = 10_000;
 /** 上游权限目录变更的 emit 事件名（`API_REMOTE_FORWARDED_EVENTS` 里的转发项）。 */
 const PERMISSION_CATALOG_EVENT = 'permission-presets/catalog-changed';
+/**
+ * 上游**插件集变化**（装/卸/开关 Bundle）的 emit 事件名 —— 权限目录可能跟着变。
+ *
+ * 为什么两条都要订：`registerAuto()` 的 effect 发的是上一条，但真机（2026-10-14）出现
+ * 「在 web 的插件管理里关掉自动授权审查，插件这边权限列表里 `auto` 还在」—— 那条 emit 没到我们这条流。
+ * 上游网页端的插件管理自己就订这一条来刷新的 ，多订一条的代价只是一次目录重读。
+ */
+const PLUGIN_MANAGER_CHANGED = 'plugin-manager/changed';
 /** 上游用来表示「当前值不在目录里」的派生取值（`permission-presets` 的 `custom`）。 */
 const CUSTOM_PRESET = 'custom';
 
@@ -412,15 +420,27 @@ export function followControl(handlers: DshControlHandlers): DshControlHandle {
     const refreshPermissionCatalog = (): void => {
         void readPermissionPresetCatalog()
             .then((catalog) => {
-                if (stopped || catalog === undefined) {
+                if (stopped) {
                     return;
                 }
+                if (catalog === undefined) {
+                    // 形状不符 = 老版本没有这条 remote（0.1.5-rc.2）：目录恒为 undefined，
+                    // `withPermissionOptions` 原样透传，走该代投影自带的 options。**这是正常的**，只记一行。
+                    console.warn('[dsh-control] 权限目录不可用（形状不符或老版本）：继续用投影自带的 options');
+                    return;
+                }
+                const before = permissionCatalog?.length ?? 0;
                 permissionCatalog = catalog.options;
+                // **正向日志**（2026-10-14）：目录刷没刷、刷成几项，只在这一行看得出来 ——
+                // 报「web 里开了自动授权审查，插件权限列表里还是没有 auto」时，先看这行在不在、值几。
+                console.log(`[dsh-control] 权限目录已刷新：${String(before)} → ${String(catalog.options.length)} 项（${catalog.options.map((o) => o.value).join(', ')}）`);
                 republishPermissions();
             })
-            .catch(() => {
-                // 0.1.5-rc.2 没有 permissionPresets/catalog：目录恒为 undefined，
-                // 此时 withPermissionOptions 原样透传，走的是该代投影自带的 options。
+            .catch((error: unknown) => {
+                // ⚠️ **不许静默**：`permissionPresets/catalog` 读失败时若一声不吭，
+                // 表现就是「插件管理里开了自动授权审查，权限列表里却不出现 auto」——
+                // 因为回退用的是投影里那份**静态**选项表（没有动态注册的预设）。
+                console.warn(`[dsh-control] 权限目录读取失败（保留上一次的目录）：${error instanceof Error ? error.message : String(error)}`);
             });
     };
 
@@ -445,7 +465,8 @@ export function followControl(handlers: DshControlHandlers): DshControlHandle {
         stopCatalogEvents?.();
         stopCatalogEvents = dshEvents.subscribeStream({
             onEmit: (event) => {
-                if (event === PERMISSION_CATALOG_EVENT) {
+                // 目录失效有两条来路，都刷（见两个常量的文档）：预设贡献变化 / 插件集启停。
+                if (event === PERMISSION_CATALOG_EVENT || event === PLUGIN_MANAGER_CHANGED) {
                     refreshPermissionCatalog();
                 }
             },

@@ -2,6 +2,12 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.16] — 2026-10-11
+
+### 变更
+
+- 会话区优化，工作步骤展示、卡片等优化
+
 ## [0.1.15] — 2026-10-07
 
 ### 变更
@@ -136,3 +142,5 @@ All notable changes to the "deepseek-harness-web" extension will be documented i
 
 - 修复加载与启动相关问题
 - 修复停止后残留与重复面板问题
+- **「检测到另一个 DSH 在运行」判据两处修正**：① **跨平台** —— 原先桌面应用识别写死 `DeepSeek Harness.exe`、两道候选门只认 `dsh` 子串，而 macOS/Linux 的应用路径（`…/DeepSeek Harness.app/Contents/MacOS/…`、`deepseek-harness`）里没有 `dsh` ⇒ 那条防「两个宿主共用 `~/.dsh` ⇒ 归属投影各看各的、新会话先落未分组」的闸在 mac/Linux 上静默失效；② **排除自己人** —— 插件自起的 `dsh web` 子进程（pid 不同、命令行正是 `bin.js web`）会被报成「另一个 DSH」，重载窗口 / 开第二个窗口就弹确认。守卫 `tmp/_hostconflict.test.mjs`（三平台形态 + 只报自己）✓。
+- **双宿主「自起拦截」暂停调用**（2026-10-15）：判据、文案与守卫全部保留，但 `ensureRunning()` 里不再调用（开关常量 `HOST_CONFLICT_GATE: boolean = false`），提示文案改为三句口语。原因：归属丢失机制仍有一条未定性、且弹窗超时会被当成「取消」并锁死本会话。重新启用 = 开关改 `true`。

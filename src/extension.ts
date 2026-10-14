@@ -586,9 +586,24 @@ async function loadChatHtml(
         const content = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(chatRoot, 'index.html'));
         let html = new TextDecoder('utf-8').decode(content);
         html = html.replace(/\s+crossorigin/g, '');
+        /*
+         * 资源 URI 带**构建戳**（页面三件套 mtime 的最大值）。
+         *
+         * 为什么需要（2026-10-14 真机教训）：webview 按 URI 缓存资源，URI 不变时
+         * 「重建 `dist/chat/` + Reload Window」仍会拿到**旧脚本** —— 表现就是「改了页面侧代码，
+         * 界面一点没变」，而宿主侧改动却生效，最容易被误判成热更新坏了。
+         */
+        let stamp = 0;
+        for (const f of ['chat.js', 'chat.css', 'index.html']) {
+            try {
+                stamp = Math.max(stamp, (await vscode.workspace.fs.stat(vscode.Uri.joinPath(chatRoot, f))).mtime);
+            } catch {
+                // 缺文件（首帧竞态）就用已拿到的最大值，不退化成 `?v=0` 之外的东西
+            }
+        }
         html = html.replace(/(src|href)="\.\/([^"]+)"/g, (_match, attr: string, p: string) => {
             const asset = vscode.Uri.joinPath(chatRoot, p);
-            return `${attr}="${webview.asWebviewUri(asset)}"`;
+            return `${attr}="${webview.asWebviewUri(asset)}?v=${String(stamp)}"`;
         });
         // 原生/自绘 标题栏通道：原生标题栏模式时 index.html 的 CSS 让 #titlebar 首帧即 display:none
         html = html.replace('<body>', `<body ${TITLEBAR_MODE_ATTR}="${titlebarMode}">`);
@@ -710,6 +725,8 @@ function ensureSettingsFollow(): void {
             '────────────────────────',
         ].join('\n')
     );
+    // 诊断出口接到**会落盘**的通道（`console.*` 只进即时通道，事后查不到 —— 2026-10-14 踩过）。
+    dsh.setLogger(logRows);
     dsh.subscribeChatPrefs(() => {
         void postChatPrefs();
     });
@@ -717,6 +734,8 @@ function ensureSettingsFollow(): void {
     // 短窗口内合并（防滑杆/连续改动打一串 RPC）；到点只发最后一次。
     let settingsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     dsh.subscribeSettingsDocument(() => {
+        // 留痕：这一行在不在，决定「web 里拨开关后权限列表没变」是**没通知**还是**通知了没生效**。
+        logRows('[权限] 设置文档变化 ⇒ 失效目录并重推 chatInfo');
         if (settingsRefreshTimer !== undefined) {clearTimeout(settingsRefreshTimer);}
         settingsRefreshTimer = setTimeout(() => {
             settingsRefreshTimer = undefined;
@@ -1414,9 +1433,9 @@ function setupChatWebview(
             void (async () => {
                 try {
                     const doc = await dsh.readAgentPreset(msg.agentPreset);
+                    // 来源：dsh agentPresets/read（viewing only）
                     const header =
                         `# dsh agent preset: ${doc.agentPreset}${doc.name === undefined ? '' : ` (${doc.name})`}\n` +
-                        '# 来源：dsh agentPresets/read（上游标注 for viewing only）\n' +
                         '# 仅供查看：编辑不会生效，改动模式声明请去 dsh 侧。\n\n';
                     const text = await vscode.workspace.openTextDocument({ content: header + doc.content, language: 'yaml' });
                     await vscode.window.showTextDocument(text, { preview: true });

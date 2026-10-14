@@ -64,14 +64,16 @@ export function DiffCard({ card, store }: { card: DiffCardData; store: ChatStore
           aria-label=${CODE_COPY_LABELS.wrap} aria-pressed=${wrapped ? 'true' : 'false'}
           title=${wrapped ? CODE_COPY_LABELS.unwrap : CODE_COPY_LABELS.wrap}
           onClick=${() => setWrapped((w) => !w)}>
-          <span class="md-code-ico md-code-ico-wrap">${CODE_ICON_WRAP}</span>
-          <span class="md-code-ico md-code-ico-nowrap">${CODE_ICON_NOWRAP}</span>
+          ${/* 图标是**上游原样的 HTML 串**（`core/code-icons.ts`）：htm 模板里插值会被转义，
+               必须走 `dangerouslySetInnerHTML` —— 否则页面上会出现一大段 SVG 源码文本（2026-10-15 真机）。 */ ''}
+          <span class="md-code-ico md-code-ico-wrap" dangerouslySetInnerHTML=${{ __html: CODE_ICON_WRAP }}></span>
+          <span class="md-code-ico md-code-ico-nowrap" dangerouslySetInnerHTML=${{ __html: CODE_ICON_NOWRAP }}></span>
         </button>
         <button type="button" class="md-code-act" data-diff-copy data-copied=${copied ? 'true' : undefined}
           aria-label=${copied ? CODE_COPY_LABELS.copied : CODE_COPY_LABELS.copy} title=${CODE_COPY_LABELS.copy}
           onClick=${copy}>
-          <span class="md-code-ico md-code-ico-copy">${CODE_ICON_COPY}</span>
-          <span class="md-code-ico md-code-ico-check">${CODE_ICON_CHECK}</span>
+          <span class="md-code-ico md-code-ico-copy" dangerouslySetInnerHTML=${{ __html: CODE_ICON_COPY }}></span>
+          <span class="md-code-ico md-code-ico-check" dangerouslySetInnerHTML=${{ __html: CODE_ICON_CHECK }}></span>
         </button>
       </span>
     </div>

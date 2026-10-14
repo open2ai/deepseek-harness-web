@@ -110,6 +110,17 @@ const NODE_REQUIREMENT = '^22.19.0 || >=24.0.0';
  */
 const OWNED_ENDPOINT_KEY = 'dsh.ownedEndpoint';
 
+/**
+ * 双宿主「自起拦截」开关。**2026-10-15 起关闭**（判据、文案、守卫都留着，只是先不拦）。
+ *
+ * 为什么关：① 归属丢失的机制还有一条未定性（`13` §6：磁盘缺失更像同机路径归一化，而非跨宿主写回）；
+ * ② 弹窗体验待改 —— 平台通知 12 s 自动消失，超时会被当成「取消」，还会把本会话锁死（`13` §5）。
+ *
+ * 注意 `: boolean` 是**故意的**：不写的话 TS 会把类型收窄成字面量 `false`，`if` 里那段就成了不可达代码，
+ * 以后若有人打开 `allowUnreachableCode` 检查会误报。
+ */
+const HOST_CONFLICT_GATE: boolean = false;
+
 // 断点续折的校验抽样策略在 `dsh/rows/checkpoint-verify.ts`（零依赖模块，守卫可直接调用断言行为；
 // 放这里的话守卫一 import 就把 `vscode` 拉进来，判据只能退化成搜源码字符串）。
 // 见该文件里两个间隔的理由：小会话 5、大会话 50（那一次是全量重折，成本随窗口线性涨）。
@@ -152,14 +163,22 @@ function isProcessAlive(pid: number): boolean {
  * 扫一遍**别在跑的 dsh 宿主**（只探测，不动它们）。
  *
  * 为什么需要：工作区归属只活在 `~/.dsh/storages/workspace.json`，而每个 dsh 宿主进程各持一份
- * canonical-cwd 索引、落盘时会把不认识的会话 id **从成员表物理删掉**。两个宿主共用一份 `~/.dsh` 时
- * 归属会被互相抹掉（真机：新会话掉进「未分组」）。判据与文案在 `./dshHostConflict`（纯函数、有守卫）。
+ * canonical-cwd 索引（本进程碰到某会话时才登记）⇒ 两个宿主共用一份 `~/.dsh` 时**各看各的**：
+ * 对方挂上的会话不显示、新建的会话可能先落「未分组」。**归属不会被删**（上游写回成员表时是合并，
+ * 见 `dshHostConflict.ts` 头部的更正说明）。判据与文案在 `./dshHostConflict`（纯函数、有守卫）。
  *
  * @returns 别的宿主的 {pid, command}（探测失败一律返回空 —— **不因为探测不了就拦住启动**）。
  */
-function scanOtherDshHosts(): Promise<Array<{ pid: number; command: string }>> {
+/**
+ * 扫"别的 dsh 宿主"。
+ *
+ * @param ownPids - **自己人**的 pid（自起子进程 + 上次落盘的实例），交给 `otherDshHosts` 一并排除 ——
+ *   否则重载窗口/开第二个窗口时，插件会把自己上一次起的 `dsh web` 报成"另一个 DSH"（2026-10-14 真机）。
+ */
+function scanOtherDshHosts(ownPids: readonly (number | undefined)[]): Promise<Array<{ pid: number; command: string }>> {
     return new Promise((resolve) => {
         const selfPid = process.pid;
+        const own = ownPids.filter((n): n is number => typeof n === 'number');
         const isWin = process.platform === 'win32';
         const run = (cmd: string, args: string[]): Promise<string> =>
             new Promise((done) => {
@@ -169,7 +188,7 @@ function scanOtherDshHosts(): Promise<Array<{ pid: number; command: string }>> {
             });
         void (async () => {
             if (!isWin) {
-                resolve(otherDshHosts(await run('ps', ['-eo', 'pid=,args=']), selfPid));
+                resolve(otherDshHosts(await run('ps', ['-eo', 'pid=,args=']), selfPid, own));
                 return;
             }
             // Windows：wmic 还在就用它（最快）；已被移除的系统退 PowerShell 的 CIM 查询。
@@ -181,7 +200,7 @@ function scanOtherDshHosts(): Promise<Array<{ pid: number; command: string }>> {
                     'Get-CimInstance Win32_Process | ForEach-Object { "CommandLine=" + $_.CommandLine; "ProcessId=" + $_.ProcessId }',
                 ]);
             }
-            resolve(otherDshHosts(text, selfPid));
+            resolve(otherDshHosts(text, selfPid, own));
         })();
     });
 }
@@ -898,23 +917,26 @@ export class DshService {
                 vscode.window.showErrorMessage(`dsh.port 配置的端口 ${cfgPort} 没有检测到 DSH 服务在运行`);
                 return false;
             }
-            // ②-b **同一份 ~/.dsh 上已经有别的 dsh 宿主在跑？**（2026-10-10 真机取证）
+            // ②-b 「同一份 ~/.dsh 上已经有别的 dsh 宿主在跑？」—— **默认不拦**（开关见 `HOST_CONFLICT_GATE`）。
             //
-            // 工作区归属只存在于 ~/.dsh/storages/workspace.json 的成员表，而每个宿主进程落盘时会
-            // 把本进程索引不认识的会话 id **从成员表删掉** —— 两个宿主的归属会互相抹掉，真机表现
-            // 就是「新会话跑到未分组」。自起第二个宿主之前必须让用户知道，别静默制造这个局面。
-            // 用户点「仍然启动」才继续（默认取消：把选择权留在用户手里）。
-            const others = await scanOtherDshHosts();
-            const conflict = hostConflictDecision(others);
-            if (conflict.confirm) {
-                // 已提醒过、用户没选「仍然启动」→ 本会话不再重复弹，直接不自起
-                if (this.hostConflictDismissed) {
-                    return false;
-                }
-                const pick = await vscode.window.showWarningMessage(conflict.message, '仍然启动');
-                if (pick !== '仍然启动') {
-                    this.hostConflictDismissed = true;
-                    return false;
+            // 判据与文案留在 `./dshHostConflict`（纯函数 + 守卫 `tmp/_hostconflict.test.mjs`）。关掉的原因：
+            // 归属机制还有一条未定性（`13` §6），且弹窗体验待改（12 s 自动消失会被当成「取消」并把本会话
+            // 锁死，见 `13` §5）。把开关改成 `true` 即恢复拦截，判据本身不用改。
+            if (HOST_CONFLICT_GATE) {
+                // 「自己人」= 本进程正持有的子进程 + 上一次会话落盘的实例（随机端口，重新发现时可能还没被复用上）
+                const ownedPid = this.ownedState?.get<{ port: number; pid?: number; authUrl?: string }>(OWNED_ENDPOINT_KEY)?.pid;
+                const others = await scanOtherDshHosts([this.dshProcess?.pid, ownedPid]);
+                const conflict = hostConflictDecision(others);
+                if (conflict.confirm) {
+                    // 已提醒过、用户没选「仍然启动」→ 本会话不再重复弹，直接不自起
+                    if (this.hostConflictDismissed) {
+                        return false;
+                    }
+                    const pick = await vscode.window.showWarningMessage(conflict.message, '仍然启动');
+                    if (pick !== '仍然启动') {
+                        this.hostConflictDismissed = true;
+                        return false;
+                    }
                 }
             }
             // ② Node 版本检查
@@ -1456,6 +1478,22 @@ export class DshService {
     }
 
     /**
+     * 诊断出口：扩展层把行写进「DSH 事件窗口」输出通道（**会落盘**，真机排查可读）。
+     *
+     * 为什么需要：`console.*` 只进「扩展宿主」这个即时通道，**不落进** `logs/…/output_logging_*`，
+     * 于是一旦出问题（如「web 开了自动授权审查，权限列表里没有 auto」）事后无从查证（2026-10-14 踩过）。
+     */
+    setLogger(fn: (line: string) => void): void {
+        this.logger = fn;
+    }
+
+    private logger: ((line: string) => void) | undefined;
+
+    private log(line: string): void {
+        this.logger?.(line);
+    }
+
+    /**
      * 懒读一次进程级权限目录（dsh 0.1.7 的 `permissionPresets/catalog`）。
      *
      * 读一次后缓存；**设置文档一变就失效重读**（见 `invalidatePermissionCatalog`）。
@@ -1470,14 +1508,22 @@ export class DshService {
         void readPermissionPresetCatalog()
             .then((catalog) => {
                 if (catalog === undefined) {
+                    // 形状不符 = 老版本没有这条 remote（0.1.5-rc.2）：目录保持 undefined，
+                    // `withPermissionOptions` 原样透传该代投影自带的 options。**这是正常的**，只留一行。
+                    this.log('[权限] 目录不可用（形状不符或老版本）⇒ 用投影自带的 options');
                     return;
                 }
+                const before = this.permissionCatalog?.length ?? 0;
                 this.permissionCatalog = catalog.options;
+                // **正向留痕**（2026-10-14）：目录刷没刷、刷成几项，只在这行看得出来。
+                this.log(`[权限] 目录已读：${String(before)} → ${String(catalog.options.length)} 项（${catalog.options.map((o) => o.value).join(', ')}）`);
                 // 目录晚于首次推送到达：补推一次，让已经打开的页面拿到选项。
                 this.pushProjections();
             })
-            .catch(() => {
-                // 老版本无此前端：保持 undefined，走投影自带的 options。
+            .catch((error: unknown) => {
+                // ⚠️ **不许静默**（2026-10-14）：读失败时若一声不吭，「开了自动授权审查但权限列表里没有 auto」
+                // 这种形状就只能靠猜。老版本（无此前端）会走 `catalog === undefined` 那条正常路径，不打这里。
+                this.log(`[权限] 目录读取失败（保持 undefined，走投影自带的 options）：${error instanceof Error ? error.message : String(error)}`);
             });
     }
 
