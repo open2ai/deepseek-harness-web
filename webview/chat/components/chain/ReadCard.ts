@@ -29,9 +29,10 @@ export function ReadCard({ card, store }: { card: ReadCardData; store: ChatStore
     </div>`
   return html`<div class="read-block">
     <div class="read-banner">
+      ${/* 类型徽标在**路径之前**（对齐上游横幅顺序：language → heading）；除此之外本卡逻辑未动（2026-10-15）。 */ ''}
+      ${card.lang ? html`<span class="read-lang">${card.lang}</span>` : null}
       <span class="read-label">${card.label}</span>
       ${windowed ? html`<span class="read-count">${labels.window(card.lines.length, card.totalLines)}</span>` : null}
-      ${card.lang ? html`<span class="read-lang">${card.lang}</span>` : null}
       <button type="button" class="read-copy" onClick=${copy}>${labels.copy}</button>
     </div>
     <div class="read-body">
