@@ -177,7 +177,7 @@ function toChainItemFromNode(c: RenderChainItem): DshTurnProcessItem {
         summary: deriveToolSummary(c.argsRaw, c.name),
         ...(c.argsRaw === undefined ? {} : { argsRaw: c.argsRaw }),
         status: c.status,
-        // 结果文本要**按官方口径展平**（text 块原样 + 其余块 pretty JSON + 空内容带结构化错误时 `name: code`）。
+        // 结果文本要**按上游口径展平**（text 块原样 + 其余块 pretty JSON + 空内容带结构化错误时 `name: code`）。
         // 早先这里对内容数组直接 `JSON.stringify` —— 于是所有「解析结果文本」的卡（提问卡 / 详情卡 /
         // 终端 / 读文件 / 搜索 / 差异…）拿到的都是一串**包着块的 JSON**，解析全失败：
         // 提问卡真机表现就是「提问 · 未取到回答」（答案 JSON 解析不出来）。
@@ -197,6 +197,9 @@ function toChainItemFromNode(c: RenderChainItem): DshTurnProcessItem {
         ...(c.blocks === undefined ? {} : { blocks: c.blocks }),
         ...(c.parentCallId === undefined ? {} : { parentCallId: c.parentCallId }),
         ...(c.subCalls === undefined ? {} : { subCalls: c.subCalls.map(toSubCallFromNode) }),
+        // **任务清单的 diff 基线**（`todo_write` 专用；从节点模型带过来）。
+        // 漏搬它 = 卡片恒显示「首次记录」，而网页端是「与上次清单相比 · 新增 X…」（真机 2026-10-16）。
+        ...(c.todoBaseline === undefined ? {} : { todoBaseline: c.todoBaseline }),
         ...(c.errorName === undefined ? {} : { errorName: c.errorName }),
         ...(c.errorCode === undefined ? {} : { errorCode: c.errorCode }),
         ...(c.errorReason === undefined ? {} : { errorReason: c.errorReason }),

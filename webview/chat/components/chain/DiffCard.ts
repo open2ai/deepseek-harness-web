@@ -1,4 +1,4 @@
-// 差异卡卡体：文件改动的 diff 渲染（适配上游 0.1.7-rc.2 / `ui-primitives/DiffBlock.tsx`）。
+// 差异卡卡体：文件改动的 diff 渲染（适配上游 0.1.7-rc.2）。
 //
 // 结构逐条对齐上游 ：
 //   ```
@@ -30,7 +30,7 @@ export function DiffCard({ card, store }: { card: DiffCardData; store: ChatStore
   const labels = diffLabels()
   const fold = foldLabels()
   const [expanded, setExpanded] = useState(false)
-  // 换行开关与复制确认：**卡片自己持有状态**（上游 `DiffBlock.tsx:170-172` 的 `useState`，`CodeToolbar` 只是展示件）
+  // 换行开关与复制确认：**卡片自己持有状态**（上游也是组件内 `useState`，`CodeToolbar` 只是展示件）
   const [wrapped, setWrapped] = useState(false)
   const [copied, setCopied] = useState(false)
   const { rows, added, removed, files } = diffRows(card.diffs)

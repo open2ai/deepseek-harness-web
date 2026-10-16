@@ -98,12 +98,19 @@ export function todoDiffModel(
   for (const item of current.items) {
     const before = previousByTitle.get(item.title)
     previousByTitle.delete(item.title)
+    /**
+     * ⚠️ **这个游标对每一条当前项都要前进**：它用来判"这一项在保留项里的位次
+     * 是否与它当前的位次一致"（= 顺序有没有被调整）。原先只在"这条在旧表里也有"的那一支里 `+= 1`
+     * —— 新增项会把游标落下，后面本该判"顺序调整"的项被静默算成"未变化"（连计数器都不对）。
+     * 与上游同一支的写法对齐：先取旧位次、**无条件前进**，再判状态/顺序。
+     */
+    const retainedAt = retainedPositions.get(item.title)
+    const moved = retainedAt !== undefined && retainedAt !== retainedIndex
+    retainedIndex += 1
     if (before === undefined) {
       added += 1
       items.push({ ...item, change: { value: 'added', label: '新增' } })
     } else {
-      const moved = retainedPositions.get(item.title) !== retainedIndex
-      retainedIndex += 1
       const statusChanged = before.status?.value !== item.status?.value
       if (statusChanged || moved) {
         updated += 1

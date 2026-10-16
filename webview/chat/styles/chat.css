@@ -241,26 +241,25 @@
    */
   .msg-col > .turn-anchor[data-blank='true'] { height: 0; margin-top: 0; overflow: hidden; }
   /**
-   * 行间间距**逐档写，不用 `gap`**（2026-10-12 修正）。
+   * 行间间距：**参考上游**（此前是插件自己手写的三条逐档 margin）。
    *
-   * `gap` 对 `[hidden]` 的兄弟**照样占位** —— 折起的行会留下 16px 空洞，
-   * 而"折起 = 不占位"正是上面那条要保证的事，两者互相矛盾。
-   * 三档取值与上游实测一致：默认 6px、回答块 12px（含其后那一条）、承控制行 16px。
-   */
-  .msg-col > .turn-anchor:not([hidden]):not(:first-child) { margin-top: 6px; }
-  /**
-   * **承控制行的那条锚恒定 16px 上距**（上游 `ChatView.module.css` 的 turn-process 一档）。
-   * 用 `:not(:first-child)` 是为了让会话首行不留空档（与上游一致）。
-   */
-  .msg-col > .turn-anchor[data-turn-process-head]:not([hidden]):not(:first-child) { margin-top: 16px; }
-  /**
-   * **回答块那一档 12px**（上游 `response + next`）。
+   * 上游的做法是"**一档变量 + 一条通用 margin**"，不是逐档写 margin：
+   *   · 一条通用规则给"可见且非空"的兄弟加 `margin-top: var(--dsh-chat-flow-gap, 6px)`；
+   *   · 谁想影响**自己后面那一档**，就在**自己身上**设这个变量（response 之后 12px、
+   *     承控制行的那条 16px、运行状态行 12px）。
+   * 这样间距天然是"前一项说了算"，而且**折起 / 空的项既不占位也不参与这一档**
+   *（上游两条硬约束：`:not([hidden])`、`:not(:empty)`）。
    *
-   * ⚠️ 选择器必须落在**真实承载属性的那一层**：`data-turn-process-answer` 挂在 `.msg` 上，
-   * 而这条规则原先写成 `.turn-anchor[data-turn-process-answer]` —— **永远不匹配**，
-   * 上游那一档从来没生效过（2026-10-12 核对上游时发现的老问题）。
+   * 本插件的等价物：折起的行是 `[hidden]`；"空的座位"用**空白行标记**表达
+   *（`data-blank='true'`，见上面那条与 `MessageList` 的判据）。
    */
-  .msg-col > .turn-anchor:has(> .msg[data-turn-process-answer]):not([hidden]) + .turn-anchor:not([hidden]) { margin-top: 12px; }
+  .msg-col > .turn-anchor:not([hidden]):not([data-blank='true']):not(:first-child) { margin-top: var(--dsh-chat-flow-gap, 6px); }
+  /* 回答块之后那一档 12px（上游 `data-chat-group-part="response"` 的 12px 与 `response + next` 的 12px）。
+     ⚠️ 属性落在**真实承载它的那一层**：`data-turn-process-answer` 挂在 `.msg` 上（不是 `.turn-anchor`）。 */
+  .msg-col > .turn-anchor:has(> .msg[data-turn-process-answer]) { --dsh-chat-flow-gap: 12px; }
+  /* 承控制行的那条锚：自己 16px 上距，并把它作为"下一档 16px"的来源（上游 turn-process 一档）。 */
+  .msg-col > .turn-anchor[data-turn-process-head]:not([hidden]):not([data-blank='true']):not(:first-child) { margin-top: 16px; }
+  .msg-col > .turn-anchor[data-turn-process-head] { --dsh-chat-flow-gap: 16px; }
   /**
    * **上一格是"空过程位"时，列内那一档也不留**（2026-10-12）。
    *
@@ -298,6 +297,15 @@
    *（真机 2026-10-07）。显式声明后：折起 = 整区不渲染，且**仍可被 Ctrl+F 命中唤出**（`beforematch`）。
    */
   .chain-body[hidden] { content-visibility: hidden; }
+  /**
+   * **答句体折起时同样要显式声明**（与上一条同因，2026-10-16 补齐）。
+   *
+   * 折起一个已完成的回合时，答句体挂的是 `hidden="until-found"`（要保住 Ctrl+F 能命中并唤出）——
+   * 一样不能只靠宿主 UA 样式：那一段一旦被别的规则碰到，属性还在、**正文照样占着高度**，
+   * 屏幕上就是"横线下面一大块空白、里面什么都没有"（维护者两次看到的就是这个形状）。
+   * 显式写出来之后：折起 = 不占位、不渲染，且仍可被查找唤出。
+   */
+  .body[hidden] { content-visibility: hidden; }
   .msg { display: flex; gap: 10px; align-items: flex-start; }
   .msg .avatar {
     width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;

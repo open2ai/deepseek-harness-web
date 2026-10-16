@@ -324,7 +324,7 @@ export function scheduleFrequency(value: unknown): string | null {
  */
 /**
  * 时区标签（镜像上游 ui-schedule 的 `zoneLabel`）：`UTC+08:00 · 中国标准时间`。
- * 详情卡用的是 IANA 原文（`ui-tool`），而**回合尾部卡**用的是这个本地化标签（`ui-schedule`）——
+ * 详情卡用的是 IANA 原文，而**回合尾部卡**用的是这个本地化标签（`ui-schedule`）——
  * 两张卡的上游来源不同，别混用。未知时区逐级退回：标签 → 偏移 → IANA 名。
  */
 function zoneLabel(zone: string): string {

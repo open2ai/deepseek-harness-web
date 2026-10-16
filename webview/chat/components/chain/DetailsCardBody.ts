@@ -33,7 +33,7 @@ function DetailRow({ item, store }: { item: DetailItem; store: ChatStore }) {
           ${item.location !== undefined
             ? html`<button type="button" class="detail-path" title=${item.location.path}
                 onClick=${() => store.openFile(item.location?.path ?? '', item.location?.line)}>${item.title}</button>`
-            : html`<span class="detail-title">${item.title}</span>`}
+            : html`<span class="detail-title" title=${item.title}>${item.title}</span>`}
           ${item.badge !== undefined
             ? html`<span class="detail-badge" data-tone=${item.badge.tone}>${item.badge.label}</span>`
             : null}

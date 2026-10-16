@@ -6,7 +6,7 @@
 // 依赖方向:页面 → components/* + core/store + core/host + titlebar(仅注入句柄)。
 import { render } from 'preact'
 import { html } from 'htm/preact'
-import 'katex/dist/katex.min.css' // KaTeX 官方样式（字体经 esbuild 的 file loader 落到 dist/chat/assets）
+import 'katex/dist/katex.min.css' // KaTeX 自带样式（字体经 esbuild 的 file loader 落到 dist/chat/assets）
 import './styles/chat.css' // esbuild 打进 dist/chat/chat.css(index.html 已 <link> 引用)
 import { makeWindowMessageHost } from './core/host'
 import type { HostToViewMessage } from './core/protocol'

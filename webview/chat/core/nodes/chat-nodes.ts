@@ -25,6 +25,8 @@ import {
 import { deriveTurnFacts, deriveTurnTokenUsage } from '../../../../src/dsh/official/turn-stats'
 import { readToolResult } from '../../../../src/dsh/official/result-text'
 import { processActivityOfNodes } from '../step-process-title'
+import { pairTodoBaselines } from './todo-baseline'
+import type { DshTodoItem } from '../../../../src/dsh/rows/types'
 
 // ---------- 时间线（镜像 `location-index.js` 的全量重建） ----------
 
@@ -644,11 +646,11 @@ function toolRootFromCall(event: SessionEvent): ToolCallRoot {
 /**
  * `tool/result` 事件 → 结果块。
  *
- * **载荷解包必须走官方的 `readToolResult`**，不能自己读 `message.content`：
+ * **载荷解包必须走上游的 `readToolResult`**，不能自己读 `message.content`：
  * 现行格式把结果包了一层 —— `message.content[0]` 是 `tool-result` 块，真正的展示内容在它的 `content` 里。
  * 自己读外层等于把**包装块**当内容，`resultText` 再把它 pretty-print 成 JSON，于是所有靠"结果文本形状"
  * 判定的卡全部失配（真机 2026-10-09 实测：`read` 20 条**全落通用卡**，读取卡的 `<path>…` 信封永远对不上）。
- * 宿主层一直用的是这个官方解包器，客户端这条路此前漏了。
+ * 宿主层一直用的是这个解包器，客户端这条路此前漏了。
  */
 function toolResultFromEvent(event: SessionEvent, previous: ToolCallRoot | undefined): ToolResultRoot | undefined {
     const parsed = readToolResult(event.data as Record<string, unknown>)
@@ -902,8 +904,17 @@ export function readInboxClaims(
  * @param inboxState - 收件箱认领的**起始状态**：续折路径传断点那份的副本（尾巴之外发生的
  *   认领只有它知道，重扫尾巴推不出来）；全量路径省略 = 从零开始读整窗。
  */
-export function buildChatNodes(events: readonly SessionEvent[], inboxState?: InboxClaimState, capture?: { at: number; state?: InboxClaimState }): ChatNodeModel {
+export function buildChatNodes(events: readonly SessionEvent[], inboxState?: InboxClaimState, capture?: { at: number; state?: InboxClaimState }, todoSeed: DshTodoItem[] | null = null): ChatNodeModel {
     const timeline = buildTimeline(events)
+    /**
+     * **任务清单写入 × 上一次清单**的配对（一次线性扫，与其它索引同一趟里做）。
+     *
+     * 为什么必须在这里：`todo_write` 卡要显示「与上次清单相比」，而"上次清单"只能从**更早的
+     * `todo/write` 事件**里找 —— 渲染源换成客户端节点模型之后这条路一直没接上，
+     * 卡片恒显示「首次记录」（真机 2026-10-16 与网页端左右对照）。`todoSeed` 是增量续折的种子
+     * （尾巴切片看不见更早的写入）。配对口径见 `./todo-baseline`。
+     */
+    const todo = pairTodoBaselines(events, todoSeed)
     // 事件 seq → 时刻（合成节点靠最近真实事件的时刻）。
     const timeOfSeq = new Map<number, number>()
     for (const ev of events) timeOfSeq.set(ev.seq, ev.time)
@@ -1335,7 +1346,7 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
         presentations.set(turn, derivePresentation(timelineTurn, spec, turnNodeKeys.get(turn) ?? [], nodes))
     }
     // 呈现层不发布会话级那一桶（`turn: 0`）的分组：它没有回合级 `presentations`，也没人认领。
-    return { nodes, order, entries, groups, presentations, turnTimes, turnStats, turnPresented, turnChanges }
+    return { nodes, order, entries, groups, presentations, turnTimes, turnStats, turnPresented, turnChanges, todoBaselines: todo.baselines, todoSeed: todo.seed }
 }
 
 /** 增量折叠的断点：`prefix` = 最后一条 `turn/start` **之前**已定稿的完整模型；
@@ -1354,6 +1365,13 @@ export interface NodesCheckpoint {
      *（真机 2026-10-13）。全量时留的是折到 `tailStart` 那一刻的快照。
      */
     inboxState: InboxClaimState
+    /**
+     * 尾巴起点**之前**最近一次落盘的清单（任务清单配对的种子，见 `ChatNodeModel.todoSeed`）。
+     *
+     * 与 `inboxState` 同一类东西：续折只重折尾巴，而尾巴是**中途切开**的切片，自己看不见更早的
+     * `todo/write`；不带这份种子，尾巴里的 `todo_write` 会被重新配成 `null`（卡片退回「首次记录」）。
+     */
+    todoSeed: DshTodoItem[] | null
 }
 
 function mergeModels(a: ChatNodeModel, b: ChatNodeModel): ChatNodeModel {
@@ -1367,6 +1385,9 @@ function mergeModels(a: ChatNodeModel, b: ChatNodeModel): ChatNodeModel {
         turnStats: new Map([...a.turnStats, ...b.turnStats]),
         turnPresented: new Map([...a.turnPresented, ...b.turnPresented]),
         turnChanges: new Map([...a.turnChanges, ...b.turnChanges]),
+        // 两段的配对表按 id 合并（id 唯一，后段不会覆盖前段）；种子取"更靠后"的那个。
+        todoBaselines: new Map([...a.todoBaselines, ...b.todoBaselines]),
+        todoSeed: b.todoSeed ?? a.todoSeed,
     }
 }
 
@@ -1385,10 +1406,11 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
         windowHeadSeq === checkpoint.windowHeadSeq &&
         windowLen >= checkpoint.windowLen
     if (usable && checkpoint !== undefined) {
-        // 尾巴从断点的收件箱状态**接着读**（喂副本：断点那份要留给下一帧复用）。
-        const tail = buildChatNodes(events.slice(checkpoint.tailStart), cloneInboxClaimState(checkpoint.inboxState))
+        // 尾巴从断点的收件箱状态**接着读**（喂副本：断点那份要留给下一帧复用）；
+        // 任务清单的种子同理（尾巴看不见更早的 `todo/write`）。
+        const tail = buildChatNodes(events.slice(checkpoint.tailStart), cloneInboxClaimState(checkpoint.inboxState), undefined, checkpoint.todoSeed)
         const model = mergeModels(checkpoint.prefix, tail)
-        return { model, checkpoint: { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix: checkpoint.prefix, inboxState: checkpoint.inboxState } }
+        return { model, checkpoint: { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix: checkpoint.prefix, inboxState: checkpoint.inboxState, todoSeed: checkpoint.todoSeed } }
     }
     // 断点要留下的「尾巴起点之前」的收件箱状态：让全量那次读数**捎带**一份快照 ——
     // 不额外多跑一趟扫描（打开大会话的路径上，多一趟线性读数就是白付一次 O(窗口)）。
@@ -1418,6 +1440,12 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
         const byTurn = <T>(m: Map<number, T>): Map<number, T> => (typeof cutTurn === 'number'
             ? new Map([...m].filter(([t]) => t < cutTurn))
             : m)
+        /** 调用 id → 节点 key（前缀切分时反查配对表的归属用，建一次即可）。 */
+        const nodeKeysByCallId = new Map<string, string>()
+        for (const key of model.nodes.keys()) {
+            const at = key.lastIndexOf(':')
+            if (at > 0) nodeKeysByCallId.set(key.slice(at + 1), key)
+        }
         return {
             nodes: new Map([...model.nodes].filter(([k]) => before(k))),
             order: model.order.filter((k) => before(k)),
@@ -1428,11 +1456,19 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
             turnStats: byTurn(model.turnStats),
             turnPresented: byTurn(model.turnPresented),
             turnChanges: byTurn(model.turnChanges),
+            // 前缀的配对表按**节点**切（与上面同一把尺）：节点 key 就含调用 id（`tool:<callId>`），
+            // 所以用一次 `endsWith` 反查即可，不做 n×m 扫描。查不到就丢掉（边界处宁少不多）。
+            // 种子必须**在前缀的事件切片上重算** —— 拿整窗的 `model.todoSeed` 会把尾巴里的写入也算进来。
+            todoBaselines: new Map([...model.todoBaselines].filter(([id]) => {
+                const key = nodeKeysByCallId.get(id)
+                return key !== undefined && before(key)
+            })),
+            todoSeed: pairTodoBaselines(events.slice(0, lastTurnStart)).seed,
         }
     })()
     return {
         model,
-        checkpoint: lastTurnStart >= 0 ? { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix, inboxState } : undefined,
+        checkpoint: lastTurnStart >= 0 ? { tailStart: lastTurnStart, windowHeadSeq, windowLen, prefix, inboxState, todoSeed: prefix.todoSeed } : undefined,
     }
 }
 

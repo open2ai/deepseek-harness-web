@@ -731,7 +731,7 @@ export async function pageSessionEvents(
  */
 export async function readSessionAttachment(sessionId: string, attachmentId: string): Promise<DshImageAttachment> {
     /**
-     * ⚠️ **方法名与参数形状都不能照抄邻居**（2026-10-11 真机查出来的两个错，这条链此前从未走通）：
+     * ⚠️ **方法名与参数形状都不能照搬邻居**：
      *
      *   ① **方法名是 `session/attachment`（斜杠）**，不是本文件其它函数的 `session.xxx` 点号形态。
      *      网关会校验信封里的 `method` 与 `/api/<端点>` 是否一致，点号名会被直接挡掉：

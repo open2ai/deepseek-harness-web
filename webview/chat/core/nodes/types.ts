@@ -3,6 +3,8 @@
 // 目标：把「分组 / 可见性 / 折叠 / 块序」从宿主搬到客户端、按节点重发数据。
 // 与上游 conversation-nodes + conversation/assembler 同构（事件 → 节点 → 排序 → 分组 → 折叠 → 可见性）。
 
+import type { DshTodoItem } from '../../../../src/dsh/rows/types'
+
 /** 合成锚点偏移：合成节点靠小数偏移插到既有事件之间（控制条 / 中断回答 / 超限通知 / 尾部动作条）。 */
 export const CHAT_SYNTHETIC_SEQ_OFFSETS = {
     interruptedAssistant: -0.9,
@@ -117,4 +119,18 @@ export interface ChatNodeModel {
     turnPresented: Map<number, Array<{ path: string; description?: string }>>
     /** 每回合的改动序号（workspace/changes 的 seq）。 */
     turnChanges: Map<number, number>
+    /**
+     * **任务清单写入 × 上一次清单**的配对（`todo_write` 调用 id → 它之前最近一次落盘的清单）。
+     *
+     * 少了它，`todo_write` 卡永远显示「首次记录」而网页端显示「与上次清单相比 · 新增 X…」
+     * （真机 2026-10-16）。配对口径见 `./todo-baseline`。
+     */
+    todoBaselines: Map<string, DshTodoItem[] | null>
+    /**
+     * 折完这段事件后**最近一次落盘的清单**（`null` = 没有过）。
+     *
+     * 增量续折的**种子**：尾巴是从中途某条 `turn/start` 开始的切片，自己看不见更早的 `todo/write`，
+     * 少了这个种子，尾巴里的 `todo_write` 会被配成 `null`（又退回「首次记录」）。见 `NodesCheckpoint.todoSeed`。
+     */
+    todoSeed: DshTodoItem[] | null
 }

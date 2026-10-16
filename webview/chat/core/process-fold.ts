@@ -36,9 +36,12 @@ export interface ProcessDisclosureInput {
     /** 用户偏好：紧凑才折叠（上游 `compactTranscript`） */
     compact: boolean
     /**
-     * 用户偏好的过程分组覆盖范围（0.2.0 起）：`collapsed` = 所有回合都有可折叠的分组头
+     * 用户偏好的过程分组覆盖范围：`collapsed` = 所有回合都有可折叠的分组头
      * （**含进行中的回合**）、`history` = 只有已关闭的回合有、`none` = 不分组（过程行平铺）。
-     * 缺省按 `history` 处理 = 接入前的形态（进行中不出折叠头）。
+     *
+     * 缺省按 `history` 处理 = **读不到偏好时的保守形态**（进行中不分组、已关闭照常收）。
+     * 真机上这一项恒有值：宿主把四档策略的这一列随偏好帧一起下发（`DEFAULT_CHAT_PREFS` 的
+     * 缺省是 `collapsed`，= 上游桌面端默认档），本层只是"连偏好帧都没拿到"时的兜底。
      */
     grouping?: 'collapsed' | 'history' | 'none'
     /**
@@ -145,14 +148,19 @@ export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclos
     // ⚠️ 插件曾有一条偏离 `noFold`（"链里只含提问行就不折叠"），**已删除**：提问在上游是可见节点、照常计入。
     const foldable = windowReady && (process.hasExternalProcess || process.inlineReasoning)
     // 上游 `ChatGroupSeat` 的 `grouped`（`stepGrouping` 决定分组头覆盖谁）：与「外层折叠」是**两道独立的门**。
-    // 缺省 `history` = 接入前的形态（只有已关闭回合有折叠头）。
+    // 缺省 `history` = 读不到偏好时的保守形态（真机上宿主恒下发这一列，见接口注释）。
     const grouping = input.grouping ?? 'history'
     const grouped = grouping !== 'none' && (grouping === 'collapsed' || input.done)
-    // 进行中回合的分组头（只在 `collapsed` 档出现）：上游 compact/standard 下 running 回合也有可折叠分组头，
-    // 默认展开着看过程在动；`history`（detailed）与 `none`（verbose）下进行中平铺、没有头。
-    const runningHead = grouped && !input.done && process !== undefined
-        && (process.hasExternalProcess || process.inlineReasoning)
-    const groupable = foldable || runningHead
+    /**
+     * **这一片有没有可收的东西**（与 `grouped` 是两道独立的门：那道管"要不要分组头"，这道管"收得起吗"）。
+     *
+     * ⚠️ **2026-10-16 去掉了一条 `!input.done`**（原先写成 `foldable || (grouped && !done && …)`）：
+     * 一个回合会被切成多行（每片一段），只有**收尾那一段**带 `turn/end`，其余段的 `done` 恒为 false ——
+     * 那条门于是把"已收口、成员上百"的片全判成没有头：真机表现是**片里一百多个步骤全铺在屏幕上、
+     * 一个分组头都没有**（探针：某会话回合 1 的五条大段落 `grouped=true` 却 `folded=false`）。
+     * 上游没有这条门：头出不出只看策略列 + 这一片有没有过程内容，与"回合有没有结束"无关。
+     */
+    const groupable = process !== undefined && (process.hasExternalProcess || process.inlineReasoning)
     // 折叠时藏的是**过程成员**（本行的链）；回答步的正文在行的正文里，不受影响（上游同）。
     // 同回合的每一行都跟随同一个展开态 —— 上游也是这么收的：折叠头一个，被收起来的是整个回合的成员。
     // `detail` 由 `groupable`（有没有可收的东西）与回合级展开态决定；没有分组头时明细永远可见（上游 `expandedBody` 同）。

@@ -162,7 +162,7 @@ export function contentLines(text: string): string[] {
 /**
  * 编辑图搜索的上界（一次替换消耗两次编辑）。**超限就退回"整段替换"**。
  *
- * 数值与上游一致：`DiffBlock.tsx` 的 `MAX_DIFF_EDIT_LENGTH = 256`。
+ * 与上游同口径：`MAX_DIFF_EDIT_LENGTH = 256`。
  */
 const MAX_DIFF_EDIT_LENGTH = 256
 

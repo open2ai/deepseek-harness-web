@@ -309,7 +309,7 @@ function liveToolDetail(name: string, argsRaw: string): string {
  * title/description/objective/task/…/command/url/file_path/…），没有运行中的工具时退回
  * **运行中那一步的思考**的最后一段（`**` 剥掉）。两者都折成单行、上限 160 字。
  *
- * **键序必须照抄上游**（`LIVE_TOOL_DETAIL_KEYS`）：工具行摘要那套（`deriveToolSummary`）是另一套口径，
+ * **键序必须照搬上游**（`LIVE_TOOL_DETAIL_KEYS`）：工具行摘要那套（`deriveToolSummary`）是另一套口径，
  * 两者取到的字段可能不同 —— 早先复用它是本仓最后一处「近似」。
  * @param chain - 过程链。
  * @returns 单行细节；没有可说的返回空串。

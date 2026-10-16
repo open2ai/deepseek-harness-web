@@ -502,7 +502,7 @@ export interface GoalActivationView {
 /**
  * 一条**会话级本地回显**（上游 `PendingSubmission` 同构：`requestId` + `placement` + 内容）。
  * `placement` 与上游同义（`session.ts:230`）：空闲直发 = `transcript`；忙时排队 = `queued`；
- * 忙时插话 = `steering`。`queued` 那类由队列卡表示、**不进对话流**（上游 `ChatView.tsx:191` 同款排除）。
+ * 忙时插话 = `steering`。`queued` 那类由队列卡表示、**不进对话流**（与上游同款排除）。
  */
 export interface PendingEcho {
   readonly rpcId: string

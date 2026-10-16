@@ -169,7 +169,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   /**
    * **会话级本地回显**（上游 `SessionSnapshot.pendingSubmissions` + `PendingSubmission` 的等价物）。
    *
-   * 上游把回显放在**会话状态**里、由渲染层推导可见性（`ChatView.tsx:187-193`：
+   * 上游把回显放在**会话状态**里、由渲染层推导可见性（判据：
    * `pendingSubmissions.filter(s => !observed.rpcIds.has(s.requestId))`）——不是时间线里的一行。
    * 插件过去把它 push 进行表，于是必须靠「留住未认领的本地行 + 10s 宽限 + 文案兜底」三份补丁维持，
    * 认领/退休一错拍就是「两个气泡」或「一闪而没」（docs/design/08 §A1）。
@@ -184,7 +184,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
     return k
   }
   /**
-   * **渲染用的行表（推导）**：耐久行 + 还没有耐久对应物的会话级回显（上游 `ChatView.tsx:187-193` 同口径）。
+   * **渲染用的行表（推导）**：耐久行 + 还没有耐久对应物的会话级回显（与上游同口径）。
    *
    * 判定只看一件事：行表里有没有**同 `rpcId`** 的用户行 —— 有 ⇒ 那条回显已经进日志，当场不画
    *（**不删行、不记账**，所以没有认领/退休竞态）；没有 ⇒ 补在「本轮未定稿回答行」**之前**
@@ -213,7 +213,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
       if (r.kind === 'user' && r.rpcId !== undefined) inLog.add(r.rpcId)
     }
     /**
-     * **可见性以台账为准**（上游 `ChatView.tsx:190-191` 读的就是 `pendingSubmissions`）：
+     * **可见性以台账为准**（上游读的就是 `pendingSubmissions`）：
      * 提交那一刻页面猜的 `placement` 只用于「台账帧还没到」那一拍；台账一旦有这条，就用台账的位置 ——
      * 否则「忙时排队」那条会先在对话区冒出来、再被收走（真机 2026-10-06 的现象）。
      */
@@ -402,7 +402,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   // ---------- 消息流动作(本地渲染) ----------
   function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string, placement: PendingEcho['placement'] = 'transcript'): void {
     // **有提交标识 = 刚发出去、还没进日志那条**：只登记会话级回显，**不进行表**
-    //（上游 `ChatView.tsx:187-193` 同口径：回显是会话状态，行表里只有日志里的东西）。
+    //（与上游同口径：回显是会话状态，行表里只有日志里的东西）。
     if (rpcId !== undefined && rpcId !== '') {
       pendingEchoes.value = [...pendingEchoes.value, { rpcId, placement, text: textMsg, time: time ?? Date.now(), images: imgs, ...(imageRefs !== undefined && imageRefs.length > 0 ? { imageRefs } : {}), ...(files !== undefined && files.length > 0 ? { files } : {}), ...(refs !== undefined ? { refs } : {}) }]
       return
@@ -414,7 +414,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   /**
    * 接受宿主下发的行（阶段 4，见 docs/design/08 §11）：**整表替换** —— 宿主是行列表的唯一权威。
    * **没有例外**：本地回显不在这张表里 —— 它在 `pendingEchoes`（会话级状态），由 `visibleRows` 按 `rpcId`
-   * 推导可见性（宿主行里已有同标识 ⇒ 那条回显当场不画，上游 `ChatView.tsx:187-193` 同口径）。
+   * 推导可见性（宿主行里已有同标识 ⇒ 那条回显当场不画，与上游同口径）。
    * 所以这里不再有「留住未认领乐观行」那条例外、也没有随之而来的 10s 宽限。
    */
   /** 接受宿主下发的行：映射成 ChatRow 后整表替换（宿主是行列表的唯一权威）。 */

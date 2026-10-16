@@ -181,7 +181,7 @@ export function askCardModel(item: {
   const pending = pendingQuestionOf(item.output)
   if (pending !== null) {
     const questions = questionEntries(item.argsRaw)
-    // 超时之后分两支，判据是**投影**给不给补答（上游 `ask-question-row.tsx` 的
+    // 超时之后分两支，判据是**投影**给不给补答（上游的
     // `pending && answerable` → `ask.pending` + `ask.pendingDetail`；
     //  `pending && !answerable` → `ask.closed` + `ask.closedDetail`）：
     // 「已继续工作，仍可回答」只在**还能答**时才对；答不了还这么说，用户会去点一个不存在的入口。
@@ -216,7 +216,7 @@ export function askCardModel(item: {
     }
   }
   // 结果文本取不到（`answers` 都解析不出）→ **照上游落回通用卡**：
-  // 上游 `ask-question-row.tsx` 的兜底是 `summary = presentation?.summary ?? answeredSummary(text) ?? model.summary`、
+  // 上游的兜底是 `summary = presentation?.summary ?? answeredSummary(text) ?? model.summary`、
   // `transcript = null`，即行摘要用通用摘要、正文用「输入/输出」区的原始数据。
   // （插件曾在这里改成「可读问题列表」，属偏离，已按上游还原。）
   return { summary: '', transcript: null }

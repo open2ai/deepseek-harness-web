@@ -1,18 +1,18 @@
-// 工具行的**上游图形**（内联 SVG，不引图标字体）—— 全部来自上游 \`ui-primitives\` 的
-// \`icons/index.tsx\` 原样搬运（1px 描边 + \`currentColor\`，\`viewBox 0 0 16 16\`）。
+// 工具行的**上游图形**（内联 SVG，不引图标字体）—— 图标集，
+// （1px 描边 + \`currentColor\`，\`viewBox 0 0 16 16\`）。
 //
 // 为什么内联：上游那套图标在它自己的包里，插件没有那个包；本仓既有做法就是把路径原样搬进来
 // （\`ProcessIcons.ts\`、\`message/ThumbIcons.ts\` 都是先例）。
 //
 // **不再用 codicon 近似**：工具行的图标以前是"按语义归类挑一个 codicon"，与网页端不是同一个图形
 // （用户反馈过 org-chart 那个）。现在整表来自上游：各 toolview 自己的图标 + 详情行按名字前缀的归类
-// （\`details-row.tsx\` 的 \`detailIcon\`）。
+// （上游 \`detailIcon\`）。
 //
 // 每个图形与上游同名同形；\`stroke-width\` 固定 1（上游 \`ICON_REGULAR_STROKE\`）。
 import { html } from 'htm/preact'
 import { isDetailsTool } from '../../core/details-card'
 
-/** 上游 `IconSkillOutlineArtwork`（`ui-primitives/icons/index.tsx`，viewBox 0 0 17 17）—— `skill` 工具行专用。 */
+/** 上游 `IconSkillOutlineArtwork`（viewBox 0 0 17 17）—— `skill` 工具行专用。 */
 const skill = (size = 14): unknown =>
     html`<svg width=${size} height=${size} viewBox="0 0 17 17" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"> <path d="M4.57788 5.77124H10.7029" stroke="currentColor"/> <path d="M4.57788 8.89819H7.91879" stroke="currentColor"/> <path d="M12.1404 1.19446C12.9442 1.19446 13.6404 1.81999 13.6404 2.64465V8.89856H12.6404V2.64465C12.6404 2.42015 12.4411 2.19446 12.1404 2.19446H3.14038C2.83968 2.19446 2.64038 2.42015 2.64038 2.64465V13.0929C2.64082 13.3172 2.84001 13.5421 3.14038 13.5421H8.88159V14.5421H3.14038C2.33675 14.5421 1.6408 13.9172 1.64038 13.0929V2.64465C1.64038 1.81999 2.33651 1.19446 3.14038 1.19446H12.1404Z" fill="currentColor"/> <path d="M12.0051 15.1056C12.0051 13.6395 10.8166 12.451 9.35059 12.451C10.8166 12.451 12.0051 13.6395 12.0051 15.1056Z" stroke="currentColor"/> <path d="M12.0051 15.1056C12.0051 13.6395 10.8166 12.451 9.35059 12.451C10.8166 12.451 12.0051 13.6395 12.0051 15.1056Z" stroke="currentColor"/> <path d="M9.35059 12.451C10.8166 12.451 12.0051 11.2626 12.0051 9.79651C12.0051 8.33039 10.8166 7.14197 9.35059 7.14197C7.88447 7.14197 6.69606 8.33039 6.69606 9.79651C6.69606 11.2626 7.88447 12.451 9.35059 12.451Z" stroke="currentColor"/> </svg>`
 
@@ -92,7 +92,7 @@ const DIRECT_GLYPH: Record<string, string> = {
   subagent: 'agentPreset', list_subagent_models: 'agentPreset',
 }
 
-/** 详情行按**工具名前缀**归类图标（镜像上游 \`details-row.tsx\` 的 \`detailIcon\`）。 */
+/** 详情行按**工具名前缀**归类图标（镜像上游 \`detailIcon\`）。 */
 function detailsGlyphKey(name: string): string {
   if (TEAMMATE_TOOLS.has(name)) return 'users'
   if (name.startsWith('schedule_')) return 'clock'

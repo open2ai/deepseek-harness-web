@@ -90,8 +90,8 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
      */
     const closed = sliceClosedOf(input.facts as { closed?: unknown } | undefined, done)
     /**
-     * **这一片自己的活动汇总**（上游 `data.summary`）—— 片头的 label/detail/icon 全都该读它
-     *（`ChatGroupSeat.tsx:103/108/113`）。它与「按链项现算」那份的差别是**口径**：
+     * **这一片自己的活动汇总**（片事实带的 `summary`）—— 片头的 label/detail/icon 全都该读它。
+     * 它与「按链项现算」那份的差别是**口径**：
      * 运行中那个按 **time** 取、计数**递归 `subCalls`**、没有运行中工具时退回**运行中那一步**的思考。
      * 片事实里没有它（老宿主 / 无片形态）才退回链序那份。
      */

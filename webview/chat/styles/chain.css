@@ -318,12 +318,20 @@
     color: var(--vscode-descriptionForeground, #999);
   }
   .detail-list {
-    display: flex; flex-direction: column; gap: 6px;
+    display: flex; flex-direction: column;
     margin: 0; padding: 0; list-style: none;
+    /* 列表**封顶自滚**（上游同款 320px）：条目多时（任务清单一次能算出十来条变化）不把整段撑长。
+       条目之间的分隔改由 `.detail-item + .detail-item` 的细线表达（与上游同），不再用 gap。 */
+    max-height: 320px; overflow-y: auto;
   }
-  .detail-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-  /* 标题行：状态字形 + 标题/路径 + 徽标 + 状态词 */
-  .detail-heading { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+  .detail-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 6px 0; }
+  .detail-item + .detail-item { border-top: 0.5px solid var(--dsh-hairline); }
+  /* 标题行：状态字形 + 标题/路径 + 徽标 + 状态词。
+     ⚠️ **标题本身允许折行**（`flex-wrap: wrap` + 标题 `pre-wrap`，与上游详情卡同口径）：
+     这条明细的标题常常是一整句待办（「把类型基线从 0.1.7-alpha.2 抬到 0.2.0-rc.2（devDeps + peer 范围）…」），
+     强压成一行会把它截成看不懂的样子。**真正"一行一条"的是工具行的收起摘要**（`.chain-row-*`），
+     那一层上游本来就是 `nowrap + ellipsis`。 */
+  .detail-heading { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
   .detail-status {
     flex: none; width: 14px; font-size: 12px; line-height: 1; text-align: center;
     color: var(--vscode-descriptionForeground, #999);
@@ -333,8 +341,9 @@
   .detail-item[data-change] .detail-status { color: var(--vscode-descriptionForeground, #999); }
   .detail-status .codicon-pass-filled { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #89d185)); }
   .detail-status .codicon-play { color: var(--vscode-textLink-foreground, #4daafc); }
-  .detail-title { min-width: 0; overflow-wrap: anywhere; }
+  .detail-title { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .detail-path {
+    flex: 1;
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     border: none; background: none; padding: 0; font: inherit; cursor: pointer;
     color: inherit; text-decoration: underline dotted;
@@ -351,7 +360,9 @@
   .detail-badge[data-tone='success'] { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #89d185)); }
   .detail-badge[data-tone='warning'] { color: var(--vscode-charts-yellow, #cca700); }
   .detail-badge[data-tone='error'] { color: var(--vscode-errorForeground, #f14c4c); }
-  .detail-status-text { color: var(--vscode-descriptionForeground, #999); }
+  /* 状态词推到行尾：上游那句"**它自己是 `nowrap`**"是有来历的 ——
+     `flex: none` 只挡住盒子被压扁，挡不住文字折行；一折就把"一行一条"破坏掉（上游注释原文）。 */
+  .detail-status-text { margin-inline-start: auto; flex: none; white-space: nowrap; color: var(--vscode-descriptionForeground, #999); }
   .detail-previous { text-decoration: line-through; opacity: 0.7; }
   .detail-subtitle { font-size: 11px; color: var(--vscode-descriptionForeground, #999); }
   .detail-description {

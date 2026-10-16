@@ -113,7 +113,7 @@ export interface DshTurnProcess {
 }
 
 /**
- * 一片的**活动汇总**（上游 `ProcessGroupData.summary`，由官方 `processActivity` 那一份算出来）。
+ * 一片的**活动汇总**（上游 `ProcessGroupData.summary`，由 `processActivity` 那一份算出来）。
  *
  * ⚠️ 它与「按链项现算」那份的差别是**口径**，不是风格：
  *   · 按 **time** 取运行中/准备中的那个（链序取的是「最后一个 running 链项」）；

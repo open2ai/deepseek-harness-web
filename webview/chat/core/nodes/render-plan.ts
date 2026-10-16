@@ -9,14 +9,14 @@
 import type { ChatBlock, ChatNode, ChatNodeModel, ProcessGroupSnapshot, ProcessPresentation } from './types'
 import { hasAssistantReplyContent } from './event-projection'
 import { fileRefsOf, hasImageBlock, imageRefsOf, resultText } from '../../../../src/dsh/official/result-text'
-import type { DshRowGroupFacts, DshRowGroupSummary } from '../../../../src/dsh/rows/types'
+import type { DshRowGroupFacts, DshRowGroupSummary, DshTodoItem } from '../../../../src/dsh/rows/types'
 
 /** 过程链上的一项（渲染所需事实）。 */
 export type RenderChainItem =
     // `status` = 该 assistant-step 的状态（`running`/`settled`/…）：实时细节只认**运行中**那一步
     // （上游），链项不带它就等于那道门永远为假。
     | { kind: 'reasoning'; key: string; step?: number; text: string; status?: string }
-    | { kind: 'tool'; key: string; step?: number; callId?: string; name: string; argsRaw?: string; status: 'preparing' | 'running' | 'ok' | 'error'; content?: unknown; blocks?: unknown; isError?: boolean; meta?: unknown; errorName?: string; errorCode?: string; errorReason?: string; parentCallId?: string; subCalls?: RenderSubCall[] }
+    | { kind: 'tool'; key: string; step?: number; callId?: string; name: string; argsRaw?: string; status: 'preparing' | 'running' | 'ok' | 'error'; content?: unknown; blocks?: unknown; isError?: boolean; meta?: unknown; errorName?: string; errorCode?: string; errorReason?: string; parentCallId?: string; subCalls?: RenderSubCall[]; /** `todo_write` 专用：本次写入之前最近一次落盘的清单（卡片据此做增/改/删 diff） */ todoBaseline?: DshTodoItem[] | null }
     | { kind: 'context'; key: string; content: unknown; source: unknown }
     | { kind: 'text'; key: string; step?: number; text: string }
     /**
@@ -180,7 +180,7 @@ function turnPositionFacts(model: ChatNodeModel, turn: number): { openingInputAn
     return { openingInputAnchor, earliestProcessAnchor }
 }
 
-/** 节点 → 链项（只认过程成员）。 */function toChainItem(node: ChatNode, groupPart?: string): RenderChainItem | undefined {
+/** 节点 → 链项（只认过程成员）。 */function toChainItem(node: ChatNode, groupPart?: string, todoBaselines?: ReadonlyMap<string, DshTodoItem[] | null>): RenderChainItem | undefined {
     if (node.kind === 'assistant-step') {
         const blocks = (node.data['blocks'] ?? []) as Array<{ kind?: string; text?: string }>
         if (groupPart === 'reasoning') {
@@ -196,14 +196,20 @@ function turnPositionFacts(model: ChatNodeModel, turn: number): { openingInputAn
         const root = (node.data['root'] ?? {}) as Record<string, unknown>
         const isResult = root['kind'] === 'tool-result'
         const call = (root['call'] ?? {}) as { name?: string; argsRaw?: string }
+        const callId = String(root['callId'] ?? '')
+        const name = String(call.name ?? root['name'] ?? '')
         return {
             kind: 'tool',
             key: node.key,
             step: node.location.step,
-            callId: String(root['callId'] ?? ''),
-            name: String(call.name ?? root['name'] ?? ''),
+            callId,
+            name,
             argsRaw: typeof call.argsRaw === 'string' ? call.argsRaw : typeof root['argsRaw'] === 'string' ? root['argsRaw'] : undefined,
             status: isResult ? ((root['isError'] === true) ? 'error' : 'ok') : 'running',
+            // **任务清单的 diff 基线**（`todo_write` 专用）：卡片要显示「与上次清单相比 · 新增 X…」，
+            // 而"上次清单"只能从更早的 `todo/write` 事件里找 —— 由模型建好后配对（见 `nodes/todo-baseline`）。
+            // 少了它卡片恒显示「首次记录」（真机 2026-10-16 与网页端左右对照）。
+            ...(name === 'todo_write' ? { todoBaseline: todoBaselines?.get(callId) ?? null } : {}),
             // 结果里含**图片块**时把原始块带上（图片卡的输入；图片字节由附件层按需另取）。
             // ⚠️ 与宿主那条路同一判据（`hasImageBlock`）：少了这一条，图片卡永远拿不到内容 →
             // 真机 68 条 `read_image` 全部静默落通用卡（2026-10-11 探针实测）。
@@ -776,6 +782,27 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
         for (const k of tail.groupKeys) if (!host.groupKeys.includes(k)) host.groupKeys.push(k)
     }
     if (segments.length === 0) segments.push({ nodes: [], groupKeys: [], boundary: undefined, generation: 0, hasReplyStep: false })
+    /**
+     * **一片的成员在本回合里的呈现位次**（切段用的就是这条序）。
+     *
+     * 为什么片内也要按它排：分组是在**另一条序**（按锚点）上重建的，而这里切段按呈现序。
+     * 两条序在"命令行 / 注入挨着工具"这类位置上会差一格，于是同一个片的成员在呈现序里
+     * **不再连续**（实测：某片 4 个成员夹着一条命令行与两条注入），片就被段界切成两半 ——
+     * 两半各自成行、**各画一次同一个片头**（真机：同一批步骤连着出现两遍）。
+     * 排序后片内序与渲染序一致，下面那条"同一项只归一行"的去重才落得干净。
+     */
+    const presentationIndex = new Map<string, number>()
+    for (const [at, n] of ordered.entries()) presentationIndex.set(n.key, at)
+    /**
+     * **本回合已经被某一行收下的项 / 片**。
+     *
+     * 不变式（分组那一层是靠"片 = 两次收口之间的连续区间"天然成立的，插件切段会破坏它）：
+     *   · 一个**片**只由**一行**渲染 —— 否则同一批步骤会在屏幕上出现两遍；
+     *   · 一个**项**只由**一行**渲染 —— 否则同一行内容会在两行里各来一次。
+     * 归属按行序（= 呈现序）先到先得；被前面行收走的项，本行不再重复渲染。
+     */
+    const claimedItems = new Set<string>()
+    const claimedGroups = new Set<string>()
     const rows: RenderRow[] = []
     for (let index = 0; index < segments.length; index += 1) {
         const segment = segments[index] as Segment
@@ -784,15 +811,23 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
         const chain: RenderChainItem[] = []
         const groups: RenderGroup[] = []
         for (const g of turnGroups.filter((g) => segment.groupKeys.includes(g.key))) {
+            if (claimedGroups.has(g.key)) continue
+            claimedGroups.add(g.key)
             const itemKeys: string[] = []
-            for (const member of g.members) {
+            /** 片内成员按**呈现位次**排（缺位次的事实排在最后，顺序按分组给的原始序）。 */
+            const members = [...g.members].sort((a, b) =>
+                (presentationIndex.get(a.key) ?? Number.POSITIVE_INFINITY)
+                - (presentationIndex.get(b.key) ?? Number.POSITIVE_INFINITY))
+            for (const member of members) {
                 const n = model.nodes.get(member.key)
                 if (n === undefined) continue
-                const item = toChainItem(n, member.groupPart)
-                if (item !== undefined) {
-                    chain.push(item)
-                    itemKeys.push(item.key)
-                }
+                const item = toChainItem(n, member.groupPart, model.todoBaselines)
+                if (item === undefined) continue
+                // 已经被前面某一行画过的项不再重复（同一项在整个回合里只有一个渲染位次）。
+                if (claimedItems.has(item.key)) continue
+                claimedItems.add(item.key)
+                chain.push(item)
+                itemKeys.push(item.key)
             }
             groups.push({ key: g.key, itemKeys, facts: renderGroupFacts(g, model, spec, presentation) })
         }

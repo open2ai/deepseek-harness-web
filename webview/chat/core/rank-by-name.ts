@@ -1,11 +1,11 @@
-// 候选排序（**逐字搬上游** `ui-primitives/src/rank-by-name.ts`，含算法与权重，别自行"优化"）。
+// 候选排序（**逐字搬上游**，含算法与权重，别自行"优化"）。
 //
-// 上游口径（该文件抬头注释的原文）：查询必须是候选名（或它的展示 label）的**大小写无关有序子序列**；
+// 上游口径：查询必须是候选名（或它的展示 label）的**大小写无关有序子序列**；
 // 排序依次是 —— **前缀命中优先 → 对齐分高者优先 → 源序**。空查询原样返回。
 // 上游的决策记录：`.agents/notes/archived/feature/2026-08-04-web-slash-command-fuzzy-discovery.md`。
 //
 // 上游用在四处：斜杠命令菜单（`ui-commands/popup.ts` / `service.ts`）、模型菜单（
-// 按**提供方分组内**排序）、技能来源、快捷键参考（`ui-shortcuts/Reference.tsx`）。
+// 按**提供方分组内**排序）、技能来源、快捷键参考。
 // 插件对应三处：`components/ModelPicker.ts`（分组内）、`components/SearchPicker.ts`（平铺）、
 // `core/trigger/useTrigger.ts`（斜杠 / @ 菜单）。
 

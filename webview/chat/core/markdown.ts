@@ -11,10 +11,10 @@ import { CODE_ICON_CHECK, CODE_ICON_COPY, CODE_ICON_NOWRAP, CODE_ICON_WRAP } fro
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 
 /**
- * TeX → HTML。**三档错误链与上游 `katex.tsx` 的 `renderTexToReact` 逐档一致**：
+ * TeX → HTML。**三档错误链与上游 `renderTexToReact` 逐档一致**：
  *   ① `throwOnError: true`（严格渲染）；
  *   ② 失败 → `strict: 'ignore', throwOnError: false` 重试（把不可识别的命令降级成红字而不是整块失败）；
- *   ③ 仍抛（KaTeX 内部错，不是 ParseError）→ 自己出一段 `.katex-error` 原文（上游 `katex.tsx` 同款结构）。
+ *   ③ 仍抛（KaTeX 内部错，不是 ParseError）→ 自己出一段 `.katex-error` 原文（与上游同款结构）。
  * 插件渲染的是 HTML 字符串，所以直接取 KaTeX 的输出即可 —— 上游是把它用 DOMParser 转成 React 元素树，
  * 那一步是为了塞进 React，这里的链路本就吃 HTML，无需转。
  * @param value - TeX 源码。

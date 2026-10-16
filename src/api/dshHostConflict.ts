@@ -1,12 +1,11 @@
 // 「同一份 ~/.dsh 上已经跑着别的 dsh 宿主」的判据与文案（**纯函数，无依赖**，便于守卫直测）。
 //
 // 为什么要有这道门：**归属是投影** —— 每个 dsh 宿主只认自己进程内的 live 索引
-//（`packages/workspace/workspace/src/entity.ts`：`rememberSessionPath` 登记、`sessionIds` getter 按它过滤）⇒
+//（`rememberSessionPath` 登记、`sessionIds` getter 按它过滤）⇒
 // 两个宿主共用一份 `~/.dsh` 时**各看各的**：对方挂上的会话不显示、新建的会话可能先落「未分组」。
 //
-// ⚠️ **不是"互相删"**（2026-10-10 旧结论，2026-10-14 按上游源码更正）：写回成员表是**合并**，
+// ⚠️ 写回成员表是**合并**，
 // 「本进程不认识」的 id **原样保留**（`index.ts:700-703`）⇒ 归属不会被抹掉，回到原宿主仍在。
-// 10/8–10/9 那份磁盘缺失取证仍是事实，但归因改为同机路径归一化 / live 索引不一致（见 `13` §6）。
 //
 // 插件自起 `dsh web`（随机端口）与用户自己的 DSH Desktop 并存，就是这个地基。
 
@@ -32,7 +31,7 @@ export interface DshHostProcess {
  * 判据刻意放宽到"命令行里出现 dsh / deepseek harness，且像是 web 宿主或桌面应用"：
  * 宁可多报一条（用户点「仍然启动」即可），也不要漏报 —— 漏报的代价是**静默丢工作区归属**。
  *
- * ⚠️ **必须跨平台**（2026-10-14）：桌面应用的命令行形状三家都不同 ——
+ * ⚠️ **必须跨平台** ：桌面应用的命令行形状三家都不同 ——
  * Windows `…\DeepSeek Harness.exe`、macOS `…/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness`、
  * Linux `deepseek-harness`。原先的候选门只认 `dsh` 子串，而 **macOS 的应用路径里没有 `dsh`**，
  * 于是那条最该防的"静默丢归属"在 mac 上完全不设防。

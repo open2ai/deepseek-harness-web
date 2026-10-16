@@ -95,7 +95,7 @@ export function AttachmentGallery({ store, images }: { store: ChatStore; images:
        * 两个动作都在（2026-10-11 维护者："图片上游能预览，插件最好也能打开查看，如在编辑区打开"）：
        *   · **图本身**点开 → `openAttachment`：宿主按 `attachmentId` 取字节落临时文件，
        *     交给 VS Code 的**图片预览**在编辑区打开（`vscode.open`）；
-       *   · **标题**点开 → 本卡的灯箱（与上游 `MessageImage.tsx` 的 `ImageLightbox` 同形）。
+       *   · **标题**点开 → 本卡的灯箱（与上游 `ImageLightbox` 同形）。
        * 图本身不用来开灯箱：上游那颗 `button` 的 `title` 就是"打开"，在编辑器里打开更贴近它的意图。
        */
       return html`<button type="button" class="att-item" key=${img.attachmentId}

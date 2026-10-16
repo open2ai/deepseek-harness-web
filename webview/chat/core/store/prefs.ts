@@ -39,17 +39,18 @@ export interface PrefsSlice {
 }
 
 export function createPrefs(): PrefsSlice {
-  // 默认值 = **上游默认**（不是插件自有偏好）：
-  // 工作步骤展示缺省 → 0.2.0 起按客户端默认 `detailed` 口径（`transcriptView` 仍折、`stepGrouping` = `history`）；
-  // 性能与用量 `detailed`；代码工作工具**默认开**；繁忙时 `queue`；三个策略门取 `detailed`/`standard` 共用值。
-  // 所以「读不到设置」与「用户没改过」表现相同（也等于接入前插件的形态：进行中无分组头、定稿收起）。
+  // 默认值 = **上游默认**（不是插件自有偏好）：桌面端的「工作步骤展示」默认档 = `standard`
+  // → `foldCompletedTurns` 真、`stepGrouping` = `collapsed`（进行中的回合也有可展开的分组头）。
+  // ⚠️ **这一份必须与宿主下发的那一份逐字一致**（`src/dsh/chat-prefs.ts` 的 `DEFAULT_CHAT_PREFS`）：
+  // 两处不同（这里曾写 `history`）时，宿主偏好帧到达**之前**渲染出的那几帧会少掉分组头 ——
+  // 按 `history` 判"回合关闭了没"要与同一帧里的其他列配套，两处不一致就是自相矛盾的中间态。
   const transcriptView = signal<'normal' | 'compact'>('compact')
   const performanceUsage = signal<'compact' | 'detailed'>('detailed')
   const developerTools = signal(true)
   const busyEnter = signal<'queue' | 'steer'>('queue')
   const settledReasoningPreview = signal(true)
   const liveProcessDetail = signal(true)
-  const stepGrouping = signal<'collapsed' | 'history' | 'none'>('history')
+  const stepGrouping = signal<'collapsed' | 'history' | 'none'>('collapsed')
 
   function apply(prefs: ChatPrefsPatch): void {
     if (prefs.transcriptView !== undefined) transcriptView.value = prefs.transcriptView

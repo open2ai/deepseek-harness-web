@@ -273,6 +273,73 @@ interface ShellArgs {
   description?: string
   workdir?: string
   cwd?: string
+  run_in_background?: boolean
+}
+
+/**
+ * 这个 shell 调用**该不该走终端卡**（上游 `BashRow` 的 `genericBody` 判据，逐条同口径）。
+ *
+ * 上游的终端卡只覆盖"前台、已带 `description`、正常结算"的 shell 调用；另外三类**故意退回通用
+ * 「输入 / 输出」卡**（那时终端卡表达不了它要说的事）：
+ *   · **调用失败**（`isError`，如沙箱拒绝）→ 通用卡用错误色渲染输出，并把命令原文放在「输入」段；
+ *   · **常驻 shell 调用**（参数里没有 `description`，上游据此认定）→ 结果可能带重置与不完整输出，
+ *     没有单一退出码可报；
+ *   · **输出被外溢（spill）截断**的前台调用 → 结尾的提示会盖住退出标记，不能推断退出码。
+ *
+ * 判定依据是**已批准并结算的调用**（上游要求 `parentCallId === undefined`），
+ * 即插件这边的 `subCalls === undefined`：子调用不参与这条路。
+ * @returns 该调用是否必须走通用卡（true = 不要用终端卡）
+ */
+export function shellWantsGenericCard(
+  name: string,
+  argsRaw: string | undefined,
+  output: string | undefined,
+  subCalls: readonly unknown[] | undefined,
+  status: string
+): boolean {
+  if (!isTerminalTool(name)) return false
+  if (status === 'error') return true
+  // 结算过的调用才算"常驻/外溢"：运行中的调用没有结果可比（上游同样只在结算后判）
+  const settled = status !== 'running' && status !== 'preparing'
+  if (!settled) return false
+  if (subCalls !== undefined && subCalls.length > 0) return false
+  const args = parseArgs(argsRaw)
+  if (args === null) return false
+  // 常驻 shell：标准 bash/pwsh 的 schema 要求 `description`，没有就是常驻提供者（上游同判）
+  if (args.description === undefined) return true
+  if (args.run_in_background === true) return false
+  return hasSpillNotice(output ?? '')
+}
+
+const SPILL_OPEN = '('
+const SPILL_LOCATION = ' Full formatted result stored at: '
+const SPILL_GUIDANCE = '. '
+const SPILL_SEPARATOR = '\n\n'
+
+/**
+ * 省略量的形状：`12 bytes omitted` / `no bytes omitted` / `1.2 KB omitted`
+ * / 可带 ` Omitted N images.`（上游 `describeOmitted` 的产物），末尾可能带句号。
+ */
+const SPILL_COUNT = /^[0-9][0-9,.]*\s*[A-Za-z]+(\s+[A-Za-z]+)*(?: Omitted [1-9][0-9]* images\.)?\.?$/
+
+/**
+ * 输出结尾是不是外溢提示（上游 `hasSpillNotice` 的同口径判定）。
+ *
+ * 形状：`(<省略量> bytes[ Omitted N images.]. Full formatted result stored at: <位置>. <取回提示>)`，
+ * 可能整段只有这条提示。判定只看"末尾这条约定"，不关心输出来源。
+ * @param text - 完整的结果文本
+ * @returns 结尾是否是完整的 spill 提示
+ */
+export function hasSpillNotice(text: string): boolean {
+  if (!text.endsWith(')')) return false
+  const start = text.lastIndexOf(`${SPILL_SEPARATOR}${SPILL_OPEN}`)
+  const from = start < 0 ? 0 : start + SPILL_SEPARATOR.length
+  if (!text.startsWith(SPILL_OPEN, from)) return false
+  const location = text.indexOf(SPILL_LOCATION, from)
+  if (location < 0) return false
+  const count = text.slice(from + SPILL_OPEN.length, location)
+  if (!SPILL_COUNT.test(count.trim())) return false
+  return text.indexOf(SPILL_GUIDANCE, location + SPILL_LOCATION.length) >= 0
 }
 
 function parseArgs(argsRaw?: string): ShellArgs | null {
@@ -289,13 +356,9 @@ function parseArgs(argsRaw?: string): ShellArgs | null {
  * 从 tool item 派生终端卡。要求：工具变体为 bash 且 arguments 含非空 command；
  * 否则返回 null（调用方回退通用「输入 / 输出」卡，见 ToolRow）。
  *
- * 已知差异（有意为之）：上游在若干情况下会退回通用卡——调用失败、description 缺失（常驻 shell）、
- * 后台调用、结果不是恰好一个 text 块。本插件一律仍用终端卡：
- * 面板形态（状态点+命令 / 分隔线 / 输出）是本插件要的呈现。
- *
- * 代价与补偿：上游把**调用失败**（isError）的调用交给通用卡，那里用错误态色渲染输出；本插件留用终端卡后，
- * 失败态必须由卡自己表达——**退出码答不了这个问题**（spawn 失败/中止/沙箱拒绝都没有退出码），
- * 所以卡内运行态取宿主判好的 `t.status`，见 {@link TermCard.state}。
+ * ⚠️ **本函数只负责"怎么画"，"该不该画"在 {@link shellWantsGenericCard}**：
+ * 上游 `BashRow` 对"调用失败 / 常驻 shell / 输出被外溢截断"三类故意退回通用卡，判据收在那一个函数里
+ * （`ToolRow` 分派时调用）。此前这里是硬编码"一律仍用终端卡"，与上游不一致（真机 2026-10-17 对照发现）。
  */
 export function terminalCardModel(
   t: { name: string; argsRaw?: string; output?: string; exitCode?: number; signal?: string; status: TermState },

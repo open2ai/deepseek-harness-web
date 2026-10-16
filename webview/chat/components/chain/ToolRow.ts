@@ -12,7 +12,7 @@ import { toolTitle, toolIconOfTool, resultFirstLine, codeBodyOf, toolVariantOf }
 import { renderMd } from '../../core/markdown'
 import { toolGlyphOf } from './ToolIcons'
 import { toolStateLabel, ToolState } from '../../core/states'
-import { filePathOf, terminalCardModel, relativizeToCwd } from '../../core/terminal'
+import { filePathOf, terminalCardModel, relativizeToCwd, shellWantsGenericCard } from '../../core/terminal'
 import { webCardModel } from '../../core/web-card'
 import { askCardModel } from '../../core/ask-card'
 import { skillCardModel, SKILL_LABELS } from '../../core/skill-card'
@@ -281,7 +281,12 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   }
 
   // ---- 终端卡（bash / pwsh / shell）----
-  if (terminal !== null) return wrap(html`<${TerminalBlock} card=${terminal} store=${store} />`)
+  // ⚠️ **不是所有 shell 调用都画终端卡**：上游 `BashRow` 只覆盖"前台、已带 `description`、正常结算"
+  // 的那一类，另外三类**故意退回通用「输入 / 输出」卡**（判据见 `shellWantsGenericCard`）——
+  // 调用失败（沙箱拒绝之类）正是其中一类，那时上游把**命令原文放进「输入」段**、用错误色渲染「输出」段。
+  if (terminal !== null && !shellWantsGenericCard(item.name, item.argsRaw, item.output, item.subCalls, item.status)) {
+    return wrap(html`<${TerminalBlock} card=${terminal} store=${store} />`)
+  }
 
   // ---- 差异卡（write / edit：文件改动）----
   if (diff !== null) return wrap(html`<${DiffCard} card=${diff} store=${store} />`)

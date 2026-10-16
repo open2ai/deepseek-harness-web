@@ -384,7 +384,7 @@ export type ViewToHostMessage =
    *（事件里没有本地路径），而 `openFile` 要的是路径。宿主收到后按 id 取字节、落到临时文件、
    * 再交给 VS Code 的图片预览打开（`vscode.open`，见 `openFileInEditor` 的图片分流）。
    *
-   * 与上游同形：上游图片预览也是"点开看全尺寸"（`MessageImage.tsx` 的 `ImageLightbox`），
+   * 与上游同形：上游图片预览也是"点开看全尺寸"（`ImageLightbox`），
    * 插件把"打开"的落点放在**编辑器区**（在 VS Code 里更顺手，与行摘要那条同口径）。
    */
   | { type: 'openAttachment'; attachmentId: string; name?: string }
