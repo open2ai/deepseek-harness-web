@@ -3,8 +3,19 @@
 // 为什么单独一个脚本而不是单测：这一层的失效方式是**静默**的（上游换形状 → 队列卡变空，不报错），
 // 所以必须能直接喂帧、直接断言。跑法：node scripts/verify-control-frames.mjs
 //
-// 覆盖上游 0.1.7 的真实帧形状（取自 `session-controller/src/types.ts`）；
-// 0.1.5-rc.x 的 `queues`/`queue` 帧自 v0.1.15 起不再读，但必须走 `onLegacyHost` 报告（见文末用例）。
+// ⚠️ **下面那些 `0.1.7-alpha.2` 标签是"这套形状第一次核对的版本"，不是"只对那个版本有效"**：
+// 2026-10-17 对着**当前基线 `dsh-0.2.0-rc.2`** 逐条复核过，这套形状**一字未变**，所以断言继续有效：
+//   · `baseline.value` = `{ projections }`（**无** `queues`）——0.2.0 的 `SessionControlBaseline` 原文只有
+//     `readonly projections`（`api/session-controller/src/types.ts`）；
+//   · 帧联合只有两种：`{type:'baseline'}` / `{type:'projection'} & SessionProjectionUpdate`（同文件）；
+//   · 投影块 = `{asOfSeq, values}`（同文件 `SessionProjectionBaseline`）；
+//   · inbox 投影 = `{'next-turn': 消息[], 'next-step': 消息[]}`，`next-step` 里 `source.kind === 'user'`
+//     是插话、其余（`recall` / 插件注入等）是上下文 —— 0.2.0 的宿主用例 `control-queue.host.spec.ts`
+//     就是 `inbox.append('next-step', steering)` + `append('next-step', context)` 这么喂的；
+//   · `permissions` 投影只带 `{currentValue}`、**目录在进程级** —— 0.2.0 的原文：
+//     "Session projection carries current value only"（`client/ui-permission-presets`）。
+// 旧代（0.1.5-rc.x）的 `queues` 整表 / `{type:'queue'}` 帧：自 v0.1.15 起不再读，
+// 但必须走 `onLegacyHost` 报告（见文末用例）。
 import { build } from 'esbuild';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -59,7 +70,7 @@ function harness() {
     };
 }
 
-/** 上游 0.1.7 的一条 inbox 消息（UserMessage）。 */
+/** 上游 0.1.7-alpha.2 起的一条 inbox 消息（UserMessage）；0.2.0-rc.2 复核形状未变。 */
 const userMessage = (id, text, rpcId) => ({
     id,
     role: 'user',
@@ -74,7 +85,7 @@ const contextMessage = (id) => ({
 });
 const inbox = (nextTurn, nextStep) => ({ 'next-turn': nextTurn, 'next-step': nextStep });
 
-console.log('0.1.7-alpha.2：baseline 里的 inbox 投影');
+console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：baseline 里的 inbox 投影');
 {
     const h = harness();
     const seq = new Map();
@@ -82,7 +93,7 @@ console.log('0.1.7-alpha.2：baseline 里的 inbox 投影');
         {
             type: 'baseline',
             value: {
-                // 注意：0.1.7 的 baseline **没有** queues 字段（上游已删）
+                // 注意：0.1.7-alpha.2 起 baseline **没有** queues 字段（上游已删；0.2.0-rc.2 复核同）
                 projections: {
                     [SID]: {
                         asOfSeq: 42,
@@ -110,7 +121,7 @@ console.log('0.1.7-alpha.2：baseline 里的 inbox 投影');
     check('基线整表下发', h.baselines.length, 1);
 }
 
-console.log('0.1.7-alpha.2：inbox 的 projection 帧');
+console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：inbox 的 projection 帧');
 {
     const h = harness();
     const seq = new Map();
@@ -123,7 +134,7 @@ console.log('0.1.7-alpha.2：inbox 的 projection 帧');
     check('水位推进到最大 seq', seq.get(SID), 11);
 }
 
-console.log('0.1.7-alpha.2：交错到达的水位');
+console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：交错到达的水位');
 {
     const h = harness();
     const seq = new Map();
@@ -172,7 +183,7 @@ console.log('旧代（0.1.5-rc.x）承载：不再读，但必须报告');
     check('detail 不把承载归因到旧版本', /dsh-0\.1\.[0-6]/.test(h.legacyHost[0]), false);
 }
 
-console.log('0.1.7-alpha.2：权限目录与投影拼接');
+console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：权限目录与投影拼接');
 {
     // 上游 0.1.7 的 permissions 投影只剩 currentValue；选项目录在进程级 remote。
     const catalog = [
@@ -248,4 +259,4 @@ if (failures > 0) {
     console.log(`✘ ${failures} 项不符`);
     process.exit(1);
 }
-console.log('✔ 全部通过：0.1.7+ 帧形状正确归约，旧代承载明确报告');
+console.log('✔ 全部通过：0.1.7+ 帧形状正确归约（0.2.0-rc.2 复核同），旧代承载明确报告');

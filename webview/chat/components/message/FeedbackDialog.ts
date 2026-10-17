@@ -1,12 +1,16 @@
-// 「提交反馈」弹窗（输入框上方）：与上游 FeedbackDialog 同内容 ——分类 chips + 详情输入 + 提交。
+// 「提交反馈」卡（👍/👎 点开的那一张）：**内联显示在对话区下方**（不弹窗、不遮罩）。
 //
-// 为什么评价不直接提交而是先开这个弹窗：上游把「评价」与「说明/分类」当作**同一次提交**，
-// 弹窗提交时才写；空草稿也是有效提交（只记一个评价）。冲突（version-conflict）时弹窗**不关**，
-// 只在弹窗里报 —— 用户可以直接改完再提交。
+// 文案逐条对照上游字典：
+//   `dialog.title`「提交反馈」/ `dialog.categories`「反馈分类」/ `dialog.detail`「反馈详情」/
+//   `dialog.hint`「填写详情以帮助我们改进体验，提交内容会包括当前对话的日志」/ `category.*` 七条 /
+//   `toast.recorded`「感谢你的反馈」/ `error.conflict`·`error.noteTooLarge`·`error.generic` 三条。
+//   「好的回答 / 有问题的回答」只属于**动作按钮**的 `action.like` / `action.dislike`（见 `FeedbackActions.ts`）。
+//
+// 一处有意的本地化：关掉的时机比上游多一条 —— **提交中不允许关**（上游靠控制器挡；这里由 `submitting` 挡）。
 import { html } from 'htm/preact'
 import type { ChatStore } from '../../core/store/chat'
 
-/** 分类 id → 中文标签（字典原文；宿主下发的 id 认不出时回显 id 本身，不自造词）。 */
+/** 分类 id → 中文标签（上游 `category.*` 字典原文；宿主下发的 id 认不出时回显 id 本身，不自造词）。 */
 const CATEGORY_LABELS: Record<string, string> = {
   'task-result': '任务结果',
   'instruction-following': '指令理解与遵循',
@@ -17,37 +21,49 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: '其他',
 }
 
+/**
+ * 分类 chips 的**兜底顺序**（上游把七个分类写死在客户端：`CATEGORY_CHIPS` 是 `FeedbackCategory` 的完整记录）。
+ * 宿主下发了目录就用宿主那份（顺序以宿主为准），没下发时用这里 —— 否则会渲染出一张**没有分类可选的空卡**。
+ */
+const FALLBACK_CATEGORIES = Object.keys(CATEGORY_LABELS)
+
 export function FeedbackDialog({ store }: { store: ChatStore }) {
   const d = store.feedbackDialog.value
   if (d === null) return null
-  const categories = store.feedbackCategories.value
+  const declared = store.feedbackCategories.value
+  const categories = declared.length > 0 ? declared : FALLBACK_CATEGORIES
+  const busy = d.submitting
+  const close = (): void => {
+    // 提交中不关：关掉等于把这次提交的反馈面丢掉（上游用控制器挡同一件事）
+    if (!busy) store.closeFeedbackDialog()
+  }
   const submit = (): void => store.submitFeedbackDialog()
-  return html`<div class="fb-dialog" role="dialog" aria-label="提交反馈">
-    <div class="fb-dialog-head">
-      <span class="fb-dialog-title">${d.rating === 'positive' ? '好的回答' : '有问题的回答'}</span>
-      <button type="button" class="fb-icon" title="关闭" aria-label="关闭"
-        disabled=${d.submitting} onClick=${() => store.closeFeedbackDialog()}>
+  return html`<div class="fb-card" role="dialog" aria-label="提交反馈">
+    <div class="fb-head">
+      ${/* 标题是**固定**的「提交反馈」（上游 `dialog.title`）；「好的回答 / 有问题的回答」是**动作按钮**那两个
+           tooltip（`action.like` / `action.dislike`） */ ''}
+      <h2 class="fb-title">提交反馈</h2>
+      <button type="button" class="fb-close" title="关闭" aria-label="关闭"
+        disabled=${busy} onClick=${close}>
         <span class="codicon codicon-close"></span>
       </button>
     </div>
-    <div class="fb-dialog-body">
-      ${categories.length > 0
-        ? html`<div class="fb-chips" role="group" aria-label="反馈分类">
-            ${categories.map((id) => html`<button type="button" key=${id}
-              class=${'fb-chip' + (d.category === id ? ' active' : '')}
-              aria-pressed=${d.category === id}
-              disabled=${d.submitting}
-              onClick=${() => store.editFeedbackDialog({ category: d.category === id ? null : id })}>
-              ${CATEGORY_LABELS[id] ?? id}
-            </button>`)}
-          </div>`
-        : null}
-      <textarea class="fb-detail" rows="3" aria-label="反馈详情"
+    <div class="fb-body">
+      <div class="fb-cats" role="group" aria-label="反馈分类">
+        ${categories.map((id) => html`<button type="button" key=${id}
+          class=${'fb-chip' + (d.category === id ? ' active' : '')}
+          aria-pressed=${d.category === id}
+          disabled=${busy}
+          onClick=${() => store.editFeedbackDialog({ category: d.category === id ? null : id })}>
+          ${CATEGORY_LABELS[id] ?? id}
+        </button>`)}
+      </div>
+      <textarea class="fb-detail" aria-label="反馈详情"
         placeholder="填写详情以帮助我们改进体验，提交内容会包括当前对话的日志"
-        disabled=${d.submitting} value=${d.note}
+        readOnly=${busy} value=${d.note}
         onInput=${(e: Event) => store.editFeedbackDialog({ note: (e.target as HTMLTextAreaElement).value })}></textarea>
       ${d.errorCode !== null
-        ? html`<div class="fb-dialog-error" role="status">${
+        ? html`<div class="fb-error" role="status">${
             d.errorCode === 'version-conflict'
               ? '这条反馈已在别处改动，已显示最新状态'
               : d.errorCode === 'note-too-large'
@@ -56,9 +72,9 @@ export function FeedbackDialog({ store }: { store: ChatStore }) {
           }</div>`
         : null}
     </div>
-    <div class="fb-dialog-bar">
-      <button type="button" class="fb-submit" disabled=${d.submitting} onClick=${submit}>
-        ${d.submitting ? '正在提交…' : '提交'}
+    <div class="fb-footer">
+      <button type="button" class="fb-submit" disabled=${busy} onClick=${submit}>
+        ${busy ? '正在提交…' : '提交'}
       </button>
     </div>
   </div>`

@@ -53,6 +53,21 @@
     --dsh-card-fill: rgb(33, 33, 35);
     /* 触发通知卡底色 = 上游 `--dsw-alias-turn-trigger-bg`（深色档就取 `interactive-bg-hover`）。 */
     --dsh-trigger-bg: rgba(255, 255, 255, 0.08);
+    /*
+     * **反馈卡**（👍/👎 点开的那张内联卡）用的几个卡片令牌。
+     *
+     * 在webview 侧复刻成插件自己的 `--dsh-*`：
+     *   · `panel-fill` = `alias-bg-layer-2`（浅 `bluish-00` rgb(255,255,255) / 暗 `bluish-850` rgb(44,44,46)）；
+     *   · `panel-border` = `alias-border-l4`（浅 `rgba(0,0,0,.16)` / 暗 `rgba(255,255,255,.2)`）；
+     *   · `panel-radius` = `radius-panel` 28px；`panel-shadow` = `elevation-prominent` 的两层柔和投影；
+     *   · `interactive-hover` = `alias-interactive-bg-hover`（浅 `rgba(38,49,72,.06)` / 暗 `rgba(255,255,255,.08)`）。
+     * 高对比主题下颜色交给语义变量，靠描边区分。
+     */
+    --dsh-panel-fill: rgb(44, 44, 46);
+    --dsh-panel-border: rgba(255, 255, 255, 0.2);
+    --dsh-panel-radius: 28px;
+    --dsh-panel-shadow: 0 3px 8px 0 rgba(0, 0, 0, 0.24), 0 0 20px 0 rgba(0, 0, 0, 0.2);
+    --dsh-interactive-hover: rgba(255, 255, 255, 0.08);
   }
   body.vscode-light {
     --dsh-hairline: rgba(0, 0, 0, 0.1);
@@ -68,6 +83,11 @@
     --dsh-inset-fill: rgb(243, 244, 246);
     --dsh-card-fill: rgb(250, 250, 250);
     --dsh-trigger-bg: rgb(249, 250, 251);
+    /* 浮层卡片的浅色档（上游 bluish-00 / border-l4 .16 / mask-1 .24 / interactive-bg-hover 那三档） */
+    --dsh-panel-fill: rgb(255, 255, 255);
+    --dsh-panel-border: rgba(0, 0, 0, 0.16);
+    --dsh-panel-shadow: 0 3px 8px 0 rgba(0, 0, 0, 0.08), 0 0 20px 0 rgba(0, 0, 0, 0.06);
+    --dsh-interactive-hover: rgba(38, 49, 72, 0.06);
   }
   body.vscode-high-contrast,
   body.vscode-high-contrast-light {
@@ -81,6 +101,11 @@
     --dsh-inset-fill: var(--vscode-textCodeBlock-background, var(--vscode-editor-background, #000000));
     --dsh-card-fill: var(--vscode-editor-background, #000000);
     --dsh-trigger-bg: var(--vscode-editor-background, #000000);
+    /* 反馈卡：高对比下同样交给语义变量 + 描边（见 `:root` 那段说明） */
+    --dsh-panel-fill: var(--vscode-editorWidget-background, var(--vscode-editor-background, #000000));
+    --dsh-panel-border: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.4));
+    --dsh-panel-shadow: none;
+    --dsh-interactive-hover: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.22));
   }
 
   * { box-sizing: border-box; }
@@ -1938,39 +1963,82 @@
   .fb-btn .codicon { font-size: 13px; display: block; }
   /* 拇指是**上游同形的线稿 svg**（见 ThumbIcons.ts：未评描边、已评加填充）：尺寸显式给，保持原来的 13px 占位 */
   .fb-btn svg { width: 13px; height: 13px; display: block; }
-  .fb-dialog {
-    margin: 0 14px 4px; padding: 12px 14px;
+  /* ---------- 「提交反馈」卡（👍/👎 点开）：**内联在对话区下方**，不弹窗、不遮罩 ----------
+     形态由维护者 2026-10-17 定案：「不弹出页面，还是按之前的在对话下面显示」，随后两轮补充：
+     **边框布局照最早那版**（贴容器、左右留 14px 边距、**宽度自适应**，不写死宽度）、
+     **长宽自适应**（宽随面板、高随内容；详情框自己长高并可手动拖）。
+     卡片挂在 `.chat-body` 与输入框之间（`app.ts` 的挂载顺序），随会话区一起排版。
+     保留的部分：固定标题「提交反馈」/ 七 chips / 详情框 / **提交按钮在右侧**。
+     令牌用插件这套（`--dsh-*` + `--vscode-*`）——上游的 `--dsw-*` 在 webview 侧不存在。 */
+  .fb-card {
+    flex: none;
+    box-sizing: border-box;
+    display: flex; flex-direction: column;
+    /* 宽度**自适应**：贴容器、左右各留 14px（与最早那版 `.fb-dialog` 同口径），不写死 px */
+    width: auto; margin: 0 14px 4px;
+    /* 高度**自适应**：随内容长；超过 60vh / 520px 由卡片自己滚，避免把输入框顶出屏幕 */
+    max-height: min(60vh, 520px); overflow: auto;
+    padding: 12px 14px;
     border: 0.5px solid var(--dsh-hairline);
-    border-radius: 8px; background: var(--vscode-editorWidget-background, rgba(0,0,0,0.25));
-    display: flex; flex-direction: column; gap: 10px;
-  }
-  .fb-dialog-head { display: flex; align-items: center; gap: 6px; }
-  .fb-dialog-title { flex: 1; font-size: 12px; font-weight: 600; color: var(--vscode-foreground, #ddd); }
-  .fb-icon { border: none; background: none; cursor: pointer; padding: 2px; border-radius: 6px; color: var(--vscode-descriptionForeground, #999); }
-  .fb-icon:hover { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
-  .fb-icon:disabled { opacity: 0.4; cursor: default; background: none; }
-  .fb-dialog-body { display: flex; flex-direction: column; gap: 8px; }
-  .fb-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .fb-chip {
-    padding: 3px 10px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 11.5px;
-    border: 1px solid var(--dsh-hairline); background: transparent;
+    border-radius: 8px;
+    background: var(--dsh-card-fill);
     color: var(--vscode-foreground, #ddd);
   }
-  .fb-chip:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
-  .fb-chip.active { border-color: var(--vscode-focusBorder, #3794ff); background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.3)); }
-  .fb-chip:disabled { opacity: 0.5; cursor: default; }
-  .fb-detail {
-    width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; resize: vertical;
-    border: 1px solid var(--dsh-hairline); background: var(--vscode-input-background, rgba(0,0,0,0.2));
-    color: var(--vscode-input-foreground, #ddd); font: inherit; font-size: 12px; min-height: 56px; max-height: 144px;
+  /* 头部：不再单独留内边距（卡片自己有 12/14），只做两端对齐 */
+  .fb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .fb-title { margin: 0; font-size: 16px; line-height: 24px; font-weight: 500; }
+  .fb-close {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 0;
+    border: none; border-radius: 8px; background: transparent; cursor: pointer;
+    color: var(--vscode-descriptionForeground, #999);
   }
-  .fb-dialog-error { font-size: 11px; color: var(--vscode-errorForeground, #f48771); }
-  .fb-dialog-bar { display: flex; justify-content: flex-end; }
+  .fb-close:hover { background: var(--dsh-interactive-hover); color: var(--vscode-foreground, #ddd); }
+  .fb-close:disabled { opacity: 0.4; cursor: default; background: none; }
+  .fb-close .codicon { font-size: 14px; }
+  /* 正文两段：chips 与详情框之间 10px（卡片自己有 12/14 内边距，这里不再重复左右内边距） */
+  .fb-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  /* chips 间距 6px：面板窄时七个分类才不会挤成"末行只剩一个"的多余空白 */
+  .fb-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+  .fb-chip {
+    height: 28px; padding: 0 10px; border-radius: 8px; cursor: pointer;
+    border: 0.5px solid var(--dsh-panel-border); background: transparent;
+    color: var(--vscode-foreground, #ddd); font: inherit; font-size: 13px; line-height: 18px;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  .fb-chip:hover:not(:disabled) { background: var(--dsh-interactive-hover); }
+  .fb-chip.active, .fb-chip.active:hover:not(:disabled) {
+    border-color: var(--vscode-button-background, #0e7ad3);
+    background: var(--vscode-button-background, #0e7ad3);
+    color: var(--vscode-button-foreground, #fff);
+  }
+  .fb-chip:disabled { opacity: 0.4; cursor: default; }
+  .fb-chip:focus-visible, .fb-close:focus-visible, .fb-submit:focus-visible {
+    outline: 2px solid var(--vscode-focusBorder, #3794ff); outline-offset: 2px;
+  }
+  /* 详情框：高度**自适应**（随字长高），并在支持的宿主里允许手动拖高（右下角那枚把手）；
+     宽度恒为 100%（跟卡片走），所以只放开纵向拖拽，避免撑破卡片。 */
+  .fb-detail {
+    display: block; width: 100%; box-sizing: border-box;
+    min-height: 64px; max-height: 240px; padding: 8px 10px;
+    border: 0.5px solid var(--dsh-hairline); border-radius: 8px;
+    background: var(--dsh-inset-fill); color: var(--vscode-input-foreground, #ddd);
+    font: inherit; font-size: 13px; line-height: 20px;
+    field-sizing: content; resize: vertical; overflow: auto;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+  .fb-detail::placeholder { color: var(--vscode-descriptionForeground, #999); }
+  .fb-detail:focus { outline: none; border-color: var(--dsh-hairline-strong); box-shadow: 0 0 0 1px var(--vscode-focusBorder, #3794ff); }
+  .fb-error { font-size: 12px; color: var(--vscode-errorForeground, #f48771); }
+  /* 底栏：**按钮在右侧**（维护者 2026-10-17：「提交按钮还是原来的右边」）—— 所以不再 `width:100%` 拉满 */
+  .fb-footer { display: flex; justify-content: flex-end; padding-top: 10px; }
   .fb-submit {
-    padding: 4px 14px; border: none; border-radius: 8px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 500;
+    height: 36px; padding: 0 20px; border: none; border-radius: 12px; cursor: pointer;
+    font: inherit; font-size: 13px; font-weight: 500;
     background: var(--vscode-button-background, #0e7ad3); color: var(--vscode-button-foreground, #fff);
   }
-  .fb-submit:disabled { opacity: 0.5; cursor: default; }
+  .fb-submit:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, #1177bb); }
+  .fb-submit:disabled { opacity: 0.4; cursor: not-allowed; }
   /* 结果提示：浮在输入区上方居中（上游把 toast 挂在 composer 卡片上） */
   .fb-toast {
     position: fixed; left: 50%; transform: translateX(-50%); bottom: 104px; z-index: 30;

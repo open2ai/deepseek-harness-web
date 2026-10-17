@@ -21,7 +21,9 @@ const outDir = path.join(root, 'dist', 'chat')
 const production = process.argv.includes('--production')
 const watch = process.argv.includes('--watch')
 
-// 清空旧产物（避免残留 TinyRobot 的旧 bundle）
+// 清空旧产物再重建（`dist/chat` 是**整目录替换**：删掉上一次的 `chat.js`/`chat.css`/`assets/`）。
+// ⚠️ 这一步只在**进程启动时**做一次：`--watch` 下每次重建只覆盖文件、不再清目录 ——
+// 所以 watch 期间换了输出文件名（如改了 `assetNames`）时，旧文件会残留到下次重启。
 rmSync(outDir, { recursive: true, force: true })
 mkdirSync(outDir, { recursive: true })
 
@@ -40,9 +42,11 @@ const options = {
   outfile: path.join(outDir, 'chat.js'),
   minify: production,
   logLevel: watch ? 'info' : 'silent',
-  // KaTeX 的 CSS 里用 `url(fonts/KaTeX_*.woff2)` 引字体：按**文件**输出到 dist/chat/assets，
-  // CSS 里的相对地址由 esbuild 自动改写 —— webview 从扩展目录加载 chat.css，相对路径可直接取到。
+  // KaTeX 的 CSS 里用 `url(fonts/KaTeX_*.woff2)` 引字体：按**文件**输出到 `dist/chat/assets/`，
+  // CSS 里的相对地址由 esbuild 自动改写成 `./assets/…` —— webview 从扩展目录加载 chat.css，相对路径可直接取到。
   // 不做 dataurl：那会把 ~1MB 字体塞进 CSS，首屏多解析一大坨 base64。
+  // 落点由下面这行 `assetNames` 决定（实测：去掉它就退回 `dist/chat/` 根、URL 变成 `./KaTeX_….woff2`；
+  // 见 `tmp/_assetnames.check.mjs`）。它同时约束以后 import 进来的图片等资源。
   loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' },
   assetNames: 'assets/[name]-[hash]',
 }
