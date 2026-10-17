@@ -202,7 +202,7 @@
     "watch:chat": "node scripts/build-chat.mjs --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "watch:tsc:chat": "tsc --noEmit --watch -p webview/chat",
-    "package": "pnpm run check-types && pnpm run lint && pnpm run verify:contracts && pnpm run build:chat && node esbuild.js --production",
+    "package": "pnpm run check-types && pnpm run lint && pnpm run verify:contracts && node scripts/build-chat.mjs --production && node esbuild.js --production",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
