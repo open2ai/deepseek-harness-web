@@ -301,11 +301,23 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         // 本地提交失败（没有回合、没有行）：标掉那条乐观行并给错误，避免输入区一直卡在「处理中」。
         // scope='queue' 是**忙时提交失败**：那条消息还没有回合，正在跑的是别人的回合 ——
         // 只标队列卡里那条「发送中」，绝不把对话区里未定稿的回答行定稿成错误。
-        if (m.scope === 'queue') {
-          queue.failSending(m.rpcId, m.message ?? '发送失败')
+        // scope='stop' 是**取消失败**：上游把 stop 的失败写进同一个 `promptError`（`op:'stop'`），
+        // 因而这一格也承载它 —— 只写错误条，不动行表（行表由随后的 turn/end 定稿）、不动队列卡。
+        if (m.scope === 'stop') {
+          messages.store.promptError.value = { message: m.message ?? '未能停止本次运行', ...(m.code === undefined ? {} : { code: m.code }) }
           break
         }
-        messages.failSubmission(m.rpcId, m.message ?? '发送失败')
+        if (m.scope === 'queue') {
+          queue.failSending(m.rpcId, m.message ?? '发送失败')
+          // 错误原因走输入区那条错误条（与空闲提交同一格）；队列卡自己只留「发送失败」的状态词。
+          // 同时把这次的内容放回输入区（上游：草稿留在机器里，用户直接重发）。
+          messages.store.promptError.value = { message: m.message ?? '发送失败', ...(m.code === undefined ? {} : { code: m.code }) }
+          composer.restoreSentDraft(m.rpcId)
+          break
+        }
+        // 先还原草稿再标失败：还原只在「输入区还空着」时生效（用户已在改写就不抢）
+        composer.restoreSentDraft(m.rpcId)
+        messages.failSubmission(m.rpcId, m.message ?? '发送失败', m.code)
         break
       // 排队消息（整表替换）：队列不是行，它自持在队列切片里（见 store/queue）
       case 'queue':

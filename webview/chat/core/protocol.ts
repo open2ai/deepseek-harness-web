@@ -145,7 +145,9 @@ export type HostToViewMessage =
   // rpcId = 该次提交的标识，页面据此把对应那条本地乐观行标为「未提交成功」。
   // scope='queue' = **忙时提交失败**：只标掉队列卡里那条「发送中」，**不得**去定稿对话区里
   // 正在跑的回答行（那一轮不是这次提交的）。缺省 'turn' = 现有语义。
-  | { type: 'chatError'; message?: string; rpcId?: string; scope?: 'turn' | 'queue' }
+  // scope='stop' = **取消失败**（上游把 stop 的失败也写进同一个 `promptError`，`op:'stop'`）：
+  // 只写输入区那条错误条，不动行表、不动队列卡。
+  | { type: 'chatError'; message?: string; code?: string; rpcId?: string; scope?: 'turn' | 'queue' | 'stop' }
   // 排队消息（输入框上方的队列卡）：**整表替换**，`items` 为空即没有排队消息（卡片整块不渲染）。
   // 与「行」不同源：队列只在服务端的收件箱里、不进日志，它来自队列流的投影。
   | { type: 'queue'; sessionId?: string; items?: QueueItemView[] }

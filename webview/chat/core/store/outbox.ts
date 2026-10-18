@@ -79,9 +79,16 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     // 服务端回显 user/message 时会带回同一个值，据它认领本地这一行（避免出现两行）
     const rpcId = crypto.randomUUID()
 
+    // **每次提交开始时清掉上一条错误条**（对齐上游 `prompt()` 的第一行 `this.promptError = null`：
+    // 同步、在第一个 await 之前，排队与插话两条路都清）。放在这里而不是 `addUser` 里，
+    // 是因为忙时排队**不走** addUser —— 那种情况下上一条错误会一直挂到下次空闲发送。
+    messages.store.promptError.value = undefined
+
     if (processing.value) {
       // 忙时：消息**不进对话流**（队列不属于任何回合），只在队列卡挂一条「发送中」，
       // 等宿主队列帧按 `rpcId` 认领。也不 bumpScroll —— 对话区这一瞬没有任何新内容。
+      // 记下这次发出去的内容：提交失败时按提交标识还原到输入区（上游"草稿留在机器里"同口径）
+      composer.rememberSentDraft(rpcId, { text: display, images: imgs, attachments: attach, refs: refSnap })
       queue.addSending({
         rpcId,
         mode,
@@ -111,6 +118,8 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
 
     // 空闲：用户主动发送时即使滚动条在上面也强制滚到底看新内容（流式中自己翻上去则不受影响）
     messages.bumpScroll()
+    // 同上：发出去的内容留一份快照，失败时还原（成功则不会用到）
+    composer.rememberSentDraft(rpcId, { text: display, images: imgs, attachments: attach, refs: refSnap })
     messages.addUser(display, imgs, undefined, refSnap.length ? refSnap : undefined, undefined, files.length > 0 ? files : undefined, rpcId)
     attachments.value = []
     images.value = []

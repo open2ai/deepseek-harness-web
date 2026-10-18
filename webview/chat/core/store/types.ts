@@ -537,6 +537,20 @@ export interface ChatStore {
   view: Signal<'welcome' | 'chat'>
   processing: Signal<boolean>
   /**
+   * **提交失败的错误条**（上游 `promptError` 的同一格）：只显示在输入区上方，**不进对话流**。
+   *
+   * 为什么单独一格：塞进 `messages` 会变成**永久行**（不会消失），还会跟着宿主行重排 ——
+   * 真机 2026-10-18：红字一直赖着、行序错乱、新发的内容看不见。
+   *
+   * **清空时机对齐上游**（`api/session-controller/src/client/sessions/session.ts` 的 `prompt()`）：
+   * 上游在**每次提交开始时**同步清（`this.promptError = null`，在第一个 await 之前），
+   * 排队与插话两条路都清；本插件在 `outbox.send` 真正要发的那一刻清（同样是每条提交都清）。
+   *
+   * `code` 是上游 `RemoteError.code`（如 `session/writer-held`）；页面**原样显示** message + code，
+   * 不做本地化替换（上游那句本地化提示会抹掉服务端带来的现场信息）。
+   */
+  promptError: Signal<{ message: string; code?: string } | undefined>
+  /**
    * 左下角「深度求索中，用时 X」的**时钟锚点**（epoch 毫秒）：= 正在跑的那一回合的 `turn/start` 时刻。
    *
    * 由 `messages` 切片从宿主行上取（最后一条**未定稿**的回答行的 `turnStartMs`）。

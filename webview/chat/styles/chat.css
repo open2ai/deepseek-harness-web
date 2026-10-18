@@ -733,6 +733,20 @@
     border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.45));
     border-radius: 10px; background: var(--vscode-input-background, #252526);
   }
+  /* 提交失败的错误条（上游 `promptError` 的同一格）：在输入框**上方**、只占一行高度、可折行。
+     它**不属于对话流** —— 不复用通知行的样式，也不进 messages（否则会变成永久行）。 */
+  .composer-error {
+    display: flex; align-items: flex-start; gap: 6px;
+    margin: 0 0 6px; padding: 6px 9px;
+    border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(244, 76, 76, 0.55));
+    border-radius: 8px;
+    background: var(--vscode-inputValidation-errorBackground, rgba(244, 76, 76, 0.10));
+    color: var(--vscode-errorForeground, #f14c4c);
+    font-size: 12px; line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .composer-error .codicon { flex: none; margin-top: 2px; font-size: 12px; }
+  .composer-error-text { min-width: 0; }
   #inputbox:focus-within { border-color: var(--vscode-focusBorder, #4daafc); }
   /* @ 引用贴片：叠在 textarea 首行行首(absolute，不占高)；textarea 用 text-indent 只缩进首行 → 回车/换行回到最左
      （试过改成 padding-left 整块让位：光标确实不会跑到贴片左边，但正文整块右缩不好看，已回退。） */

@@ -901,18 +901,24 @@ function setupChatWebview(
                 const msg = e instanceof Error ? e.message : String(e);
                 // 取消失败必须说出来：否则界面上只表现为「点了没反应」，原因无从查起。
                 logRows(`停止：取消失败 ${code ?? '(无码)'} ${msg}`);
-                // 呈现面**照上游**：失败写进会话的 prompt 错误位（上游 `promptError = {op:'stop', error}`），
-                // 也就是**对话区**那一处；插件对应的是通知行（tone=error），不再是 VS Code 通知 ——
-                // 通知会脱离聊天上下文，用户还容易漏掉"为什么没停"。
+                // 呈现面**照上游**：失败写进会话的 prompt 错误位（上游 `promptError = { op:'stop', error }`），
+                // 也就是输入区上方那一格（与提交失败同一处）。**不再**往对话流里压通知行 ——
+                // 那是永久行，会一直赖在会话里（真机 2026-10-18 的同一类问题）。
                 if (code === 'session/agent-busy') {
                     // 子会话的取消不走 `session.cancel`（服务端要求走父级中断路径）：给出可行动的话术。
                     postToChats({
-                        type: 'notice',
-                        tone: 'error',
-                        text: '这一轮停不下来：这个会话是分叉出来的子会话，它的父会话不在可用状态。请到源会话里停止，或等它自己结束。',
+                        type: 'chatError',
+                        scope: 'stop',
+                        code,
+                        message: '这一轮停不下来：这个会话是分叉出来的子会话，它的父会话不在可用状态。请到源会话里停止，或等它自己结束。',
                     });
                 } else {
-                    postToChats({ type: 'notice', tone: 'error', text: `未能停止本轮：${msg}${code === undefined ? '' : `（${code}）`}` });
+                    postToChats({
+                        type: 'chatError',
+                        scope: 'stop',
+                        message: `未能停止本轮：${msg}`,
+                        ...(code === undefined ? {} : { code }),
+                    });
                 }
             }
         })();
@@ -1073,6 +1079,7 @@ function setupChatWebview(
                                 scope: 'queue',
                                 rpcId: submitId,
                                 message: e instanceof Error ? e.message : String(e),
+                                ...(e instanceof DshRpcError ? { code: e.code } : {}),
                             });
                         }
                         return;
@@ -1106,7 +1113,13 @@ function setupChatWebview(
                     // 台账：带标识的提交失败 → 立即退休（回显不该继续挂着；上游同口径）
                     submitLedger.fail(typeof msg.rpcId === 'string' ? msg.rpcId : undefined);
                     pushSubmissions(dsh.getSessionId());
-                    post({ type: 'chatError', message, rpcId: typeof msg.rpcId === 'string' ? msg.rpcId : undefined });
+                    post({
+                        type: 'chatError',
+                        message,
+                        // 上游 `RemoteError.code` 一路带下来：页面按码给本地化文案（如 `session/writer-held` → 「当前会话已被占用…」）
+                        ...(e instanceof DshRpcError ? { code: e.code } : {}),
+                        rpcId: typeof msg.rpcId === 'string' ? msg.rpcId : undefined,
+                    });
                 }
             })();
         } else if (msg.type === 'queueUpdate') {

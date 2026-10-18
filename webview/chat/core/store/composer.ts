@@ -4,7 +4,7 @@ import { signal } from '@preact/signals'
 import type { ChatHost } from '../host'
 import type { StagedFile } from './types'
 import type { ImageAttachment } from '../protocol'
-import type { ChatStore, RefChip } from './types'
+import type { ChatStore, RefChip, RefSnap } from './types'
 
 export interface ComposerSlice {
   store: Pick<
@@ -32,6 +32,15 @@ export interface ComposerSlice {
   appendDraft(draft: string | undefined): void
   /** 宿主回帧：就绪（带凭据/大小）或失败（带原因）。 */
   receiveUpload(key: string, result: { receiptId?: string; name?: string; bytes?: number; error?: string }): void
+  /**
+   * 记下这次提交发出去的内容（键 = 提交标识）。
+   *
+   * 为什么要有：**提交失败时草稿必须还在**（上游 `promptError` 那套里草稿留在机器里，用户直接重发）。
+   * 插件为了即时反馈在发送那一刻就清了输入框，所以失败时得把这份快照放回去。
+   */
+  rememberSentDraft(rpcId: string, draft: { text: string; images: ImageAttachment[]; attachments: StagedFile[]; refs: RefSnap[] }): void
+  /** 提交失败：把该次的内容放回输入区（输入框已被用户改写则不动）。 */
+  restoreSentDraft(rpcId: string | undefined): void
   reset(): void
 }
 
@@ -213,6 +222,33 @@ export function createComposer(host: ChatHost): ComposerSlice {
     images.value = []
     refs.value = []
     text.value = ''
+    sentDrafts.clear()
+  }
+
+  /** 已发出、尚未被确认的那几次提交的内容（键 = 提交标识）；失败时据此还原输入区。 */
+  const sentDrafts = new Map<string, { text: string; images: ImageAttachment[]; attachments: StagedFile[]; refs: RefSnap[] }>()
+
+  function rememberSentDraft(rpcId: string, draft: { text: string; images: ImageAttachment[]; attachments: StagedFile[]; refs: RefSnap[] }): void {
+    sentDrafts.set(rpcId, draft)
+    // 只留最近几次：确认过的不会再来（成功路径不回删也无妨），但别让它无限增长
+    if (sentDrafts.size > 8) {
+      const oldest = sentDrafts.keys().next().value
+      if (oldest !== undefined) sentDrafts.delete(oldest)
+    }
+  }
+
+  function restoreSentDraft(rpcId: string | undefined): void {
+    if (rpcId === undefined) return
+    const draft = sentDrafts.get(rpcId)
+    sentDrafts.delete(rpcId)
+    if (draft === undefined) return
+    // 用户已经在写新内容：**不要覆盖**（上游也是"草稿留在机器里"，不是"抢回输入框"）
+    if (text.value.trim() !== '' || images.value.length > 0 || attachments.value.length > 0) return
+    text.value = draft.text
+    images.value = draft.images
+    attachments.value = draft.attachments
+    // 贴片要带 key（输入区那份是 RefChip）；还原时按序重新编号，`token` 缺省补空串
+    refs.value = draft.refs.map((r) => ({ key: refKey++, kind: r.kind, label: r.label, token: r.token ?? '' }))
   }
 
   return {
@@ -238,6 +274,8 @@ export function createComposer(host: ChatHost): ComposerSlice {
     },
     receiveUpload,
     appendDraft,
+    rememberSentDraft,
+    restoreSentDraft,
     reset,
   }
 }

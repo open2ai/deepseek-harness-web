@@ -78,6 +78,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     view: messages.store.view,
     processing: messages.store.processing,
     runAnchorMs: messages.store.runAnchorMs,
+    // 提交失败的错误条（输入区上方那一格；**不进对话流**，下次提交即清）
+    promptError: messages.store.promptError,
     turnRunning: messages.store.turnRunning,
     subagentFacts: messages.store.subagentFacts,
     scrollPend: messages.store.scrollPend,

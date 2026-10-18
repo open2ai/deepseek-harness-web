@@ -29,6 +29,8 @@ export interface MessagesSlice {
     | 'messages'
     | 'view'
     | 'processing'
+    /** 提交失败的错误条（只给输入区那一格用，不进对话流；见 `promptError` 的注释） */
+    | 'promptError'
     | 'runAnchorMs'
     | 'turnRunning'
     | 'subagentFacts'
@@ -106,8 +108,8 @@ export interface MessagesSlice {
   /** 请求往前翻一页（宿主去读更早的一页并 prepend；失败由宿主回 `history` 帧复位）。 */
   loadOlder(): void
   /** 本次提交**失败**（宿主 `chatError`）：把该标识对应的本地乐观行标为「未提交成功」，
-   *  并把仍挂着的回答行定稿成错误。不这么做的话，它会一直被当成「在等回显」→ `processing` 恒真。 */
-  failSubmission(rpcId: string | undefined, message: string): void
+   *  并把仍挂着的本地占位回答行撤掉。错误原因写 `promptError`（**不进对话流**），不是在这里造行。 */
+  failSubmission(rpcId: string | undefined, message: string, code?: string): void
   /** 回合级过程折叠的展开态（见 `core/process-fold`）。未记录 = 默认（进行中展开、定稿收起）。 */
   turnFoldOpen: Signal<ReadonlyMap<number, boolean>>
   /** 记下某个回合的折叠展开态（回合号是**会话内**编号，换会话时整表清掉）。 */
@@ -162,6 +164,14 @@ export function createMessages(host: ChatHost): MessagesSlice {
     messages.value.some((row) => isVisibleChatRow(row)) ? 'chat' : 'welcome'
   )
   const processing = signal(false)
+  /**
+   * **提交失败的错误条**（上游 `promptError` 的同一格）：只显示在输入区上方，**不进对话流**。
+   *
+   * 为什么不塞进 messages：那是**永久行**（不会自己消失），而且本地行与宿主行一起重排 ——
+   * 真机 2026-10-18 的表现就是「红字一直赖在会话里、把行序搅乱、新发的内容还看不见」。
+   * 清空时机见 `outbox.send`：**每次提交开始时**清（对齐上游 `prompt()` 的 `promptError = null`）。
+   */
+  const promptError = signal<{ message: string; code?: string } | undefined>(undefined)
   /**
    * 「深度求索中，用时 X」的时钟锚点 = **正在跑的那一回合的开始时刻**（宿主下发 `turnStartMs`）。
    *
@@ -434,6 +444,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
 
   // ---------- 消息流动作(本地渲染) ----------
   function addUser(textMsg: string, imgs: ImageAttachment[] = [], time?: number, refs?: RefSnap[], imageRefs?: AttachmentRef[], files?: Array<{ name: string; path?: string; bytes?: number }>, rpcId?: string, placement: PendingEcho['placement'] = 'transcript'): void {
+    // 注意：错误条的清空在 `outbox.send`（提交那一刻，排队路径也覆盖）；这里**不**顺手清，
+    // 否则「历史恢复」也会把刚发生的错误抹掉（恢复走 addUser 但不提交任何东西）。
     // **有提交标识 = 刚发出去、还没进日志那条**：只登记会话级回显，**不进行表**
     //（与上游同口径：回显是会话状态，行表里只有日志里的东西）。
     if (rpcId !== undefined && rpcId !== '') {
@@ -603,12 +615,16 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     pendingSubmissions.value = pending
     retiredSubmissions.value = retired
     if (retired.length > 0) {
-      // **退休单点**（上游 `finishSubmission`，`session.ts:864-873`）：`admitted` / `queued` ⇒ 回显当场消失；
-      // `failed` ⇒ **留着并标失败**（渲染层据此显示「未提交成功」）。同一条只会退休一次（宿主台账有 latch）。
+      // **退休单点**（上游 `finishSubmission`，`session-client/src/sessions/session.ts:865-873`）：
+      // 不论 `admitted` / `queued` / `failed`，**回显一律从快照里删掉** ——
+      // 上游 README 同句：「Identified failures and abandonment retire unadmitted echoes immediately」。
+      // 失败的信息面不是"留一条失败气泡"，而是 **composer 的错误条 + 保留的草稿**（`onRetire` 携带 failed）。
+      //
+      // 真机 2026-10-18（"发送后怎么出现这么多内容"）：一度让 failed 的**留着并标 failed**，
+      // 于是每次失败的尝试都留下一个气泡 —— 连发两次失败 + 一次成功 = 三个「1」，
+      // 但服务端日志里只有一条 `user/message`（会话日志核对过）。上游没有"未提交成功"这种气泡。
       const outcomeOf = new Map(retired.map((r) => [r.rpcId, r.outcome]))
-      pendingEchoes.value = pendingEchoes.value
-        .filter((e) => { const o = outcomeOf.get(e.rpcId); return o !== 'admitted' && o !== 'queued' })
-        .map((e) => (outcomeOf.get(e.rpcId) === 'failed' ? { ...e, failed: true } : e))
+      pendingEchoes.value = pendingEchoes.value.filter((e) => !outcomeOf.has(e.rpcId))
     }
   }
 
@@ -617,35 +633,28 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
    * 这是**本地**失败（没工作区 / 服务不可用 / RPC 报错），服务端根本没有这一回合 ——
    * 所以事件流里不会有 turn/end，行的 `endMsg` 只能由这里写进去（与旧通路的 `chatDone(end=error)` 同口径）。
    */
-  function failSubmission(rpcId: string | undefined, msgText: string): void {
-    let hit = false
+  function failSubmission(rpcId: string | undefined, msgText: string, code?: string): void {
     messages.value = messages.value.map((r): ChatRow => {
       if (r.kind !== 'user' || r.failed === true) return r
       // **只标还没被服务端回显认领的行**：已经认领的说明消息确实送到了，它不该被标成「未提交成功」
       if (r.rpcId === undefined || claimedRpcIds.has(r.rpcId)) return r
       // 没有标识时（宿主没带上）退化为「把所有还没回显的本地行都标掉」，宁可多标也不能留下卡住的
       if (rpcId !== undefined && r.rpcId !== rpcId) return r
-      hit = true
       return { ...r, failed: true }
     })
     const idx = activeAssistantIndex()
     if (idx !== -1) {
       const row = messages.value[idx]
-      if (row.kind === 'assistant') {
-        replace(row.key, {
-          ...row,
-          done: true,
-          // 本地失败没有上游 reason.kind；角标沿用「错误」这一档，与 turn/end 的 error 同形
-          status: 'error',
-          bodyStarted: true,
-        })
-        hit = true
-        // 原因**不进回答行**：本地失败在服务端没有这一回合 → 没有 `turn/end`，上游也不会出 `turn-error` 行；
-        // 走与「没有回答行可挂」时同一条通路（通知行），不伪造回合失败行
-        if (msgText !== '') showNotice(msgText)
+      // **本地占位的回答行整条撤掉**（上游：提交失败时服务端根本没有这一回合，界面上也不该出现回答行）。
+      // 上一版把它标成 `status: 'error'` 留在表里 —— 后果是对话流里多一条"空的失败回答"，
+      // 还会跟着宿主行一起重排（真机 2026-10-18：报错之后顺序错乱、新发的内容看不见）。
+      if (row.kind === 'assistant' && row.local === true && row.done === false) {
+        removeWhere((r) => r.key === row.key)
       }
     }
-    if (!hit && msgText !== '') showNotice(msgText)
+    // 原因**不进对话流**：走输入区那条错误条（上游 `promptError` 的同一格），下次提交即清。
+    // 以前用 `showNotice` 往 messages 里压一条永久「通知行」—— 红字留着不走，还会插到用户行上面去。
+    if (msgText !== '') promptError.value = { message: msgText, ...(code === undefined ? {} : { code }) }
     processing.value = false
   }
 
@@ -701,6 +710,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
   const resetRows = (): void => {
     messages.value = []
     processing.value = false
+    // 换会话/重连：上一条提交失败的错误条不属于这个会话，必须清（否则一直挂在输入区上方）
+    promptError.value = undefined
     runAnchorMs.value = undefined
     pendingSubmissions.value = []
     retiredSubmissions.value = []
@@ -723,6 +734,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
       messages,
       view,
       processing,
+      promptError,
       runAnchorMs,
       turnRunning,
       subagentFacts,

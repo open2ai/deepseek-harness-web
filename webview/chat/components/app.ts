@@ -14,6 +14,7 @@ import { ModelPicker } from './ModelPicker'
 import { keepRowVisible } from '../core/scroll'
 import { useTriggerMenu } from '../core/trigger/useTrigger'
 import { decideInputKey, resolveSubmitMode } from '../core/inputKeys'
+import { promptErrorTextOf } from '../core/prompt-error'
 import { primaryStops, standaloneStop, parentOffline } from '../core/stop-control'
 import { slashTrigger } from '../core/trigger/slash'
 import { atTrigger } from '../core/trigger/at'
@@ -358,6 +359,24 @@ export function Composer({ store }: { store: ChatStore }) {
     const found = s.permOptions.find((o) => o.value === s.currentPerm)
     return found ? found.name || found.value : store.permNameOf.get(s.currentPerm) ?? ''
   }
+  /**
+   * 提交失败那条错误的**文案**：**原样显示服务端返回的内容**（`message`，有码时附 `(code)`）。
+   *
+   * 不做本地化替换 —— 上游对 `session/writer-held` 会换成一句本地化提示，但那样会把现场信息
+   * （哪个会话、哪个写句柄）抹掉，而且上游以后换文案时插件得跟着猜（维护者 2026-10-18 定案）。
+   * 映射在 `core/prompt-error.ts`（纯函数、有守卫）。
+   *
+   * 显示形态仍按上游：**过几秒自动消失**（见下面的定时器），下次提交再清。
+   */
+  const promptErrorText = promptErrorTextOf(store.promptError.value)
+  // 自动消失（与上游 toast 同量级）：错误仍留在 store 里，重挂载会再播一次 —— 但不会常驻挡住输入区
+  useEffect(() => {
+    if (store.promptError.value === undefined) return
+    const timer = setTimeout(() => {
+      store.promptError.value = undefined
+    }, 8000)
+    return () => clearTimeout(timer)
+  }, [store.promptError.value])
   const modelName = (): string => {
     const s = store.sel.value
     if (!s.curProvider || !s.curModel) return ''
@@ -515,6 +534,15 @@ export function Composer({ store }: { store: ChatStore }) {
     }}>
     <${Popup} store=${store} />
     ${trigger.popup}
+    ${/* **提交失败的错误条**（上游 `promptError` 的同一格）：只在这一处显示、**过几秒自动消失**、
+         下次提交再清掉。上游把 `session/writer-held` 归给「别的 DSH 实例占用」并给专用文案；
+         其它失败才显示 `message (code)`。以前是把错误当"通知行"塞进对话流 —— 那是**永久行**，
+         红字留着不走，还会打乱行序（真机 2026-10-18）。 */ ''}
+    ${promptErrorText !== undefined
+      ? html`<div class="composer-error" role="status" data-prompt-error>
+          <span class="codicon codicon-error"></span><span class="composer-error-text">${promptErrorText}</span>
+        </div>`
+      : null}
     ${busy
       ? html`<div class="composer-busy" aria-hidden="true">
           <span class="codicon codicon-loading codicon-modifier-spin"></span>
