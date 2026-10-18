@@ -368,6 +368,16 @@
   }
   .msg.assistant .body { white-space: normal; word-break: break-word; }
   .msg.user .body .user-text { white-space: pre-wrap; }
+  /* 凭据遮挡（上游 `ui-secret-mask` 的等价物）：文本与眼睛**同一行**，眼睛在末尾、不换行。
+     图标用内联 SVG（不依赖 codicon 字体），也不用任何 tooltip —— 提示只走 `aria-label`。 */
+  .secret-text { display: inline; }
+  .secret-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    margin: 0 0 0 2px; padding: 0; border: none; background: none; cursor: pointer;
+    vertical-align: -2px; line-height: 1;
+    color: inherit; opacity: 0.55;
+  }
+  .secret-toggle:hover, .secret-toggle:focus-visible { opacity: 1; }
   /* 附件行：气泡**之外**、正文之上 */
   .msg.user .user-atts {
     display: flex; flex-direction: column; align-items: flex-end; gap: 6px; margin: 0 0 6px;

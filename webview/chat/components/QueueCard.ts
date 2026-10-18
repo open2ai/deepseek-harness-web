@@ -11,6 +11,8 @@ import type { ChatStore } from '../core/store/chat'
 import type { QueueItemView } from '../core/protocol'
 import type { QueueSendingAttachment } from '../core/store/types'
 import { fileSizeText } from '../core/file-labels'
+import { maskCredentials } from '../core/secret-mask'
+import { SecretText } from './message/SecretText'
 
 type QueueAttachment = NonNullable<QueueItemView['attachments']>[number] | QueueSendingAttachment
 
@@ -77,7 +79,7 @@ export function QueueCard({ store }: { store: ChatStore }) {
                             store.cancelQueueEdit()
                           }
                         }} />`
-                    : html`<span class="queue-text" title=${item.text}>${item.text}</span>`}
+                    : html`<span class="queue-text" title=${maskCredentials(item.text)}><${SecretText} text=${item.text} /></span>`}
                 </span>
                 <span class="queue-actions">
                   ${editingThis
@@ -107,7 +109,7 @@ export function QueueCard({ store }: { store: ChatStore }) {
                         (a, i) => html`<span class="queue-att" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`}>${attachmentLabel(a)}</span>`
                       )}</span>`
                     : null}
-                  <span class="queue-text" title=${s.text}>${s.text}</span>
+                  <span class="queue-text" title=${maskCredentials(s.text)}><${SecretText} text=${s.text} /></span>
                 </span>
                 <span class="queue-actions">
                   ${s.failed === true

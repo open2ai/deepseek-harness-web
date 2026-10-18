@@ -8,10 +8,11 @@ import { html } from 'htm/preact'
 import type { ChatRow, ChatStore } from '../../core/store/chat'
 import type { ImageAttachment } from '../../core/protocol'
 import { hasRefMention } from '../../core/ref-mentions'
-import { refChipEl, refText } from './ref-text'
+import { refChipEl } from './ref-text'
 import { RowMeta } from './meta'
 import { AttachmentGallery } from '../attachment/AttachmentGallery'
 import { fileExt, fileSizeText } from '../../core/file-labels'
+import { SecretText } from './SecretText'
 
 export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 'user' }>; store: ChatStore; latest?: boolean }) {
   // 版式：**附件行（图片/文件）在气泡之外、且在正文之上**，
@@ -28,6 +29,13 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
   const hasAtts = row.images.length > 0 || (row.files?.length ?? 0) > 0 || (row.imageRefs?.length ?? 0) > 0
   const mentioned = hasRefMention(row.text)
   const localRefs = row.refs
+  /**
+   * **凭据遮挡**：已发送文本里认得出的凭据只留前 8 个字符，其余变 `*`。
+   *
+   * 三条边界：① 只改**显示** —— 复制（`store.copy(row.text)`）与模型输入都是原文；
+   * ② 认不出的格式一律不遮（命名赋值、句子里的密码、验证码都不动），短串也不算凭据；
+   * ③ 眼睛图标在**同一行末尾**，遮着时是睁眼（点了显示），显示后是划掉的眼（点了重新遮）。
+   */
   return html`<div class="msg user${latest ? ' latest' : ''}"><div class="col">
     ${hasAtts
       ? html`<div class="user-atts">
@@ -72,7 +80,7 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
       ${!mentioned && localRefs && localRefs.length > 0
         ? html`<div class="user-refs">${localRefs.map((r, i) => refChipEl({ kind: r.kind, label: r.label, token: r.token ?? '' }, i))}</div>`
         : null}
-      ${row.text ? html`<div class="user-text">${refText(row.text, localRefs)}</div>` : null}
+      ${row.text ? html`<div class="user-text"><${SecretText} text=${row.text} refs=${localRefs} /></div>` : null}
     </div>
     ${RowMeta({
       time: row.time,
