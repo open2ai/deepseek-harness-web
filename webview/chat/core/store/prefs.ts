@@ -18,6 +18,8 @@ export interface ChatPrefsPatch {
   liveProcessDetail?: boolean
   /** 上游四档策略门：过程分组头的覆盖范围（`collapsed`/`history`/`none`） */
   stepGrouping?: 'collapsed' | 'history' | 'none'
+  /** 收起时机（上游 `ui-chat.collapseTiming`）：`next-input` = 最新交互段定稿后先不收 */
+  collapseTiming?: 'completion' | 'next-input'
 }
 
 export interface PrefsSlice {
@@ -30,6 +32,7 @@ export interface PrefsSlice {
     | 'settledReasoningPreview'
     | 'liveProcessDetail'
     | 'stepGrouping'
+    | 'collapseTiming'
   >
   /**
    * 应用宿主推来的偏好（逐字段覆盖，未给的字段保持原值）。
@@ -51,6 +54,8 @@ export function createPrefs(): PrefsSlice {
   const settledReasoningPreview = signal(true)
   const liveProcessDetail = signal(true)
   const stepGrouping = signal<'collapsed' | 'history' | 'none'>('collapsed')
+  // 默认 = 上游默认「完成时收起」：偏好帧到达前的那几帧按定稿即收渲染，与接入前一致。
+  const collapseTiming = signal<'completion' | 'next-input'>('completion')
 
   function apply(prefs: ChatPrefsPatch): void {
     if (prefs.transcriptView !== undefined) transcriptView.value = prefs.transcriptView
@@ -60,6 +65,7 @@ export function createPrefs(): PrefsSlice {
     if (prefs.settledReasoningPreview !== undefined) settledReasoningPreview.value = prefs.settledReasoningPreview
     if (prefs.liveProcessDetail !== undefined) liveProcessDetail.value = prefs.liveProcessDetail
     if (prefs.stepGrouping !== undefined) stepGrouping.value = prefs.stepGrouping
+    if (prefs.collapseTiming !== undefined) collapseTiming.value = prefs.collapseTiming
   }
 
   return {
@@ -71,6 +77,7 @@ export function createPrefs(): PrefsSlice {
       settledReasoningPreview,
       liveProcessDetail,
       stepGrouping,
+      collapseTiming,
     },
     apply,
   }

@@ -21,6 +21,15 @@ export type DshTranscriptView = 'normal' | 'compact';
  */
 export type DshStepGrouping = 'collapsed' | 'history' | 'none';
 
+/**
+ * 收起时机（上游 `ui-chat.collapseTiming`，0.2.1 新增）：已定稿回合的过程**什么时候**恢复历史呈现。
+ *
+ * - `completion`：回合一定稿就收起（默认，等于接入前的固有形态）；
+ * - `next-input`：最新交互段里的已定稿回合**先不收**，保持运行中的呈现，直到出现下一次普通输入、
+ *   或出现开启新交互段的回合。它只推迟「收起」，不改变「能不能收起」的资格。
+ */
+export type DshCollapseTiming = 'completion' | 'next-input';
+
 /** 性能与用量详略：`compact` 时不显示会话统计与每轮用量。 */
 export type DshPerformanceUsage = 'compact' | 'detailed';
 
@@ -45,6 +54,8 @@ export interface DshChatPrefs {
     readonly settledReasoningPreview: boolean;
     readonly liveProcessDetail: boolean;
     readonly stepGrouping: DshStepGrouping;
+    /** 收起时机（见 `DshCollapseTiming`；读不到时按上游默认 `completion`） */
+    readonly collapseTiming: DshCollapseTiming;
 }
 
 /** 读不到设置时的生效值 = 上游默认（0.2.0：非 Desktop Web 的客户端默认 = `detailed`）。 */
@@ -57,6 +68,8 @@ export const DEFAULT_CHAT_PREFS: DshChatPrefs = {
     liveProcessDetail: true,
     // 与 `stepGroupingOf(undefined)` 一致：桌面端默认 → collapsed（进行中的回合也有可展开的分组头）
     stepGrouping: 'collapsed',
+    // 上游默认「完成时收起」：没保存过该偏好的 profile 不写默认值，行为就是定稿即收
+    collapseTiming: 'completion',
 };
 
 /** `settings/describe` 里一个命名空间（只取本模块关心的两段）。 */
@@ -114,6 +127,18 @@ export function stepGroupingOf(raw: unknown): DshStepGrouping {
     }
     // 缺失/非法：按桌面端默认（standard）→ collapsed
     return 'collapsed';
+}
+
+/**
+ * 收起时机：只有精确 `next-input` 才推迟，其余（缺失 / 非法 / `null`）一律上游默认 `completion`。
+ *
+ * 为什么只有精确匹配：上游 schema 里这一项**有默认值**（`completion`），于是「用户从没选过」与
+ * 「用户选了默认档」在**行为上**没有区别 —— 这与工作步骤展示（无 schema 默认）不同，不需要区分。
+ * @param raw - 该字段的用户段原值
+ * @returns 收起时机
+ */
+export function collapseTimingOf(raw: unknown): DshCollapseTiming {
+    return raw === 'next-input' ? 'next-input' : 'completion';
 }
 
 /** 性能与用量：只有精确 `compact` 才是简洁，其余（缺失/非法）一律上游默认 `detailed`。 */
@@ -193,6 +218,7 @@ export function chatPrefsOf(namespaces: readonly DshSettingsNamespace[]): DshCha
         busyEnter: busyEnterOf(conversation === null ? undefined : conversation['busyEnter']),
         ...policyOf(transcriptRaw),
         stepGrouping: stepGroupingOf(transcriptRaw),
+        collapseTiming: collapseTimingOf(chat === null ? undefined : chat['collapseTiming']),
     };
 }
 
@@ -204,5 +230,6 @@ export function sameChatPrefs(a: DshChatPrefs, b: DshChatPrefs): boolean {
         && a.busyEnter === b.busyEnter
         && a.settledReasoningPreview === b.settledReasoningPreview
         && a.liveProcessDetail === b.liveProcessDetail
-        && a.stepGrouping === b.stepGrouping;
+        && a.stepGrouping === b.stepGrouping
+        && a.collapseTiming === b.collapseTiming;
 }

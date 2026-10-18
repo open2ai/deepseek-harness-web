@@ -4,11 +4,13 @@
 // 所以必须能直接喂帧、直接断言。跑法：node scripts/verify-control-frames.mjs
 //
 // ⚠️ **下面那些 `0.1.7-alpha.2` 标签是"这套形状第一次核对的版本"，不是"只对那个版本有效"**：
-// 2026-10-17 对着**当前基线 `dsh-0.2.0-rc.2`** 逐条复核过，这套形状**一字未变**，所以断言继续有效：
-//   · `baseline.value` = `{ projections }`（**无** `queues`）——0.2.0 的 `SessionControlBaseline` 原文只有
+// 2026-10-18 对着**当前基线 `dsh-0.2.1-rc.2`** 逐条复核过（上一轮基线 `0.2.0-rc.2` 的结论继续成立），
+// 这套形状**一字未变**，所以断言继续有效：
+//   · `baseline.value` = `{ projections }`（**无** `queues`）——0.2.1 的 `SessionControlBaseline` 原文只有
 //     `readonly projections`（`api/session-controller/src/types.ts`）；
 //   · 帧联合只有两种：`{type:'baseline'}` / `{type:'projection'} & SessionProjectionUpdate`（同文件）；
-//   · 投影块 = `{asOfSeq, values}`（同文件 `SessionProjectionBaseline`）；
+//   · 投影块 = `{asOfSeq, values}`（同文件 `SessionProjectionBaseline`；`session/projections` 的远程返回值
+//     另有 `kind` 判别，那是**另一个方法**的形状，见 `src/dsh/projections.ts` 与 `tmp/_projections.snapshot.test.mjs`）；
 //   · inbox 投影 = `{'next-turn': 消息[], 'next-step': 消息[]}`，`next-step` 里 `source.kind === 'user'`
 //     是插话、其余（`recall` / 插件注入等）是上下文 —— 0.2.0 的宿主用例 `control-queue.host.spec.ts`
 //     就是 `inbox.append('next-step', steering)` + `append('next-step', context)` 这么喂的；
@@ -259,4 +261,4 @@ if (failures > 0) {
     console.log(`✘ ${failures} 项不符`);
     process.exit(1);
 }
-console.log('✔ 全部通过：0.1.7+ 帧形状正确归约（0.2.0-rc.2 复核同），旧代承载明确报告');
+console.log('✔ 全部通过：0.1.7+ 帧形状正确归约（0.2.1-rc.2 复核同），旧代承载明确报告');

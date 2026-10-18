@@ -8,7 +8,8 @@ import { fileRefsOf, hasImageBlock, imageRefsOf, readToolResult, resultText, tex
 import { toolStatusOf } from "./official/tool-status";
 import { contextForm, contextProvenance, isContextMessage } from "./official/context-projection";
 import { readSystemPrompt } from "./official/system-prompt";
-import { isEmptyProjections, projectionValuesOf } from "./projections";
+import { isEmptyProjections, projectionBaselineOf } from "./projections";
+import { adoptionOf, type AdoptionOutcome } from "./session-adoption";
 // ---------- 会话事件模型（dsh v0.1.5-rc.2 follow 载荷形状） ----------
 export type DshContentPart =
     | { type: 'text'; text: string }
@@ -261,7 +262,7 @@ export type DshHistoryTurnProcessItem =
         provenance: { role: 'inject' | 'recall'; label: string | null };
         form: string | null;
     }
-    | { kind: 'tool'; name: string; callId?: string; argsRaw?: string; status: 'running' | 'ok' | 'error' | 'stopped'; error?: string; output?: string; exitCode?: number; signal?: string; meta?: unknown;
+    | { kind: 'tool'; name: string; callId?: string; argsRaw?: string; status: 'running' | 'ok' | 'error' | 'stopped'; error?: string; output?: string; exitCode?: number | null; signal?: string; meta?: unknown;
         /** 结果原始内容块（**仅当结果含图片块时**带） */
         blocks?: unknown };
 /** 过程折叠计数（上游口径，见 stream.ts DshTurnCounts 注释） */
@@ -515,7 +516,7 @@ export async function getSessionMessages(sessionId: string): Promise<SessionMess
     const turnChain = new Map<number, DshHistoryTurnProcessItem[]>();
     const turnToolsByCall = new Map<number, Map<string, DshHistoryTurnProcessItem>>();
     const turnReplyTexts = new Map<number, number>(); // 该回合 content 含文本块(回复正文)的 assistant/message 数
-    const finishTool = (turn: number, callId: string | undefined, status: 'ok' | 'error' | 'stopped', error?: string, output?: string, exitCode?: number, signal?: string, meta?: unknown, blocks?: unknown): void => {
+    const finishTool = (turn: number, callId: string | undefined, status: 'ok' | 'error' | 'stopped', error?: string, output?: string, exitCode?: number | null, signal?: string, meta?: unknown, blocks?: unknown): void => {
         const byCall = turnToolsByCall.get(turn);
         let item: DshHistoryTurnProcessItem | undefined = callId ? byCall?.get(callId) : undefined;
         if (!item) {
@@ -636,15 +637,34 @@ export async function getSessionMessages(sessionId: string): Promise<SessionMess
  * 权限 / 统计 / 用量 / 标题等 UI 数据均来自这里。
  */
 export async function getSessionProjections(sessionId: string): Promise<Record<string, unknown>> {
+    return (await getSessionProjectionsRead(sessionId)).values;
+}
+
+/** 一次投影读取的形态（`hintsOnly` = 那份表只能当兜底提示，不是权威基线）。 */
+export interface SessionProjectionsRead {
+    readonly values: Record<string, unknown>;
+    readonly hintsOnly: boolean;
+}
+
+/**
+ * 同上，但**保留「这份表是哪一档」**。
+ *
+ * 只有**需要先迁移格式**的旧会话会得到 `hintsOnly: true`：那份 `values` 是缓存提示、可能过时，
+ * 且没有水位。调用方据此决定「只补空缺、不覆盖已有值」，而不是把它当权威整表整份替换。
+ * @param sessionId - 会话 id。
+ * @returns 整表 + 是否只是提示；读不到时返回空表 + `false`。
+ */
+export async function getSessionProjectionsRead(sessionId: string): Promise<SessionProjectionsRead> {
     const snap = await readFollowSnapshot(sessionId);
     if (!isEmptyProjections(snap.projections)) {
-        return snap.projections;
+        // 快照带了整表 = 宿主已给出精确基线（快照里的 `projections` 只来自已建立的控制流基线）。
+        return { values: snap.projections, hintsOnly: false };
     }
     // 快照没带（或带了个空表）→ 换专用 remote 再读一次；再失败就返回空表（调用方保留已有缓存）
     try {
-        return (await readSessionProjections(sessionId)) ?? snap.projections;
+        return (await readSessionProjectionsRead(sessionId)) ?? { values: snap.projections, hintsOnly: false };
     } catch {
-        return snap.projections;
+        return { values: snap.projections, hintsOnly: false };
     }
 }
 
@@ -654,26 +674,66 @@ export async function getSessionProjections(sessionId: string): Promise<Record<s
  * @returns 投影整表；形状不符 / 服务端返回 null 时 undefined。
  */
 export async function readSessionProjections(sessionId: string): Promise<Record<string, unknown> | undefined> {
+    return (await readSessionProjectionsRead(sessionId))?.values;
+}
+
+/**
+ * 读**带形态的**投影基线（见 `projectionBaselineOf` 的判据）。
+ * @param sessionId - 会话 id。
+ * @returns 基线（`sequenced` 带水位 / `migration-required` 仅提示）；读不到时 undefined。
+ */
+export async function readSessionProjectionsRead(sessionId: string): Promise<SessionProjectionsRead | undefined> {
     const value = await rpcCall<unknown>('session.projections', { sessionId });
-    return projectionValuesOf(value);
+    const baseline = projectionBaselineOf(value);
+    if (baseline === undefined) {
+        return undefined;
+    }
+    return { values: baseline.values, hintsOnly: baseline.kind === 'migration-required' };
 }
 // ---------- 会话操作（适配 dsh 0.1.7+；对应 session-controller 远程方法，载荷统一
 //   args{ request: Session*Request }） ----------
 /**
- * 新建 / **收养**会话（上游 `session/create`；`workspaceId` 与 `cwd` 二选一）→ sessionId。
+ * 新建会话 / 按 id 尝试复用（`session/create`；`workspaceId` 与 `cwd` 二选一）→ **宿主实际使用的** sessionId。
  *
- * `sessionId` 非空 = **幂等收养**：宿主按该 id 找回**已有**会话（历史与 id 都不变），
- * 用 `checkPersistedIdentity=true` 校验它的持久身份（cwd 必须与给定位置一致，否则抛
- * `session/cwd-conflict`），然后把它登记进目标工作区 —— 这是**唯一**能把已有会话挂进工作区的路
- * （工作区控制器只有 `workspace/insertSessionBefore`，那是排序 API，对未登记的会话会抛
- * `workspace/move-invalid`）。代价：收养会 resume 该会话（等于打开它一次）。
+ * `sessionId` 非空时**不保证**就是它：宿主只在「这条会话还是空白、位置相符、没有别的写者」时复用，
+ * 否则**另建一条** id 由它铸造的会话并返回。需要区分这两种结果时用 `createSessionDetailed()`。
+ *
+ * 为什么仍然带 `sessionId`：把一条**空白**会话挂进工作区只能走这条路（工作区的排序接口对未登记的
+ * 会话会抛 `workspace/move-invalid`）。代价是它会 resume 该会话（等于打开它一次）。
  */
 export async function createSession(opts: { workspaceId?: string; cwd?: string; sessionId?: string } = {}): Promise<string> {
+    return (await createSessionDetailed(opts)).sessionId;
+}
+
+/** 一次「按 id 创建/复用」的完整结果（`sessionId` 是**宿主实际使用**的那条）。 */
+export interface CreatedSession {
+    /** 宿主实际创建或复用的会话 id —— **可能不等于请求的 id** */
+    readonly sessionId: string
+    /** 请求里带的 id（没有则 `undefined`） */
+    readonly requested?: string
+    /** 结果判定（见 `session-adoption.ts`） */
+    readonly outcome: AdoptionOutcome
+}
+
+/**
+ * 同上，但**保留结果判定**。需要知道"到底复用了请求的那条、还是被换成了另一条"的调用方用这个。
+ *
+ * 判据只看 id 是否相同；**不看返回是否成功** —— 两种情形宿主都返回成功。
+ * @param opts - 工作区 / 目录 / 要复用的会话 id（三选二：`workspaceId` 与 `cwd` 二选一）
+ * @returns 实际会话 id + 结果判定
+ */
+export async function createSessionDetailed(
+    opts: { workspaceId?: string; cwd?: string; sessionId?: string } = {}
+): Promise<CreatedSession> {
     const value = await rpcCall<{ sessionId: string }>('session.create', {
         ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : opts.cwd ? { cwd: opts.cwd } : {}),
         ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
     });
-    return value.sessionId;
+    return {
+        sessionId: value.sessionId,
+        ...(opts.sessionId === undefined ? {} : { requested: opts.sessionId }),
+        outcome: adoptionOf({ ...(opts.sessionId === undefined ? {} : { requested: opts.sessionId }), returned: value.sessionId }),
+    };
 }
 // ---------- 附件（图片）字节 ----------
 /** 一次图片附件读取的返回：媒体类型 + base64 字节（无 `data:` 前缀）。 */

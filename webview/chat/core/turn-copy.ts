@@ -23,6 +23,8 @@ const FAILURE_TEXT: Record<string, string> = {
   ACCOUNT_SIGN_IN_REQUIRED: '请先登录 DeepSeek，并确认请求地址支持账号认证。',
   QUOTA: '当前请求的额度已用尽',
   ACCOUNT_QUOTA: '当前请求的额度已用尽',
+  // 宿主在回合中途退出（进程被杀 / 窗口关闭）：与"用户按停止"分开说，否则用户会以为是自己停的。
+  INTERRUPTED: 'DSH 进程在本轮结束前退出了。',
 }
 
 /** 有固定文案的 code 集合（供守卫与调用方核对，勿与上游 `failureMessage()` 漂移）。 */
@@ -46,10 +48,10 @@ export function turnFailureText(input: { message?: string; code?: string }): str
 
 /**
  * 失败行的**标题**（上游 `TurnErrorItem` 取的就是这两个文案，逐字取自 locale）：
- * `ACCOUNT_SIGNED_OUT` → 「任务已停止」（`message.accountStopped`），其余 → 「本轮运行失败」（`message.turnError`）。
+ * `ACCOUNT_SIGNED_OUT` 与 `INTERRUPTED` → 「任务已停止」（`message.taskStopped`），其余 → 「本轮运行失败」（`message.turnError`）。
  */
 export function turnFailureTitle(code: string | undefined): string {
-  return code === 'ACCOUNT_SIGNED_OUT' ? '任务已停止' : '本轮运行失败'
+  return code === 'ACCOUNT_SIGNED_OUT' || code === 'INTERRUPTED' ? '任务已停止' : '本轮运行失败'
 }
 
 /** 输出 token 上限的标题（上游 `message.maxTokens`）。 */

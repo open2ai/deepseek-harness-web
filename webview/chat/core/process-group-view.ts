@@ -53,6 +53,8 @@ export interface ProcessGroupViewInput {
     liveProcessDetail?: boolean
     /** 插话事实（回合级）：片级也用它，见 `ProcessGroup` 的调用点 */
     hasInterleavedInput?: boolean
+    /** 收起时机：这一片所属回合是否推迟自动收起（`next-input` 档；见 `core/node-exchanges.ts`） */
+    defer?: boolean
 }
 
 export interface ProcessGroupView {
@@ -111,6 +113,7 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             compact: input.compact,
             grouping: input.grouping,
             open: input.open,
+            defer: input.defer,
             // 每片自带头（上游"每个分组 seat 一个头"）
             ownsHead: true,
             turnStarted: input.turnStarted,
@@ -121,6 +124,7 @@ export function processGroupView(input: ProcessGroupViewInput): ProcessGroupView
             compact: input.compact,
             grouping: input.grouping,
             open: input.open,
+            defer: input.defer,
             ownsHead: true,
             turnStarted: input.turnStarted,
         }).detail,

@@ -220,6 +220,8 @@ export type HostToViewMessage =
       liveProcessDetail?: boolean
       /** 上游四档策略门：过程分组头的覆盖范围（`collapsed` 所有回合 / `history` 仅已关闭回合 / `none` 不分组） */
       stepGrouping?: 'collapsed' | 'history' | 'none'
+      /** 收起时机：`completion` 定稿即收（默认）/ `next-input` 最新交互段先不收，等下一次普通输入 */
+      collapseTiming?: 'completion' | 'next-input'
     }
   // 保结构事件帧（节点模型的**唯一输入**）：宿主把窗口原文下发，页面据此建节点模型。
   | {

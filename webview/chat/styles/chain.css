@@ -212,9 +212,26 @@
     flex: 0 0 auto; width: max-content; min-width: 100%;
     overflow: visible; text-overflow: clip; text-align: start;
   }
+  /* 收起行右侧的**退出状态胶囊**（中性底 + 失败点 + 本地化文案）：只对已结算、失败、前台的命令出现。
+     中性底而不是红色底：文案本身就是原因（退出码 / 信号 / 未正常退出），红色留给「调用失败」那一档。
+     用 --dsh-inset-fill 之外的中性变量，深色主题下也能与行底区分开。 */
+  .chain-exit-badge {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+    margin-left: 6px; padding: 0 6px;
+    font-size: 10.5px; line-height: 16px; white-space: nowrap;
+    border-radius: 8px;
+    color: var(--vscode-descriptionForeground, #999);
+    background: var(--vscode-badge-background, rgba(127, 127, 127, 0.18));
+  }
+  .chain-exit-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--vscode-errorForeground, #f14c4c);
+  }
+  /* 后台启动卡（`run_in_background`）：只剩命令与工作目录，不画输出体与退出 Pill。
+     这里只加一条视觉提示条（左缘），让"它没输出"看起来是设计而不是丢了内容。 */
+  .term[data-background] { border-left: 2px solid var(--vscode-descriptionForeground, #999); }
   /* 收起行摘要里的**文件路径**：可点击，在编辑器区打开（上游为宿主默认程序——本插件有意偏离）。
-     用按钮承载（键盘可达），点它不触发展开收起（组件里 stopPropagation）。 */
-  .chain-file-link {
+     用按钮承载（键盘可达），点它不触发展开收起（组件里 stopPropagation）。 */  .chain-file-link {
     border: none; background: none; padding: 0; margin: 0; text-align: left; font: inherit;
     cursor: pointer; color: inherit;
     /* 虚线**常显**（不是 hover 才现）：它就是这个路径「可以点」的唯一提示，对齐上游 .fileLink */
@@ -930,12 +947,15 @@
   }
   .att-lightbox img { max-width: 92vw; max-height: 88vh; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
 
-  /* ===== 图片卡（read_image 结果；标签 + 图廊 + 信封文本）===== */
+  /* ===== 图片卡（read_image 结果；图廊 + 完整记录路径 + 每张图的尺寸/字节数）===== */
   .img-card {
     display: flex; flex-direction: column; gap: 8px;
     margin: 4px 0 4px 4px; padding: 12px 14px;
     background: var(--dsh-code-fill);
     border-radius: 12px; font-size: 13px;
   }
-  .img-label { color: var(--vscode-foreground, #ddd); font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; word-break: break-all; }
-  .img-meta { color: var(--vscode-descriptionForeground, #999); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* 路径是**完整记录路径**（不相对化、不截断）：它同时是可点开的目标，故整段折行而不省略 */
+  .img-path { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; word-break: break-all; }
+  .img-size { color: var(--vscode-descriptionForeground, #999); font-size: 12px; }
+  /* 除信封之外的其余文本（post-execute 之类追加的说明）：保留原样多行 */
+  .img-extra { color: var(--vscode-descriptionForeground, #999); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }

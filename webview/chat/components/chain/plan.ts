@@ -175,6 +175,20 @@ export function outerFold(input: {
      * 缺省（旧宿主 / mock）按 `true` 处理 = 保持既有形态。
      */
     grouped?: boolean
+    /**
+     * 收起时机：本回合是否推迟自动收起（`next-input` 档的最新交互段）。
+     *
+     * 推迟时**默认不折起**（保持运行中的呈现）。它是**默认值**，不是资格 —— 读者手动收起时由
+     * `readerFoldedAt` 压过它（少了那一条，"推迟中的回合"那颗 chevron 点了会毫无反应）。
+     */
+    defer?: boolean
+    /**
+     * 读者**手动收起**过的世代（`store.outerFoldedByReader` 的值：那个回合被收起时的 `answerStep`）。
+     *
+     * 与 `storedAnswerStep`（唤出记录）**成对**，就是上游那条 `turnProcessOpen` 的三态：
+     * 没记录 → 用默认（= 推迟）；记录的世代对不上 → 也用默认；世代对上 → 按 `collapsed` 那一笔判。
+     */
+    readerFoldedAt?: number
 }): { hidden: boolean; answerStep: number; revealed: boolean } {
     const answerStep = input.answerStep ?? 0
     /**
@@ -215,6 +229,24 @@ export function outerFold(input: {
      * 摆在屏幕上，而网页端只显示最后一段。
      */
     const alwaysOpen = input.interrupted || input.hasInterleavedInput === true
+    /**
+     * **这一回合此刻开不开** —— 与上游 `turnProcessOpen` 逐条同形（三态 + 默认值）：
+     *
+     * | 记录 | 结果 |
+     * |---|---|
+     * | 读者在本世代**收起**过（`readerFoldedAt === 当前世代`） | **不开**（手动收起压过推迟） |
+     * | 读者在本世代**唤出**过（`revealed`） | **开** |
+     * | 没有记录，或记录的世代已过期（新回答世代） | 用**默认值** = `defer`（推迟中的回合保持运行中呈现） |
+     *
+     * ⚠️ "记录的世代已过期就走默认"这条容易漏：漏了会让上一世代的收起/展开**粘住**整回合。
+     */
+    const openByRecord =
+        input.readerFoldedAt !== undefined && input.readerFoldedAt === (input.currentStep ?? answerStep)
+            ? false
+            : revealed
+                ? true
+                // 默认值 = **推迟时开着**（上游 `defaultOpen` 就是 `deferCollapse`）；不推迟就按"收起"走
+                : input.defer === true
     // 折不折只看 `foldable && hasContent && !alwaysOpen && 不是当前世代` —— **没有"片数 > 1"这一项**
     const hidden =
         input.grouped !== false &&
@@ -222,7 +254,7 @@ export function outerFold(input: {
         input.done &&
         input.hasProcess &&
         !alwaysOpen &&
-        !revealed
+        !openByRecord
     return { hidden, answerStep, revealed }
 }
 

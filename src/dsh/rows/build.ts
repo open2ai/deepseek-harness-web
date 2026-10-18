@@ -1567,6 +1567,9 @@ export function buildRowsIncremental(
                 kind: 'user',
                 key: userKey,
                 text,
+                // 回合号：页面判「最新交互段」用（收起时机那档要它）。宿主这一层正处在该回合的
+                // 事件流里，`currentTurn` 就是它 —— 不让页面从相邻行反推。
+                ...(currentTurn === undefined ? {} : { turn: currentTurn }),
                 ...(typeof source.rpcId === 'string' ? { rpcId: source.rpcId } : {}),
                 ...(steering ? { steering: true as const } : {}),
                 ...(typeof event.time === 'number' ? { timeMs: event.time } : {}),

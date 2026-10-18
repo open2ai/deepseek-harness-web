@@ -55,14 +55,18 @@ export function isTerminalTool(name: string): boolean {
 
 // ---- 退出状态解析（Webview 侧；marker 由 shell render 追加，非独立 JSON 字段）----
 const SIGNAL_RE = /\n\[killed by signal: ([^\]\n]+)\]$/
-const EXIT_RE = /\n\[exit code: (\d+)\]$/
+// `null` = 有结果但没有可用的退出码（进程被外部回收等）。它**不是 0**，也不是"没有 marker"。
+const EXIT_RE = /\n\[exit code: (\d+|null)\]$/
 
 /** 解析输出末尾的退出状态 marker，并返回剥掉 marker 的干净输出。无 marker 返回 exitCode 0。 */
-export function parseExitStatus(text: string): { output: string; exitCode?: number; signal?: string } {
+export function parseExitStatus(text: string): { output: string; exitCode?: number | null; signal?: string } {
   const signal = SIGNAL_RE.exec(text)
   if (signal?.[1] !== undefined) return { output: text.slice(0, signal.index), signal: signal[1] }
   const exit = EXIT_RE.exec(text)
-  if (exit?.[1] !== undefined) return { output: text.slice(0, exit.index), exitCode: Number(exit[1]) }
+  if (exit?.[1] !== undefined) {
+    // `null` marker = 有结果但没有可用退出码：保留"没有码"这一事实，**不能回落成 0**（0 会被读成"成功"）。
+    return { output: text.slice(0, exit.index), exitCode: exit[1] === 'null' ? null : Number(exit[1]) }
+  }
   return { output: text, exitCode: 0 }
 }
 
@@ -209,6 +213,8 @@ function resolveTerminalCwd(workdir: string | undefined, sessionCwd: string | un
 export interface TerminalLabels {
   signal: (s: string) => string
   exitCode: (c: number) => string
+  /** 有结果但没有可用的退出码（结局标记是 `[exit code: null]`） */
+  noExitCode: string
   running: string
   failed: string
   done: string
@@ -225,6 +231,7 @@ export function terminalLabels(): TerminalLabels {
   return {
     signal: (s) => `信号 ${s}`,
     exitCode: (c) => `退出码 ${c}`,
+    noExitCode: '未正常退出',
     running: '运行中',
     failed: '失败',
     done: '已完成',
@@ -251,8 +258,11 @@ export interface TermCard {
   cwd?: string
   /** 输出（已剥 exit status marker） */
   output?: string
-  exitCode?: number
+  /** 退出码；`null` = 有结果但没有可用退出码（`[exit code: null]`） */
+  exitCode?: number | null
   signal?: string
+  /** 后台启动（`run_in_background`）：成功回执只有任务号，**没有**输出与退出态 */
+  background?: boolean
   running: boolean
   /**
    * 卡内运行态——状态点与运行态文案的**唯一来源**，与工具行的行状态同值。
@@ -361,7 +371,7 @@ function parseArgs(argsRaw?: string): ShellArgs | null {
  * （`ToolRow` 分派时调用）。此前这里是硬编码"一律仍用终端卡"，与上游不一致（真机 2026-10-17 对照发现）。
  */
 export function terminalCardModel(
-  t: { name: string; argsRaw?: string; output?: string; exitCode?: number; signal?: string; status: TermState },
+  t: { name: string; argsRaw?: string; output?: string; exitCode?: number | null; signal?: string; status: TermState; meta?: unknown },
   sessionCwd?: string,
 ): TermCard | null {
   if (!isTerminalTool(t.name)) return null
@@ -370,7 +380,9 @@ export function terminalCardModel(
   if (command.trim() === '') return null
   // 相对 workdir 拼到会话工作区根下再折叠 `.`/`..`；
   // 不带 workdir 时直接用工作区根（工具调用通常不带，缺了就只能显示 $）
-  const rawWorkdir = typeof args?.workdir === 'string' ? args.workdir : typeof args?.cwd === 'string' ? args.cwd : undefined
+  // ⚠️ 结果自带 `meta.cwd` 时**以它为准**：那才是这次调用真正执行的位置（参数缺省或相对时不失真）。
+  const recordedCwd = metaString(t.meta, 'cwd')
+  const rawWorkdir = recordedCwd ?? (typeof args?.workdir === 'string' ? args.workdir : typeof args?.cwd === 'string' ? args.cwd : undefined)
   const workdir = resolveTerminalCwd(rawWorkdir, sessionCwd || undefined)
   const running = t.status === 'running'
   // 宿主已剥 marker 则直接用；否则兜底解析（同一正则，结果一致）
@@ -378,7 +390,9 @@ export function terminalCardModel(
   const output = parsed.output
   const exitCode = t.exitCode !== undefined ? t.exitCode : parsed.exitCode
   const signal = t.signal !== undefined ? t.signal : parsed.signal
-  const failed = !running && ((exitCode !== undefined && exitCode !== 0) || signal !== undefined)
+  const background = args?.run_in_background === true
+  // `null` 退出码按失败算（与上游 `terminalFailed` 同：它不是 0）；后台启动没有退出态，不参与。
+  const failed = !running && !background && ((exitCode !== undefined && exitCode !== 0) || signal !== undefined)
   const empty = !running && output.trim() === ''
   // 运行态（卡内点与文案）：调用自身失败/被打断优先于退出码——那类结果没有退出码，
   // 只按 failed 判会显示成「已完成」。仅在调用判为 ok 时才用 failed 覆盖成 error，
@@ -392,9 +406,50 @@ export function terminalCardModel(
     output,
     exitCode,
     signal,
+    background,
     running,
     state,
     failed,
     empty,
   }
+}
+
+/**
+ * 结果 `meta` 里的字符串字段（读不到 / 不是字符串给 undefined）。
+ * @param meta - 工具结果的 `meta` 原文（形状不拘）
+ * @param key - 字段名
+ * @returns 非空字符串，否则 undefined
+ */
+function metaString(meta: unknown, key: string): string | undefined {
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return undefined
+  const value = (meta as Record<string, unknown>)[key]
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+/**
+ * 结果 `meta` 里记录下来的**绝对路径**（`meta.path`）。
+ *
+ * 用来压过参数里的路径：参数可能是相对路径、也可能与真正执行的位置不一致；
+ * 结果里记下的是"这次调用实际碰到的那个文件"。参数兜底仍由 `filePathOf` 负责。
+ * @param meta - 工具结果的 `meta` 原文
+ * @returns 非空字符串，否则 undefined
+ */
+export function recordedPathOf(meta: unknown): string | undefined {
+  return metaString(meta, 'path')
+}
+
+/**
+ * 收起行右侧的**退出状态胶囊**文案（只对"已结算、失败、前台"的命令给）。
+ *
+ * 三条与上游同口径：① 后台启动不给（它没有退出态）；② 成功的命令不给（0 不是信息）；
+ * ③ 有信号说信号、没有码说「未正常退出」，**不发明数字**。
+ * @param card - 终端卡模型；不给则无胶囊
+ * @returns 胶囊文案；不该出胶囊时 null
+ */
+export function exitBadgeLabel(card: TermCard | null | undefined): string | null {
+  if (card == null || card.background === true || card.running) return null
+  if (!card.failed) return null
+  if (card.signal !== undefined) return `信号 ${card.signal}`
+  if (card.exitCode === null || card.exitCode === undefined) return '未正常退出'
+  return `退出码 ${card.exitCode}`
 }

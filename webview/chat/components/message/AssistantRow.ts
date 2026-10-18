@@ -9,7 +9,7 @@ import { MessageBody } from './MessageBody'
 import { RowMeta } from './meta'
 import { TurnNoticeRow } from './TurnNoticeRow'
 
-export function AssistantRow({ row, store, latest, turnTail, ownsHead, tailNotices, outerHidden = false, seatKey, turnCurrentStep }: { row: Extract<ChatRow, { kind: 'assistant' }>; store: ChatStore; latest?: boolean; turnTail?: boolean; ownsHead: boolean; tailNotices?: readonly ChatRow[]; outerHidden?: boolean; seatKey?: string; turnCurrentStep?: number }) {
+export function AssistantRow({ row, store, latest, turnTail, ownsHead, tailNotices, outerHidden = false, seatKey, turnCurrentStep, deferFold = false }: { row: Extract<ChatRow, { kind: 'assistant' }>; store: ChatStore; latest?: boolean; turnTail?: boolean; ownsHead: boolean; tailNotices?: readonly ChatRow[]; outerHidden?: boolean; seatKey?: string; turnCurrentStep?: number; deferFold?: boolean }) {
   /**
    * 答句正文的折叠落点（`.body`）。
    *
@@ -60,7 +60,7 @@ export function AssistantRow({ row, store, latest, turnTail, ownsHead, tailNotic
   const alwaysShowActions = latest === true && row.text.trim() !== ''
   // 失败原因**不在这里**：它是独立行（镜像上游 `turn-error` / `turn-max-tokens`，见 `TurnNoticeRow.ts`）
   return html`<div class="msg assistant${alwaysShowActions ? ' latest' : ''}" data-turn-process-answer=${answerGap}><div class="col">
-    <${Chain} row=${row} store=${store} ownsHead=${ownsHead} stoppedPill=${pillInChain ? stoppedPill : null} outerHidden=${outerHidden} seatKey=${seatKey} turnCurrentStep=${turnCurrentStep} />
+    <${Chain} row=${row} store=${store} ownsHead=${ownsHead} stoppedPill=${pillInChain ? stoppedPill : null} outerHidden=${outerHidden} seatKey=${seatKey} turnCurrentStep=${turnCurrentStep} deferFold=${deferFold} />
     ${/* 答句正文：更早世代的整段由上面的 `answerRef` 挂 `hidden="until-found"` 折起
          （答句在 `.chain-body` 之外，只折链体折不住它）—— 展开入口是「已完成，用时 …」那个控件。 */ ''}
     <div class="body" ref=${answerRef}><${MessageBody} text=${row.text} streaming=${!row.done} />${row.interrupted === true && !pillInChain

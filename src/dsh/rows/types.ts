@@ -24,7 +24,8 @@ export type DshRowItem =
         /** 错误名（`tool/result.data.error.name`）；交付文件行拿它和错误码拼兜底正文 */
         errorName?: string;
         output?: string;
-        exitCode?: number;
+        /** 退出码；`null` = 有结果但没有可用退出码（结局标记是 `[exit code: null]`） */
+        exitCode?: number | null;
         signal?: string;
         /** 结果自带的卡数据源（`tool/result.data.meta` 原文；web 卡的 statusCode/sources、读族的 offset 等） */
         meta?: unknown;
@@ -238,6 +239,13 @@ export type DshStreamRow =
         kind: 'user';
         key: number;
         text: string;
+        /**
+         * 所属回合号（宿主按 `turn/start` 计数给出）。
+         *
+         * 页面只用它算「哪几个回合属于最新交互段」—— 收起时机选「下次发送时收起」时，
+         * 只有最新交互段里的已定稿回合保持展开。缺省（旧宿主 / 本地乐观行）不参与该判定。
+         */
+        turn?: number;
         /** 提交标识（页面据此认领本地已出的乐观行，见 design/08 §11） */
         rpcId?: string;
         /**

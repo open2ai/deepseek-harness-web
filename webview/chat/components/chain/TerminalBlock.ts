@@ -29,8 +29,10 @@ function runLabel(state: TermState, labels: ReturnType<typeof terminalLabels>): 
 
 /** settled 时的状态 Pill 文案（干净退出无 Pill；signal 优先于 exitCode）。 */
 function statusPill(card: TermCard, labels: ReturnType<typeof terminalLabels>): string | null {
-  if (card.running) return null
+  if (card.running || card.background === true) return null
   if (card.signal !== undefined) return labels.signal(card.signal)
+  // `null` 退出码 = 有结果但没有可用的码：说「未正常退出」，**不发明 0**
+  if (card.exitCode === null) return labels.noExitCode
   if (card.exitCode !== undefined && card.exitCode !== 0) return labels.exitCode(card.exitCode)
   return null
 }
@@ -39,6 +41,11 @@ export function TerminalBlock({ card, store }: { card: TermCard; store: ChatStor
   const labels = terminalLabels()
   const pill = statusPill(card, labels)
   const outputLines = (card.output ?? '').split('\n').map((l) => stripAnsi(l))
+  /**
+   * **后台启动**（`run_in_background`）：回执只是一句"已在后台启动 + 任务号"，没有输出、也没有退出态。
+   * 上游给这类调用一张只含命令与工作目录的静态卡；插件同口径：不渲染输出体与退出 Pill。
+   */
+  const background = card.background === true
 
   const dot = html`<span class="term-dot" data-state=${dotState(card.state)}></span>`
   // 命令行首行前：状态点 done绿/ongoing蓝/error红/stopped琥珀（本插件为「与行状态一致」补 stopped）
@@ -53,21 +60,23 @@ export function TerminalBlock({ card, store }: { card: TermCard; store: ChatStor
     if (text) store.copy(text)
   }
 
-  return html`<div class="term" data-running=${card.running ? '' : undefined}>
+  return html`<div class="term" data-running=${card.running ? '' : undefined} data-background=${background ? '' : undefined}>
     <div class="term-head">
       <div class="term-prompt">
         <span class="term-state">${runLabel(card.state, labels)}</span>
         ${promptRows}
       </div>
       ${pill ? html`<span class="term-status">${pill}</span>` : null}
-      ${!card.running && !card.empty
+      ${!card.running && !card.empty && !background
         ? html`<button type="button" class="term-copy" onClick=${() => copyRaw(card.output)}>${labels.copy}</button>`
         : null}
     </div>
-    ${card.empty
-      ? html`<div class="term-empty">${labels.noOutput}</div>`
-      : html`<div class="term-output">
-          ${outputLines.map((line, i) => html`<div class="term-line" key=${i}>${line || ' '}</div>`)}
-        </div>`}
+    ${background
+      ? null
+      : card.empty
+        ? html`<div class="term-empty">${labels.noOutput}</div>`
+        : html`<div class="term-output">
+            ${outputLines.map((line, i) => html`<div class="term-line" key=${i}>${line || ' '}</div>`)}
+          </div>`}
   </div>`
 }

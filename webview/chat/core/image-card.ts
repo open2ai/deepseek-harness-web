@@ -10,6 +10,8 @@ export interface ImageCardRef {
   bytes: number
   width: number
   height: number
+  /** 归一化把栅格缩小过时，记录**缩小前**的尺寸（没缩过就没有这个字段）。 */
+  originalDimensions?: { width: number; height: number }
   name?: string
 }
 
@@ -20,8 +22,13 @@ export interface ImageCard {
   path: string
   /** 结果返回的图片，按结果顺序 */
   images: ImageCardRef[]
-  /** 模型可读的信封文本（结果自带的 text 块，按序拼接） */
-  text: string
+  /**
+   * 结果里**除信封之外**的文本块（按序拼接）；没有就是空串。
+   *
+   * 信封文本（`<path>…</path>` 那一坨）**不进展示**：它是给模型读的，路径与尺寸另有更准的来源
+   *（`meta.path` 与附件引用里的宽高字节）。把它原样铺在图片下面，正是这张卡当初要消除的现象。
+   */
+  extraText: string
 }
 
 /** 上游认可的四类图片 MIME；新增成员必须同步，否则那张图会静默退化成通用卡。 */
@@ -70,30 +77,49 @@ function imageReferences(content: unknown[]): ImageCardRef[] | null {
     if (block === null || block['type'] !== 'image') continue
     const attachment = asRecord(block['attachment'])
     if (attachment === null) return null
-    const { attachmentId, mediaType, bytes, width, height, name } = attachment
+    const { attachmentId, mediaType, bytes, width, height, name, originalDimensions } = attachment
     if (typeof attachmentId !== 'string' || attachmentId === '') return null
     if (typeof mediaType !== 'string' || !IMAGE_MEDIA_TYPES.has(mediaType)) return null
     if (!positiveInteger(bytes) || !positiveInteger(width) || !positiveInteger(height)) return null
     if (name !== undefined && typeof name !== 'string') return null
-    refs.push({ attachmentId, mediaType, bytes, width, height, ...(name === undefined ? {} : { name }) })
+    // 缩小前尺寸：给了就必须两维都是正整数，否则整卡退让（不猜半截）
+    let original: ImageCardRef['originalDimensions']
+    if (originalDimensions !== undefined) {
+      const dims = asRecord(originalDimensions)
+      if (dims === null || !positiveInteger(dims['width']) || !positiveInteger(dims['height'])) return null
+      original = { width: dims['width'], height: dims['height'] }
+    }
+    refs.push({
+      attachmentId, mediaType, bytes, width, height,
+      ...(original === undefined ? {} : { originalDimensions: original }),
+      ...(name === undefined ? {} : { name }),
+    })
   }
   return refs.length > 0 ? refs : null
 }
 
 /**
- * 结果里所有 text 块按序拼接；必须以**信封形状**的块作识别门，否则返回 null。
- * 为什么不用展平文本：展平会把 image 块序列化成 JSON 打印在图片下面，正是这张卡要消除的现象。
+ * 结果里**除信封之外**的文本块按序拼接。
+ *
+ * 信封块既是识别门（必须出现过，否则这张卡不认），也**不进**展示：它给模型读，
+ * 而路径与尺寸在 `meta.path` 与附件引用里都有更准的一份。
+ * @param content - 结果内容块
+ * @returns 其余文本（可能为空串）；**从未出现信封块**时 null（退让到通用卡）
  */
-function imageTexts(content: unknown[]): string | null {
+function imageExtraText(content: unknown[]): string | null {
   const parts: string[] = []
   let sawEnvelope = false
   for (const part of content) {
     const block = asRecord(part)
     if (block === null || block['type'] !== 'text' || typeof block['text'] !== 'string') continue
-    if (IMAGE_ENVELOPE.test(block['text'])) sawEnvelope = true
-    parts.push(block['text'])
+    const text = block['text']
+    if (IMAGE_ENVELOPE.test(text)) {
+      sawEnvelope = true
+      continue
+    }
+    parts.push(text)
   }
-  return sawEnvelope && parts.length > 0 ? parts.join('\n') : null
+  return sawEnvelope ? parts.join('\n') : null
 }
 
 /**
@@ -141,7 +167,7 @@ export function imageCardModel(
   if (!fullyRendered(content)) return null
   const images = imageReferences(content)
   if (images === null) return null
-  const text = imageTexts(content)
-  if (text === null) return null
-  return { label: relativizeToCwd(path, cwd), path, images, text }
+  const extraText = imageExtraText(content)
+  if (extraText === null) return null
+  return { label: relativizeToCwd(path, cwd), path, images, extraText }
 }

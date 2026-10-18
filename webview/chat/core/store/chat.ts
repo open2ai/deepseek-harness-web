@@ -85,6 +85,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     seatPlan: messages.store.seatPlan,
     pendingEchoes: messages.store.pendingEchoes,
     visibleRows: messages.store.visibleRows,
+    pendingTranscriptInput: messages.store.pendingTranscriptInput,
     historyHasMore: messages.store.historyHasMore,
     historyLoading: messages.store.historyLoading,
     historyEvents: messages.store.historyEvents,
@@ -104,6 +105,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     setGroupFoldOpen: messages.setGroupFoldOpen,
     // **外层折叠**（上游 `turnProcesses {turn, answerStep}`）：每回合"已唤出到哪个回答世代"
     outerAnswerStep: messages.outerAnswerStep,
+    // 读者手动收起过的回合（收起时机推迟时用它与推迟对冲，见 `outerFold` 的 `readerFolded`）
+    outerFoldedByReader: messages.outerFoldedByReader,
     revealOuter: messages.revealOuter,
     foldOuter: messages.foldOuter,
     // 发送动作
@@ -209,6 +212,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     settledReasoningPreview: prefs.store.settledReasoningPreview,
     liveProcessDetail: prefs.store.liveProcessDetail,
     stepGrouping: prefs.store.stepGrouping,
+    collapseTiming: prefs.store.collapseTiming,
     // 渲染源开关（阶段 4：宿主下发，见 docs/design/08 §11）
   }
 }

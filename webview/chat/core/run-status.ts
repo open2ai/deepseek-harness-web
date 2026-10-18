@@ -52,8 +52,8 @@ export function runStatusText(elapsedMs: number | undefined): string {
  *
  * ⚠️ **失败这一格必须有文案**：先前这里返回 `null`（想法是"失败另有终局行说明"），
  * 结果是这一行渲染成一个**空盒子** —— 网页端同一位置写的是「处理失败」。三档的判据与文案都照上游：
- * `aborted` → 已停止、`error` → 处理失败（两档**都不带时长**：带了反而像"跑完了"）、
- * 其余 kind 一律「已完成 / 已完成，用时 X」（上游只特判这两种，`max-tokens`/`interrupted`/`forked`
+ * `aborted` / `interrupted` → 已停止、`error` → 处理失败（三档**都不带时长**：带了反而像"跑完了"）、
+ * 其余 kind 一律「已完成 / 已完成，用时 X」（上游只特判这几种，`max-tokens`/`forked`
  * 乃至陌生值都走「已完成」—— 原样印内部 kind 会把它们漏到界面上）。
  *
  * 与**正文末尾**的「已停止」分工不同：那个是**消息级**标记（"这条回答被中断"），这个才是**回合级**控制行。
@@ -72,7 +72,9 @@ export function doneStatusText(done: boolean, status: string | undefined, wallMs
   if (status === 'error') {
     return '处理失败'
   }
-  if (status === 'aborted') {
+  if (status === 'aborted' || status === 'interrupted') {
+    // 两者都带"停止"语义、都不带时长：`interrupted` 是**宿主在回合中途退出**（进程被杀/窗口关闭），
+    // 与用户按停止的来源不同，但这一格显示的都是「已停止」；原因由终局通知行单独说明。
     return '已停止'
   }
   return wallMs === undefined ? '已完成' : `已完成，用时 ${formatRunDuration(wallMs)}`

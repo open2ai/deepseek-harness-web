@@ -49,6 +49,13 @@ export interface ProcessDisclosureInput {
      * 与 `done` 取**或**。读不到时按「没拿到开头」处理，只剩 `done` 那一条门（与上游同形）。
      */
     turnStarted?: boolean
+    /**
+     * 收起时机：本回合是否**推迟自动收起**（`next-input` 档的最新交互段）。
+     *
+     * 只改一件事：`history` 档下，推迟中的已定稿回合**不分组**（保持平铺，像还在跑）。
+     * `collapsed` 档保持分组头不变 —— 与上游一致：简洁/标准保留过程组头、详细保留平铺过程行。
+     */
+    defer?: boolean
     /** 回合级展开态（同回合所有行共用；上游按 (turn, answerStep) 持久化） */
     open: boolean
     /** 本行是不是**折叠头的归属行**（回合首行 ＝ 上游的 `turn-process` 控制节点；只有它渲染折叠头） */
@@ -150,7 +157,10 @@ export function processDisclosure(input: ProcessDisclosureInput): ProcessDisclos
     // 上游 `ChatGroupSeat` 的 `grouped`（`stepGrouping` 决定分组头覆盖谁）：与「外层折叠」是**两道独立的门**。
     // 缺省 `history` = 读不到偏好时的保守形态（真机上宿主恒下发这一列，见接口注释）。
     const grouping = input.grouping ?? 'history'
-    const grouped = grouping !== 'none' && (grouping === 'collapsed' || input.done)
+    // 推迟中的回合在 `history`（详细）档不分组：上游「详细保留平铺过程行」就是这一条 ——
+    // 它让已定稿的最新回合看起来仍像进行中。`collapsed` 档不受影响（组头照出，靠展开态保持正文可见）。
+    const grouped = grouping !== 'none'
+        && (grouping === 'collapsed' || (input.done && input.defer !== true))
     /**
      * **这一片有没有可收的东西**（与 `grouped` 是两道独立的门：那道管"要不要分组头"，这道管"收得起吗"）。
      *

@@ -14,6 +14,7 @@ import {
     type ProcessSpec,
     type SessionEvent,
 } from './types'
+import { isAtOrOutside, positionOfKind } from './group-tree'
 import {
     blockIsVisible,
     displayFailure,
@@ -368,20 +369,19 @@ export function isVisibleChatNode(node: ChatNode): boolean {
 // ---------- 分组（镜像 `process-groups.js`） ----------
 
 /**
- * 独立成行的节点种类（组在这七种节点处**断**，节点自己是一条顶层 entry）。
+ * 独立成行的节点种类（组在这些节点处**断**，节点自己是一条顶层 entry）——**现行判据是位置**：
+ * `isAtOrOutside(node, 'process')`，也就是"凡在分组树里有位置"的种类都断。
  *
- * ⚠️ **`command` / `manual-compaction` 曾经被塞进这个集合**（2026-10-09），当时是权宜之计：
- * 链上根本不认这两种 kind，落进 `pending` 就整条不渲染（可见命令行 `/plan`、`/compact` 会消失）。
- * 2026-10-10 复核后改正 —— 这两种是**普通过程成员**（节点各自有渲染器、与 `tool-call` 同一个座位），
- * 所以它们进 `pending`、落进片、跟着片折叠；**唯一的前提是链上认这两种 kind**
- * （`render-plan.ts` 的 `toChainItem`）—— 顺序反了就会重演"整条不渲染"。
+ * ⚠️ 这里**曾经是三张 kind 白名单**（`INDEPENDENT` / `PRESENTATION_INDEPENDENT` /
+ * `TURN_PROCESS_INDEPENDENT`）。三张表的内容几乎一样、含义各说一套，每加一种节点要同时改三处，
+ * 改漏又不报错（分组/折叠的位置悄悄变）。0.2.1 起改成一个事实：**造节点时按 kind 定一次位置**
+ * （`positionOfKind`，见 `./group-tree.ts`），判据统一读位置。
  *
- * 另一张更宽的呈现层表见下面 `PRESENTATION_INDEPENDENT`：它管"哪些节点不参与回合级过程呈现"
- * （含 `system-prompt`/`turn-process`、不含 `model-retry`），与"分组在哪里断"是两件事，别混用。
+ * ⚠️ **`command` / `manual-compaction` 不在任何位置里**（2026-10-09 曾把它们塞进独立集合，是权宜之计）：
+ * 它们是**普通过程成员**、与 `tool-call` 同一个座位 —— 没有位置就会并进周围的 step run、跟着片折叠，
+ * 这正是想要的。**唯一的前提是链上认这两种 kind**（`render-plan.ts` 的 `toChainItem`）。
  */
-const INDEPENDENT = new Set(['user', 'steering', 'turn-trigger', 'model-retry', 'turn-error', 'turn-max-tokens', 'turn-tail'])
-/** 呈现层独立集合：不含 `model-retry`（它仍算过程外置）、含 `system-prompt`/`turn-process`。 */
-const PRESENTATION_INDEPENDENT = new Set(['system-prompt', 'user', 'steering', 'turn-trigger', 'turn-process', 'turn-error', 'turn-max-tokens', 'turn-tail'])
+
 
 /**
  * **会话级节点的桶号**（「没有回合归属」的那些节点）。
@@ -474,10 +474,10 @@ function rebuildTurnGroups(turn: number, keys: readonly string[], nodes: Map<str
     for (const key of keys) {
         const node = nodes.get(key)
         if (node === undefined) continue
-        if (INDEPENDENT.has(node.kind)) {
-            flush(true)
-            entries.push({ kind: 'node', key })
-        } else if (node.kind === 'turn-process') {
+        // 控条**自带一条 entry，但不收口前面的过程**（上游也是这个次序：控条排在过程节点之后，
+        // 走到它时 `pending` 必为空）。这条分支必须排在"按位置断组"前面 ——
+        // 否则 `turn-process` 会先去 `flush(true)`，把本该并进下一片的过程成员提前收口。
+        if (node.kind === 'turn-process') {
             /**
              * 控条自己那条顶层 entry —— **key 就是控条节点本身**。
              *
@@ -490,6 +490,10 @@ function rebuildTurnGroups(turn: number, keys: readonly string[], nodes: Map<str
              *    用 `pending[0]` 会画成"成员节点自己一行"、控条那条行反而消失（2026-10-11 真撞过：
              *    修复锚点次序后，`1:1` 成了 entry key，于是 assistant 行整批不渲染）。
              */
+            entries.push({ kind: 'node', key })
+        } else if (isAtOrOutside(node, 'process')) {
+            // 其余有位置的节点（提问/插话/触发卡/重试/终局通知/尾卡）：分组在这里**断**，自己一条顶层 entry
+            flush(true)
             entries.push({ kind: 'node', key })
         } else if (node.kind === 'assistant-step') {
             if (reasoning(node)) pending.push({ kind: 'node', key, turn, groupPart: 'reasoning' })
@@ -515,7 +519,7 @@ function derivePresentation(
     for (const key of turnKeys) {
         const node = nodes.get(key)
         if (node === undefined) continue
-        if ((node.kind === 'user' || node.kind === 'steering' || node.kind === 'turn-trigger') && (spec.controlAnchorSeq === turn.start?.seq || node.anchorSeq < spec.controlAnchorSeq)) {
+        if (isAtOrOutside(node, 'input') && (spec.controlAnchorSeq === turn.start?.seq || node.anchorSeq < spec.controlAnchorSeq)) {
             openingHumanAnchor = Math.max(openingHumanAnchor ?? node.anchorSeq, node.anchorSeq)
         }
     }
@@ -525,11 +529,11 @@ function derivePresentation(
     for (const key of turnKeys) {
         const node = nodes.get(key)
         if (node === undefined || !isVisibleChatNode(node) || node.kind === 'turn-process') continue
-        if ((node.kind === 'user' || node.kind === 'steering' || node.kind === 'turn-trigger') && (openingHumanAnchor === undefined || node.anchorSeq > openingHumanAnchor)) {
+        if (isAtOrOutside(node, 'input') && (openingHumanAnchor === undefined || node.anchorSeq > openingHumanAnchor)) {
             hasInterleavedInput = true
             if (spec.answerAnchorSeq === null || node.anchorSeq < spec.answerAnchorSeq) compactAnswer = false
         }
-        if (PRESENTATION_INDEPENDENT.has(node.kind) || node.anchorSeq < spec.processStartSeq || (spec.answerAnchorSeq !== null && node.anchorSeq >= spec.answerAnchorSeq)) continue
+        if (isAtOrOutside(node, 'turn') || node.anchorSeq < spec.processStartSeq || (spec.answerAnchorSeq !== null && node.anchorSeq >= spec.answerAnchorSeq)) continue
         if (node.kind !== 'assistant-step' || spec.answerStep === null || (node.data['step'] as number) !== spec.answerStep) hasExternalProcess = true
     }
     return {
@@ -1028,7 +1032,13 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
     // 3. 建节点。
     const nodes = new Map<string, ChatNode>()
     const mkNode = (key: string, kind: string, id: string, anchorSeq: number, location: ChatLocation, visibility: 'visible' | 'hidden', data: Record<string, unknown>): void => {
-        nodes.set(key, { key, kind, id, target: 'chat', anchorSeq, time: timeOfSeq.get(anchorSeq) ?? 0, location, visibility, data })
+        // **位置在这里定一次**（判据都读它，不再各持一张 kind 白名单）：
+        // 回答步/工具/上下文/命令行/压缩标记没有位置 → 并入周围的 step run。
+        const groupTree = positionOfKind(kind)
+        nodes.set(key, {
+            key, kind, id, target: 'chat', anchorSeq, time: timeOfSeq.get(anchorSeq) ?? 0, location, visibility, data,
+            ...(groupTree === undefined ? {} : { groupTree }),
+        })
     }
     // 3.1 assistant-step 节点。
     for (const key of stepOrder) {

@@ -65,8 +65,8 @@ export type DshTurnProcessItem =
       errorReason?: string
       /** tool/result 的结果文本（Terminal/Read 等展开卡展示输出） */
       output?: string
-      /** 退出码（输出末尾 marker 解析；Terminal 卡 Pill 展示；输出已剥 marker） */
-      exitCode?: number
+      /** 退出码（输出末尾 marker 解析；Terminal 卡 Pill 展示；输出已剥 marker）；`null` = 无可用退出码 */
+      exitCode?: number | null
       /** 终止信号名（[killed by signal: X]；优先于退出码） */
       signal?: string
       /** tool/result.data.meta 原文透传（web_fetch statusCode / web_search sources/answer 等卡数据源） */
@@ -527,6 +527,13 @@ export interface ChatStore {
   pendingEchoes: Signal<readonly PendingEcho[]>
   /** **渲染用的行表（推导）**：耐久行按 `rpcId` 去重 ∪ 未进日志的回显；渲染只读它，不读 `messages`。 */
   visibleRows: Signal<readonly ChatRow[]>
+  /**
+   * 还挂着的**普通直发提交**（台账里 `placement === 'transcript'` 的待结算项）。
+   *
+   * 收起时机选「下次发送时收起」时，它一旦为真就**立刻结束推迟** —— 用户已经发出了下一条，
+   * 按上游口径这一刻就该把上一回合收起（不必等新回合的第一条事件到达）。
+   */
+  pendingTranscriptInput: Signal<boolean>
   view: Signal<'welcome' | 'chat'>
   processing: Signal<boolean>
   /**
@@ -617,6 +624,9 @@ export interface ChatStore {
    *  `collapsed`=所有回合都有（含进行中）、`history`=仅已关闭回合（进行中平铺）、`none`=不分组。
    *  消费点在 `core/process-fold.ts`（决定进行中回合出不出折叠头）。 */
   stepGrouping: Signal<'collapsed' | 'history' | 'none'>
+  /** 收起时机（上游 `ui-chat.collapseTiming`）：`completion`=定稿即收（默认）；`next-input`=最新交互段
+   *  定稿后先保持展开，直到下一次普通输入。消费点在 `core/node-exchanges.ts` 与 `core/process-fold.ts`。 */
+  collapseTiming: Signal<'completion' | 'next-input'>
   /** 渲染源开关（宿主下发，见 docs/design/08 §11）：true = 页面只认宿主下发的「行」，
    *  忽略旧的渲染指令（两条通路二选一，不能同时改列表）。 */
   /** 上游 waterfall 提问弹窗（输入框上方）：pending 时让用户选择/提交/取消/关闭；null=无 */
@@ -687,10 +697,25 @@ export interface ChatStore {
    * 键是会话内回合号，换会话整表清。
    */
   outerAnswerStep: Signal<ReadonlyMap<number, number>>
+  /**
+   * **读者手动收起过的回合**：键 = 会话内回合号，值 = **收起时的 `answerStep`**。
+   *
+   * 为什么需要它：`outerAnswerStep` 的"没有记录"同时表示两种意思 ——「从没动过」与「读者收起了」。
+   * 平时两者结果一样（都折起），但**收起时机推迟**（`next-input` 档的最新交互段）时不一样：
+   * 推迟是"默认别收"，读者的手动收起必须能压过它，否则点那颗 chevron 会**毫无反应**。
+   *
+   * 存世代（而不只是一个"收过"的标记）是为了三态与上游 `turnProcessOpen` 一致：
+   * 记录的世代与当前世代**对不上**（回合里又出了一段回答）→ 回到默认值，不把上一世代的选择粘住。
+   */
+  outerFoldedByReader: Signal<ReadonlyMap<number, number>>
   /** 记下某回合"已唤出到的回答世代"（点开隐藏片 / 网页查找命中时调用）。 */
   revealOuter(turn: number, answerStep: number): void
-  /** 反向：清掉该回合的"已唤出世代" → 回到"只留当前世代"的折起状态（完成态行上的 chevron 用它收起）。 */
-  foldOuter(turn: number): void
+  /**
+   * 反向：记下该回合"在该世代被读者收起" → 回到折起状态（完成态行上的 chevron 用它收起）。
+   * @param turn - 会话内回合号
+   * @param answerStep - 收起时的回答世代
+   */
+  foldOuter(turn: number, answerStep?: number): void
   /** 附件字节缓存（附件大类，按 attachmentId；子类卡渲染时读） */
   attachmentCache: Signal<Record<string, AttachmentEntry>>
   // ---- 消息反馈（👍/👎） ----

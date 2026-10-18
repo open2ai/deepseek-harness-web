@@ -62,6 +62,11 @@ export function turnEndFailure(reason: unknown): DshTurnFailure | undefined {
         return undefined;
     }
     const kind = record['kind'];
+    if (kind === 'interrupted') {
+        // 宿主在回合中途退出（进程被杀、窗口关闭等）。它与"用户按停止"（`aborted`）不是一件事：
+        // 界面上要单独说明原因，所以这里合成一个 code，文案由页面按 locale 决议。
+        return { code: 'INTERRUPTED' };
+    }
     if (kind === 'error') {
         const raw = record['error'];
         const error = asRecord(raw);

@@ -44,6 +44,7 @@ import { activityGlyph, chevronGlyph } from './ProcessIcons'
 import { ShimmerText } from './ShimmerText'
 import { ProcessGroup } from './ProcessGroup'
 import { chainDetailBody, chainProcText, chainRenderPlan, HIDDEN_UNTIL_FOUND, outerFold, reasoningLive } from './plan'
+import { runFoldMotion } from '../../core/fold-motion'
 import { doneStatusText } from '../../core/run-status'
 
 // 两项纯判据的实现在 `./plan`（Chain 与 ProcessGroup 共用同一份）；这里**原样再导出**：
@@ -60,7 +61,7 @@ type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
  * 外层折叠改成**逐世代**判之后它就没有读者了，留着只会让下一个人以为它还在起作用。
  * 判定口径见 `outerFold` 的注释。
  */
-export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey, turnCurrentStep }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; stoppedPill?: unknown; outerHidden?: boolean; seatKey?: string; turnCurrentStep?: number }) {
+export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey, turnCurrentStep, deferFold = false }: { row: AssistantRow; store: ChatStore; ownsHead: boolean; stoppedPill?: unknown; outerHidden?: boolean; seatKey?: string; turnCurrentStep?: number; deferFold?: boolean }) {
   void outerHidden
   // 座位身份（上游 render entry 的 key）：**一行属于哪一项**由此说话。
   // 目前只作身份标记落在 DOM 上（`data-seat-key`），供"逐座位"改造的下一步与真机核对读它。
@@ -91,6 +92,13 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
   const bodyRef = useRef<HTMLDivElement | null>(null)
   const pendingInit = useRef<'top' | 'bottom' | null>(null)
   const [edges, setEdges] = useState<ScrollEdges>({ up: false, down: false })
+  /**
+   * 本行过程明细的展开态：**默认关闭**，只有读者手动开过才展开。
+   *
+   * ⚠️ **推迟（收起时机 `next-input`）不把这里打开**：上游推迟的是**整段过程区**的自动收起
+   * （`outerHidden`），片体自己的 disclosure 默认仍是关闭（`useDisclosure()` 默认 false）——
+   * 真机 2026-10-18 反例：一旦把推迟当成本处默认，下一页就成了"组头下明细一起摊开"，而网页端只有组头。
+   */
   const open = stored ?? false
   const setOpen = (next: boolean): void => {
     // 手动展开时按上游做一次**预定位**：未关闭的回合停在底部（看最新动静）、已关闭的停在顶部。
@@ -126,10 +134,17 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
     // 于是"点一次控制行 = 整个回合一起露出来"（2026-10-12 修：「插件比 web 少了很多步骤」）
     currentStep: turnCurrentStep,
     storedAnswerStep: turn === undefined ? undefined : store.outerAnswerStep?.value.get(turn),
-    // 上游 `turnProcessAlwaysOpen()` 的两个"非正常收官"：**只有** aborted / error。
-    // （`forked` / `interrupted` 等一律当普通收官 —— 2026-10-02 按 tag 更正，见下面的注释）
-    interrupted: row.interrupted === true || row.status === 'aborted' || row.status === 'error',
+    // 上游 `turnProcessAlwaysOpen()` 的几个"非正常收官"：aborted / interrupted / error。
+    // （`forked` 等一律当普通收官 —— 收尾原因本身不改变折叠资格以外的任何表现）
+    interrupted: row.interrupted === true
+      || row.status === 'aborted'
+      || row.status === 'interrupted'
+      || row.status === 'error',
     sliceCount: nodeGrouped ? row.nodeGroups!.length : groupEntries.length,
+    // 收起时机：推迟中的回合默认不折起（保持运行中的呈现）；读者手动收起/唤出仍然优先。
+    defer: deferFold,
+    // 读者手动收起过的世代（与唤出记录一起构成"三态 + 默认值"，见 `outerFold` 的 `openByRecord`）
+    readerFoldedAt: turn === undefined ? undefined : store.outerFoldedByReader?.value.get(turn),
   })
   /** 用户唤出（网页查找命中 `beforematch`）→ 记下"已唤出到当前世代"。 */
   const revealOuter = (): void => {
@@ -139,6 +154,50 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
   const onBeforeMatch = useRef(revealOuter)
   onBeforeMatch.current = revealOuter
   const outerRefEl = useRef<HTMLDivElement | null>(null)
+  /** 上一次**已经落定**的隐藏态（null = 还没挂载过）：用来分辨"渲染重复"与"真的开合"。 */
+  const appliedHidden = useRef<boolean | null>(null)
+  /** 正在跑的折叠过渡的取消函数（同一次开合被再次翻转时先掐掉上一次）。 */
+  const cancelMotion = useRef<(() => void) | null>(null)
+  /** 这一次折叠要不要跑过渡（读者要求减少动效时一律立即切换）。 */
+  const motionAllowed = (): boolean => {
+    try {
+      return !(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false)
+    } catch {
+      return false
+    }
+  }
+  /**
+   * 把隐藏态落到 DOM 上 —— **收起时先跑过渡、过渡结束再挂 `hidden`**。
+   *
+   * 顺序不能反：`hidden` 会让元素没有布局盒子（高度 0），先挂就没有过渡可看。
+   * 反过来（展开）必须**先**去隐藏：隐藏元素量不到自然高度，从 0 长起来的起点会算错。
+   */
+  const applyHidden = (el: HTMLDivElement, hidden: boolean): void => {
+    cancelMotion.current?.()
+    cancelMotion.current = null
+    // 首次挂载 / 元素被替换 / 不允许动效 / 环境不支持 → 立即切换（与改动前一致）
+    if (appliedHidden.current === null || !motionAllowed()) {
+      if (hidden) el.setAttribute('hidden', HIDDEN_UNTIL_FOUND)
+      else el.removeAttribute('hidden')
+      appliedHidden.current = hidden
+      return
+    }
+    if (appliedHidden.current === hidden) return
+    appliedHidden.current = hidden
+    if (hidden) {
+      // 收起：此刻元素还在（属性没挂），量得到当前高度
+      cancelMotion.current = runFoldMotion(el, false, () => {
+        cancelMotion.current = null
+        el.setAttribute('hidden', HIDDEN_UNTIL_FOUND)
+      })
+      return
+    }
+    // 展开：先去隐藏，再从 0 长到自然高度
+    el.removeAttribute('hidden')
+    cancelMotion.current = runFoldMotion(el, true, () => {
+      cancelMotion.current = null
+    })
+  }
 
   // 折叠头（过程分组标题）文案 = 上游口径（**按类别、不带计数**，2026-10-01 对齐）：
   //   已关闭 → `processTitle()`（如「已读取文件并读取图片」；没有工具调用 → 「已完成分析」）；
@@ -195,6 +254,8 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
     // 窗口里有本回合的 `turn/start` 就算就绪；没有它则靠 `done`（= `turnClosed`）。
     // **历史分页截断不是不折叠的理由**（旧版那道 `historyIncomplete` 上游已删）。
     turnStarted: row.process?.turnStarted === true,
+    // 收起时机（「下次发送时收起」）：推迟中的回合在详细档不分组、保持平铺。
+    defer: deferFold,
   })
   // 按片路径下**整回合这道头不渲染**："片数 = 头数"是验收判据 —— 多一个回合级头就多一个
   // 控制点，且与片头语义重叠（一个开合整个回合、一个开合片内）。片自己的头就是本回合的控制。
@@ -332,10 +393,13 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
     && row.process.hasInterleavedInput !== true
     && (row.process.hasExternalProcess === true || row.process.inlineReasoning === true)
   /**
-   * 上游 `turnProcessAlwaysOpen()`：**只有**"未关闭"与 `aborted` / `error` 不能折。
+   * 上游 `turnProcessAlwaysOpen()`：**只有**"未关闭"与 `aborted` / `interrupted` / `error` 不能折。
    * ⚠️ 不能再宽：`forked` 这类分叉切点合成的收尾原因是**普通收官**（上游照常给 chevron）。
    */
-  const alwaysOpen = row.interrupted === true || row.status === 'aborted' || row.status === 'error'
+  const alwaysOpen = row.interrupted === true
+    || row.status === 'aborted'
+    || row.status === 'interrupted'
+    || row.status === 'error'
   /**
    * 可点 = `foldable && hasContent && !alwaysOpen`（上游那三项，**没有第四项**）。
    *
@@ -350,10 +414,13 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
     if (turn === undefined || !canCollapse) {
       return
     }
+    // 收起也要记**世代**（上游 `{turn, answerStep, collapsed:true}`）：记录的世代过期就回默认，
+    // 少了它，上一世代的一次收起会把这个回合之后每一段回答都按住。
+    const at = turnCurrentStep ?? outer.answerStep
     if (!outer.hidden) {
-      store.foldOuter?.(turn)
+      store.foldOuter?.(turn, at)
     } else {
-      store.revealOuter?.(turn, turnCurrentStep ?? outer.answerStep)
+      store.revealOuter?.(turn, at)
     }
   }
   const doneBody = html`<span class="chain-done-text">${doneLine}</span>`
@@ -420,17 +487,18 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
     const previous = outerRefEl.current
     if (previous !== null) {
       previous.removeEventListener('beforematch', onBeforeMatch.current)
-      if (previous !== el) previous.removeAttribute('hidden')
+      if (previous !== el) {
+        cancelMotion.current?.()
+        cancelMotion.current = null
+        appliedHidden.current = null
+        previous.removeAttribute('hidden')
+      }
     }
     outerRefEl.current = el
     if (el === null) {
       return
     }
-    if (outer.hidden) {
-      el.setAttribute('hidden', HIDDEN_UNTIL_FOUND)
-    } else {
-      el.removeAttribute('hidden')
-    }
+    applyHidden(el, outer.hidden)
     el.addEventListener('beforematch', onBeforeMatch.current)
   }
   /**
@@ -454,6 +522,7 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
           return html`<${ProcessGroup} key=${g.key} row=${row} store=${store}
               group=${{ key: g.key, facts: g.facts }} items=${items}
               outerHidden=${outer.hidden}
+              deferFold=${deferFold}
               tail=${index === lastGroupAt ? stoppedPill : null}
               prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />`
         })}
@@ -470,6 +539,7 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
             ? html`<${ProcessGroup} key=${entry.key} row=${row} store=${store}
                 group=${{ key: entry.key, facts: entry.facts }} items=${entry.items}
                 outerHidden=${outer.hidden}
+                deferFold=${deferFold}
                 tail=${index === lastGroupAt ? stoppedPill : null}
                 prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />`
             : chainProcText(entry.item))}

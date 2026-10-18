@@ -4,6 +4,7 @@
 // 与上游 conversation-nodes + conversation/assembler 同构（事件 → 节点 → 排序 → 分组 → 折叠 → 可见性）。
 
 import type { DshTodoItem } from '../../../../src/dsh/rows/types'
+import type { GroupTree } from './group-tree'
 
 /** 合成锚点偏移：合成节点靠小数偏移插到既有事件之间（控制条 / 中断回答 / 超限通知 / 尾部动作条）。 */
 export const CHAT_SYNTHETIC_SEQ_OFFSETS = {
@@ -44,6 +45,12 @@ export interface ChatNode {
     time: number
     location: ChatLocation
     visibility: 'visible' | 'hidden'
+    /**
+     * **分组树位置**（上游 0.2.1 的 `groupTree`）：造节点时按 kind 定一次，判据统一读它。
+     * 缺省 = 并入周围的 step run（回答步、工具、上下文、命令行、压缩标记…）。
+     * 见 `./group-tree.ts` 的 `positionOfKind`。
+     */
+    groupTree?: GroupTree
     data: Record<string, unknown>
 }
 

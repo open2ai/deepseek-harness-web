@@ -9,6 +9,7 @@ import type { ChatRow, ChatStore } from '../../core/store/chat'
 import { ScrollFollow, type FollowHost } from '../../core/follow'
 import { clearRenderErrors, renderErrors } from '../../core/errors'
 import { isVisibleChatRow } from '../../core/chat-visibility'
+import { deferFoldFor, latestExchangeKeys } from '../../core/node-exchanges'
 import { turnRowIndex, turnSeatFacts } from '../../core/nodes/seat-facts'
 import { controlRowTargetIndex } from '../../core/control-row-place'
 import { anchoredTopAfterPrepend } from '../../../../src/dsh/rows/paging'
@@ -215,6 +216,25 @@ export function MessageList({ store }: { store: ChatStore }) {
   // **渲染只读推导后的行表**：耐久行 + 还没进日志的会话级回显（上游 `ChatView` 的 visible × pending 合并）。
   // `?? store.messages`：只给「手搭桩 store 的老夹具」留一条退路（真实 store 两个切片都在，见 `messages.ts`）。
   const rows = (store.visibleRows ?? store.messages).value
+  /**
+   * **收起时机**（上游「设置 → 通用设置 → 收起时机」）：
+   *
+   * - 段 = **最新交互段**：最后一条人发的普通消息起、到表尾（见 `core/node-exchanges.ts`）；
+   * - 段内的已定稿回合默认**不自动收起**（`defer`），出现下一次普通输入或新段时自动结束；
+   * - 只算默认值：读者手动收起/展开的选择在 `Chain` / `ProcessGroup` 里优先。
+   *
+   * 两个信号都在渲染体里读（订阅才建立）：偏好改了下一次渲染就跟上。
+   *
+   * ⚠️ 按**行位置**判段（不再比回合号）：用户行本来就不带 `turn`，按回合号比会让段起点退化
+   * （真机 2026-10-18：网页端展开的那一轮，插件收起了）。
+   */
+  const exchangeKeys = latestExchangeKeys(rows)
+  const pendingTranscript = store.pendingTranscriptInput?.value === true
+  const deferOfRow = (row: { key: number }): boolean => deferFoldFor({
+    timing: store.collapseTiming?.value,
+    inLatestExchange: exchangeKeys.has(row.key),
+    pendingTranscript,
+  })
   /**
    * **回合座位事实**（座位层，见 `core/nodes/seat-facts.ts`）：头 / 段数 / 当前世代由**座位计划**说话。
    *
@@ -524,6 +544,7 @@ export function MessageList({ store }: { store: ChatStore }) {
                 outerHidden=${rowOuterHidden(row)}
                 seatKey=${seatKeyOfRow(row)}
                 turnCurrentStep=${row.turn === undefined ? undefined : currentStepOf(row.turn)}
+                deferFold=${deferOfRow(row)}
                 tailNotices=${tailNotices} />`
             }
             case 'approval':

@@ -25,6 +25,7 @@ export interface MessagesSlice {
     ChatStore,
     | 'pendingEchoes'
     | 'visibleRows'
+    | 'pendingTranscriptInput'
     | 'messages'
     | 'view'
     | 'processing'
@@ -126,6 +127,13 @@ export interface MessagesSlice {
    * 该世代之后一直可见。**记录只在会话内有效**（键是会话内回合号，换会话整表清）。
    */
   outerAnswerStep: Signal<ReadonlyMap<number, number>>
+  /**
+   * 读者手动收起过的回合：键 = 回合号，值 = **收起时的 `answerStep`**（与唤出记录互斥）。
+   *
+   * 只记"收过/没收过"不够：上游 `turnProcessOpen` 的三态是"记录世代 == 当前世代？"，世代过期就回默认。
+   * 单独一张表是为了让"推迟自动收起"与"读者要收起"能区分开（见接口注释）。
+   */
+  outerFoldedByReader: Signal<ReadonlyMap<number, number>>
   /** 记下某回合"已唤出到的回答世代"（用户展开隐藏片 / 网页查找命中时调用）。 */
   revealOuter: (turn: number, answerStep: number) => void
   /** 反向：清掉该回合的"已唤出世代" → 回到"只留当前世代"的折起状态（完成态行上的 chevron 用它收起）。 */
@@ -269,6 +277,13 @@ export function createMessages(host: ChatHost): MessagesSlice {
    */
   const pendingSubmissions = signal<ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>>([])
   /**
+   * 台账里还有**待结算的普通直发**（`placement === 'transcript'`）。
+   *
+   * 收起时机的「下次发送时收起」用它取消推迟：用户已经提交了下一条，这一刻就该恢复历史呈现 ——
+   * 与上游「普通 transcript 输入进入待发送状态即取消推迟」同口径（排队输入、单独 steering 不算）。
+   */
+  const pendingTranscriptInput = computed(() => pendingSubmissions.value.some((p) => p.placement === 'transcript'))
+  /**
    * **子会话事实**（宿主随行帧下发；普通会话是 `undefined`）。页面据此判停止控件与"父离线锁"（见
    * `core/stop-control.ts`）—— 判定在页面、事实在宿主，与插件其它地方同一分工。
    */
@@ -297,7 +312,18 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * **缺省 = 没记录**（等价上游 `stored === undefined`）→ 已关闭回合只留当前世代可见。
    */
   const outerAnswerStep = signal<ReadonlyMap<number, number>>(new Map<number, number>())
+  /**
+   * 读者手动收起的记录（键 = 回合号，值 = 收起时的 `answerStep`）：与 `outerAnswerStep`（唤出记录）互斥，
+   * 一起构成上游 `turnProcessOpen` 的三态。存世代是为了"世代一变就回默认"（见接口注释）。
+   */
+  const outerFoldedByReader = signal<ReadonlyMap<number, number>>(new Map<number, number>())
   const revealOuter = (turn: number, answerStep: number): void => {
+    // 唤出 = 逆着手动收起（否则同一回合会同时"被收起"和"被唤出"）
+    if (outerFoldedByReader.value.has(turn)) {
+      const nextFolded = new Map(outerFoldedByReader.value)
+      nextFolded.delete(turn)
+      outerFoldedByReader.value = nextFolded
+    }
     if (outerAnswerStep.value.get(turn) === answerStep) {
       // 已经是这个世代：不产生新 Map（避免每帧新建引用导致订阅者白重渲）
       return
@@ -306,8 +332,15 @@ export function createMessages(host: ChatHost): MessagesSlice {
     next.set(turn, answerStep)
     outerAnswerStep.value = next
   }
-  /** 反向：把"已唤出世代"删掉 → 该回合回到"只留当前世代"的折起状态（完成态行上的 chevron 用它收起）。 */
-  const foldOuter = (turn: number): void => {
+  /** 反向：记下"读者在该世代收起了本回合"并清掉唤出记录 → 回到折起状态（完成态行上的 chevron 用它收起）。 */
+  const foldOuter = (turn: number, answerStep?: number): void => {
+    // 先记"是读者收的、收在哪一代"：推迟中的回合没有这条记录就会把收起吞掉（真机：点 chevron 没反应）
+    const step = answerStep ?? outerAnswerStep.value.get(turn) ?? 0
+    if (outerFoldedByReader.value.get(turn) !== step) {
+      const nextFolded = new Map(outerFoldedByReader.value)
+      nextFolded.set(turn, step)
+      outerFoldedByReader.value = nextFolded
+    }
     if (!outerAnswerStep.value.has(turn)) {
       return
     }
@@ -472,6 +505,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
         groupFoldOpen.value = new Map<string, boolean>()
         // 外层折叠的"已唤出世代"按会话内回合号记 —— 同样必须清（否则新会话的同号回合会继承旧记录）
         outerAnswerStep.value = new Map<number, number>()
+        // 读者的手动收起记录同理（换会话不能继承）
+        outerFoldedByReader.value = new Map<number, number>()
         // **打开一个会话一律从底部开始**（对齐上游：没有存下的阅读位置时 `toBottom()`）。
         // 少了这一下，新会话的内容是在「保留原 scrollTop」的前提下长出来的 ——
         // 上一条会话若停在靠下的位置，打开新历史会话时视野就留在**最上面**（真机现象「光标跑到最上面去了」）。
@@ -674,6 +709,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     turnFoldOpen.value = new Map<number, boolean>()
     groupFoldOpen.value = new Map<string, boolean>()
     outerAnswerStep.value = new Map<number, number>()
+    outerFoldedByReader.value = new Map<number, number>()
     // 窗口事实随会话一起换：新会话的窗口由它自己的 `rows` 帧重写
     historyHasMore.value = false
     historyLoading.value = false
@@ -694,6 +730,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
       seatPlan,
       pendingEchoes,
       visibleRows,
+      pendingTranscriptInput,
       historyHasMore,
       historyLoading,
       historyEvents,
@@ -732,6 +769,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     groupFoldOpen,
     setGroupFoldOpen,
     outerAnswerStep,
+    outerFoldedByReader,
     revealOuter,
     foldOuter,
   }

@@ -12,7 +12,7 @@ import { toolTitle, toolIconOfTool, resultFirstLine, codeBodyOf, toolVariantOf }
 import { renderMd } from '../../core/markdown'
 import { toolGlyphOf } from './ToolIcons'
 import { toolStateLabel, ToolState } from '../../core/states'
-import { filePathOf, terminalCardModel, relativizeToCwd, shellWantsGenericCard } from '../../core/terminal'
+import { exitBadgeLabel, filePathOf, recordedPathOf, terminalCardModel, relativizeToCwd, shellWantsGenericCard } from '../../core/terminal'
 import { webCardModel } from '../../core/web-card'
 import { askCardModel } from '../../core/ask-card'
 import { skillCardModel, SKILL_LABELS } from '../../core/skill-card'
@@ -78,6 +78,12 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   //   3) 其余用宿主判好的 item.status（由 isError + code 特例判出，见 src/dsh/official/tool-status.ts）
   const rowState = ask?.state ?? terminal?.state ?? item.status
   const running = rowState === 'running' || preparing
+  /**
+   * **退出状态胶囊**（上游 `ExitCodeBadge` + `terminalExitLabel`）：只对「已结算、失败、前台」的命令出。
+   * 它一旦出现，这一行就不再当作"失败行"渲染（要点与文字都不再切红）—— 退出码本身就是失败原因，
+   * 再叠一行红色首行错误只是重复（上游同：`failureLine = state==='error' && exitLabel===null`）。
+   */
+  const exitLabel = exitBadgeLabel(terminal)
   // ① leading 二选一（上游 leadingFor）：error→红点、stopped→琥珀点；**其余（含 running）显变体图标**。
   // 行尾不再有状态角标——上游整行只有这一个标记位；running 的进行感由行上的掠光带（②）承担。
   const dotState = rowState === 'error' ? 'error' : rowState === 'stopped' ? 'warning' : null
@@ -95,7 +101,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // 所以提问行永远不会被换成结果首行。
   // Auto review 拒绝的摘要位是它自己的文案（上游 `errorSummary = autoReview?.summary ?? model.errorSummary`），
   // 不是结果首行 —— 结果里只有审查器的原始拒绝理由。
-  const failureLine = autoReview !== null ? autoReview.summary : ask === null && item.status === 'error' ? resultFirstLine(item.output) : null
+  const failureLine = autoReview !== null ? autoReview.summary : ask === null && item.status === 'error' && exitLabel === null ? resultFirstLine(item.output) : null
   // 摘要位后半段（上游 `summaryText = failureLine ?? description ?? summary`）：
   //   文件类工具的摘要是路径 → **相对工作区根**（上游 `abbreviateHomePath(relativizeToCwd(...), home)`；
   //   home 缩写只对 POSIX 家目录生效，Windows 上本插件与上游同样是空操作）。
@@ -124,7 +130,9 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   //   - 只对文件类变体（read/write/edit，含 read_image）有值，取参数里的 path/file_path；
   //   - **失败行不挂**（失败行的摘要位是结果首行，不是路径）；
   //   - 读族带 `meta.offset` 时跳到该行（上游 filePathLine 同口径）。
-  const openPath = failureLine === null ? filePathOf(item.name, item.argsRaw) : undefined
+  const openPath = failureLine === null
+    ? (recordedPathOf(item.meta) ?? filePathOf(item.name, item.argsRaw))
+    : undefined
   const openLineRaw = (item.meta as { offset?: unknown } | undefined)?.offset
   const openLine = typeof openLineRaw === 'number' && Number.isInteger(openLineRaw) && openLineRaw > 0 ? openLineRaw : undefined
   // 摘要位的**色调跟着行状态走**（上游 ToolRow：`state === 'error' && css.errorSummary`、
@@ -133,7 +141,9 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // 上面 `rowState` 已按终端卡口径覆盖成 `error` —— 文字必须一起变红（真机反馈：「插件运行命令有红色点，
   // 后面的文字怎么没标红色呢，上游的都是红色的」）。文字本身仍走 `failureLine ?? description ?? summary`
   // 那条链：只有真失败（isError）才把摘要换成结果首行，非零退出仍是模型写的那句描述。
-  const summaryTone = rowState === 'error' ? 'error' : rowState === 'stopped' ? 'stopped' : null
+  const summaryTone = exitLabel !== null
+    ? null
+    : rowState === 'error' ? 'error' : rowState === 'stopped' ? 'stopped' : null
   // 行首图标二选一：这一族有**上游图形**就用它（内联 SVG，见 `ToolIcons.ts`），其余仍走 codicon 近似
   const glyph = toolGlyphOf(item.name)
 
@@ -162,6 +172,10 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
               }}>${headSummary}</button>`
           : html`<span class=${'chain-row-preview' + (summaryTone === 'error' ? ' is-error' : summaryTone === 'stopped' ? ' is-stopped' : '')}>${headSummary}</span>`}`
       : null}
+    ${/* 退出状态胶囊：中性底 + 一个失败点，文案是"退出码 N / 信号 X / 未正常退出"（不发明数字）。
+         它在展开态也保留 —— 这是这一行的结果事实，不是摘要的补充。 */ ''}
+    ${exitLabel !== null ? html`<span class="chain-exit-badge" data-exit-badge title=${exitLabel}>
+      <span class="chain-exit-dot" aria-hidden></span>${exitLabel}</span>` : null}
   </${preparing ? 'div' : 'button'}>`
 
   /**

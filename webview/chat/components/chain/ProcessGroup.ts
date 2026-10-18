@@ -39,7 +39,7 @@ type AssistantRow = Extract<ChatRow, { kind: 'assistant' }>
  * @param props.prefs - 页面级偏好。
  * @param props.tail - 明细体末尾的附加内容（「已停止」药丸那一路，见 `plan.ts` 的 `chainDetailBody`）。
  */
-export function ProcessGroup({ row, store, group, items, prefs, outerHidden = false, tail }: {
+export function ProcessGroup({ row, store, group, items, prefs, outerHidden = false, tail, deferFold = false }: {
   row: AssistantRow
   store: ChatStore
   group: Pick<DshRowGroup, 'key' | 'facts'>
@@ -49,6 +49,8 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
   outerHidden?: boolean
   /** 明细体末尾的附加内容（可选；只有最后一片会收到） */
   tail?: unknown
+  /** 收起时机：所属回合是否推迟自动收起（「下次发送时收起」档的最新交互段） */
+  deferFold?: boolean
 }) {
   const turn = row.turn
   // ⚠️ 两个 ref 必须**在 `setOpen` 之前**声明：`setOpen` 是闭包、点的时候才跑，但引用在渲染那一刻
@@ -58,6 +60,9 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
   // 展开态：键 = `${turn}:${group.key}`（各片独立）。回合号缺失（旧宿主）时按"未记录"处理。
   const stored = turn === undefined ? undefined : store.groupFoldOpen?.value.get(`${String(turn)}:${group.key}`)
   // 默认**收起**：上游的分组头用 `useDisclosure`，初始即收 —— **与回合是否已关闭无关**。
+  // ⚠️ **收起时机（`next-input`）不把这里打开**：上游推迟的是整段过程区的自动收起（`outerHidden`），
+  // 片体自己的 disclosure 默认仍关闭 —— 真机 2026-10-18 反例：把它当默认后，组头下明细一起摊开，
+  // 而网页端只显示组头（明细要读者点开）。
   const open = stored ?? false
   /**
    * 这一片自己的收口态（判据见 `core/process-group-view.ts` 的 `sliceClosedOf`）。
@@ -97,6 +102,7 @@ export function ProcessGroup({ row, store, group, items, prefs, outerHidden = fa
     hasInterleavedInput: row.process?.hasInterleavedInput === true,
     facts: group.facts,
     liveProcessDetail: prefs.liveProcessDetail,
+    defer: deferFold,
   })
 
   // **标题稳定延迟**（上游 `useStableLiveProcessTitle`）：进行中每帧都可能换标题，

@@ -7,6 +7,7 @@
 // 形状刻意只列渲染所需字段（不 import store/types.ts 的 ChatRow —— 那会带进 @preact/signals 依赖链，
 // 让本文件无法在无依赖环境下独立 type-check + 守卫）。接线层把 RenderRow 收窄成 ChatRow（同构、spread）。
 import type { ChatBlock, ChatNode, ChatNodeModel, ProcessGroupSnapshot, ProcessPresentation } from './types'
+import { isAtOrOutside } from './group-tree'
 import { hasAssistantReplyContent } from './event-projection'
 import { fileRefsOf, hasImageBlock, imageRefsOf, resultText } from '../../../../src/dsh/official/result-text'
 import type { DshRowGroupFacts, DshRowGroupSummary, DshTodoItem } from '../../../../src/dsh/rows/types'
@@ -84,12 +85,13 @@ function subCallsOf(raw: unknown): RenderSubCall[] | undefined {
 export type RenderGroup = { key: string; itemKeys: string[]; facts: DshRowGroupFacts }
 
 /**
- * 呈现层的独立种类（上游 `TURN_PROCESS_INDEPENDENT_KINDS`）：这几种节点**不参与回合级过程呈现** ——
- * 排序时它们既不进片、也不吃控条那条 rank 规则（与 `chat-nodes.ts` 里同名的集合是同一张表的两处使用）。
+ * 呈现层的判据：**站在这棵树上的节点不参与回合级过程呈现**（`isAtOrOutside(node, 'turn')`）。
+ *
+ * 这原先是一张 kind 白名单（`system-prompt`/`user`/`steering`/`turn-trigger`/`turn-process`/
+ * `turn-error`/`turn-max-tokens`/`turn-tail`）。0.2.1 起改为读**分组树位置**，与 `chat-nodes.ts` 同一份事实：
+ * 位置在造节点时定一次，判据只读它，不再有两处表可能漂开。
  */
-const TURN_PROCESS_INDEPENDENT: ReadonlySet<string> = new Set([
-    'system-prompt', 'user', 'steering', 'turn-trigger', 'turn-process', 'turn-error', 'turn-max-tokens', 'turn-tail',
-])
+
 
 /** 渲染行（节点 kind 的扁平投影；与 ChatRow 同构，缺省字段由接线层补）。 */
 export type RenderRow =
@@ -140,7 +142,7 @@ function positionInTurn(
 ): { anchor: number; rank: number; originalAnchor: number } {
     const original = n.anchorSeq
     const { openingInputAnchor, earliestProcessAnchor } = turnFacts
-    if (openingInputAnchor !== undefined && original < openingInputAnchor && !TURN_PROCESS_INDEPENDENT.has(n.kind)) {
+    if (openingInputAnchor !== undefined && original < openingInputAnchor && !isAtOrOutside(n, 'turn')) {
         return { anchor: openingInputAnchor, rank: 2, originalAnchor: original }
     }
     if (n.kind === 'turn-process') {
@@ -174,7 +176,7 @@ function turnPositionFacts(model: ChatNodeModel, turn: number): { openingInputAn
     }
     let earliestProcessAnchor: number | undefined
     for (const n of turnNodes) {
-        if (n.kind === 'turn-process' || TURN_PROCESS_INDEPENDENT.has(n.kind)) continue
+        if (n.kind === 'turn-process' || isAtOrOutside(n, 'turn')) continue
         earliestProcessAnchor = Math.min(earliestProcessAnchor ?? n.anchorSeq, n.anchorSeq)
     }
     return { openingInputAnchor, earliestProcessAnchor }
@@ -579,7 +581,7 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
      */
     let earliestProcessAnchor: number | undefined
     for (const n of turnNodes) {
-        if (n.kind === 'turn-process' || TURN_PROCESS_INDEPENDENT.has(n.kind)) continue
+        if (n.kind === 'turn-process' || isAtOrOutside(n, 'turn')) continue
         earliestProcessAnchor = Math.min(earliestProcessAnchor ?? n.anchorSeq, n.anchorSeq)
     }
     /**
@@ -907,7 +909,7 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
                 // `system-prompt` 在聊天区**不渲染**（`MessageList` 那一支返回 null）→ 它不该影响
                 // 可见行的位置；否则它的锚（常在开局输入之前）会把整行拽到用户消息上面。
                 .filter((n) => n.visibility === 'visible' && n.kind !== 'system-prompt')
-                .map((n) => (openingInputAnchor !== undefined && n.anchorSeq < openingInputAnchor && !TURN_PROCESS_INDEPENDENT.has(n.kind)
+                .map((n) => (openingInputAnchor !== undefined && n.anchorSeq < openingInputAnchor && !isAtOrOutside(n, 'turn')
                     ? openingInputAnchor
                     : n.anchorSeq))
                 .filter((a): a is number => typeof a === 'number')

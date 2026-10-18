@@ -687,7 +687,8 @@ async function postChatPrefs(): Promise<void> {
     // 诊断留痕（真机排查「设置改了但界面没跟随」时看这一行）：输出通道 `DSH 事件窗口`
     logRows(
         `偏好 → 工作步骤展示=${prefs.transcriptView}（分组头=${prefs.stepGrouping}） · 性能与用量=${prefs.performanceUsage}` +
-            ` · 代码工作工具=${prefs.developerTools ? '开' : '关'} · 繁忙时的发送行为=${prefs.busyEnter}`
+            ` · 代码工作工具=${prefs.developerTools ? '开' : '关'} · 繁忙时的发送行为=${prefs.busyEnter}` +
+            ` · 收起时机=${prefs.collapseTiming}`
     );
     postToChats({
         type: 'chatPrefs',
@@ -698,6 +699,7 @@ async function postChatPrefs(): Promise<void> {
         settledReasoningPreview: prefs.settledReasoningPreview,
         liveProcessDetail: prefs.liveProcessDetail,
         stepGrouping: prefs.stepGrouping,
+        collapseTiming: prefs.collapseTiming,
     });
 }
 

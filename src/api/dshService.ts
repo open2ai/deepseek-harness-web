@@ -21,6 +21,7 @@ import {
     probeCapabilities,
     setCapabilities,
     createSession,
+    createSessionDetailed,
     sendPrompt,
     forkSession as forkSessionRpc,
     renameSession as renameSessionRpc,
@@ -34,6 +35,7 @@ import {
     type FeedbackRating,
     type FeedbackCategory,
     getSessionProjections,
+    getSessionProjectionsRead,
     activeGoalRefOf,
     readGoalActivation,
     sameGoalActivation,
@@ -2532,9 +2534,13 @@ export class DshService {
         if (reusable) {
             // 复用的空白会话可能是靠 cwd 匹配进来的（并未登记在工作区成员表里）→ 补登记，
             // 否则「新建会话」出来的会话在网页端仍落在未分组（真机现象）。
+            // ⚠️ 补登记可能失败（这条其实已经开过对话了：宿主只复用空白会话）→ 那就**别复用它**，
+            // 走下面的新建，否则会把用户带进一条根本不在工作区里的会话。
             await this.bindSessionToWorkspace(wsId, reusable).catch(() => false);
-            this.setCurrentSession(reusable);
-            return reusable;
+            if (await this.sessionInWorkspace(wsId, reusable)) {
+                this.setCurrentSession(reusable);
+                return reusable;
+            }
         }
         const sid = await createSession({ workspaceId: wsId });
         // **建完立刻核一遍归属**（2026-10-10 真机：新会话出现在「未分组」）。
@@ -2559,29 +2565,46 @@ export class DshService {
      * @returns 核对之后它确实在成员表里才 true（本来就属于这里也算 true）。
      */
     async ensureSessionInWorkspace(workspaceId: string, sessionId: string): Promise<boolean> {
-        const isMember = async (): Promise<boolean> => {
-            try {
-                const list = await this.listWorkspaces();
-                const ws = (list.items ?? []).find((w) => w.workspaceId === workspaceId);
-                return (ws?.sessionIds ?? []).includes(sessionId);
-            } catch {
-                // 列表读不到就**不下结论**（当作已挂上，别在探测失败时反复补登记）
-                return true;
-            }
-        };
-        if (await isMember()) {
+        if (await this.sessionInWorkspace(workspaceId, sessionId)) {
             return true;
         }
         try {
-            await createSession({ sessionId, workspaceId });
+            // ⚠️ 判定返回值：宿主**不保证**按请求的 id 复用（只有空白会话才复用）。被换成另一条时
+            // 什么都不该做 —— 否则屏幕上"S 已归入"是假的，成员表里躺着的是另一条空会话。
+            const created = await createSessionDetailed({ sessionId, workspaceId });
+            if (created.outcome === 'replacement') {
+                console.warn(
+                    '[dsh-ws] 会话已开始对话，宿主未复用它（另建了一条）session=' + sessionId +
+                    ' returned=' + created.sessionId + ' ws=' + workspaceId
+                );
+                return false;
+            }
         } catch (e) {
             console.warn('[dsh-ws] 补登记失败 session=' + sessionId + ' ws=' + workspaceId + '：' + (e instanceof Error ? e.message : String(e)));
         }
-        const ok = await isMember();
+        const ok = await this.sessionInWorkspace(workspaceId, sessionId);
         if (!ok) {
             console.warn('[dsh-ws] 会话仍未归属工作区（会显示成「未分组」）session=' + sessionId + ' ws=' + workspaceId);
         }
         return ok;
+    }
+
+    /**
+     * 这条会话此刻是不是该工作区的成员（按 `workspace.list` 的事实，不做任何写操作）。
+     *
+     * 探测失败时**返回 true**（当作已挂上）：列表读不到不能反复补登记，更不能把"读不到"当"没归属"。
+     * @param workspaceId - 目标工作区。
+     * @param sessionId - 会话。
+     * @returns 成员表里有它（或读不到成员表）时 true。
+     */
+    async sessionInWorkspace(workspaceId: string, sessionId: string): Promise<boolean> {
+        try {
+            const list = await this.listWorkspaces();
+            const ws = (list.items ?? []).find((w) => w.workspaceId === workspaceId);
+            return (ws?.sessionIds ?? []).includes(sessionId);
+        } catch {
+            return true;
+        }
     }
 
     // ---------- 工作区 / 会话历史恢复 ----------
@@ -2633,8 +2656,17 @@ export class DshService {
         if (claimed) {
             return false;
         }
-        // 幂等收养：同一个 id 再调一次不会新建会话（宿主按 id 收养），只在 cwd 不符时抛冲突。
-        await createSession({ sessionId, workspaceId });
+        // 按 id 复用（幂等）：**宿主只在空白会话上复用**，否则会另建一条并把它返回。
+        // 返回值与请求值不同 = 没登记上（且宿主已经建了一条新的），此时必须如实返回 false，
+        // 否则调用方会以为"这条已经在工作区里了"。
+        const created = await createSessionDetailed({ sessionId, workspaceId });
+        if (created.outcome === 'replacement') {
+            console.warn(
+                '[dsh-ws] 会话已开始对话，无法挂入工作区（宿主另建了一条）session=' + sessionId +
+                ' returned=' + created.sessionId + ' ws=' + workspaceId
+            );
+            return false;
+        }
         return true;
     }
 
@@ -3182,7 +3214,13 @@ export class DshService {
         if (!sid) {
             return {};
         }
-        const projections = await getSessionProjections(sid);
+        const read = await getSessionProjectionsRead(sid);
+        /**
+         * **需要先迁移格式的旧会话**：那次 remote 只给「缓存提示」（可能过时、且没有水位）。
+         * 这种表**只补空缺**、已有值优先 —— 否则一次提示会把已经到账的实时投影冲回旧值。
+         * 正常会话（`sequenced`）照旧整表采用。
+         */
+        const projections = read.hintsOnly ? { ...read.values, ...this.currentProjections() } : read.values;
         const permissions = projections['permissions'];
         if (permissions === undefined) {
             return projections;
