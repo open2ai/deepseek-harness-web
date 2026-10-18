@@ -30,6 +30,13 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
   const mentioned = hasRefMention(row.text)
   const localRefs = row.refs
   /**
+   * **气泡只在有文本时渲染**：
+   *
+   * 引用贴片**不在气泡里**：上游把引用摘要放在气泡之外、气泡下方。
+   */
+  const showRefChips = !mentioned && localRefs !== undefined && localRefs.length > 0
+  const hasBubble = row.text.length > 0
+  /**
    * **凭据遮挡**：已发送文本里认得出的凭据只留前 8 个字符，其余变 `*`。
    *
    * 三条边界：① 只改**显示** —— 复制（`store.copy(row.text)`）与模型输入都是原文；
@@ -76,12 +83,18 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
           ${/* （附件层那条已挪到上面与本地字节同一个三元里：两条路只走一条。） */ ''}
         </div>`
       : null}
-    <div class="body">
-      ${!mentioned && localRefs && localRefs.length > 0
-        ? html`<div class="user-refs">${localRefs.map((r, i) => refChipEl({ kind: r.kind, label: r.label, token: r.token ?? '' }, i))}</div>`
-        : null}
-      ${row.text ? html`<div class="user-text"><${SecretText} text=${row.text} refs=${localRefs} /></div>` : null}
-    </div>
+    ${/* **没有正文就不画气泡**：只发图片/文件时，
+         气泡底色 + 内距会把图片下面多出一个空方块。 */ ''}
+    ${hasBubble
+      ? html`<div class="body">
+          <div class="user-text"><${SecretText} text=${row.text} refs=${localRefs} /></div>
+        </div>`
+      : null}
+    ${/* 引用贴片在**气泡之外**：
+         本地回显还没把引用 token 写进正文时，靠这一行先把贴片画出来。 */ ''}
+    ${showRefChips
+      ? html`<div class="user-refs">${localRefs.map((r, i) => refChipEl({ kind: r.kind, label: r.label, token: r.token ?? '' }, i))}</div>`
+      : null}
     ${RowMeta({
       time: row.time,
       copyable: !!row.text,
