@@ -2,6 +2,12 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.19-rc.1] — 2026-10-18
+
+### 变更
+
+- **适配 dsh 0.2.1-rc.2**，对应会话区优化
+
 ## [0.1.18] — 2026-10-17
 
 ### 变更
