@@ -296,7 +296,7 @@
   /* `scrollbar-gutter: stable` 与上游滚动容器同（`ConversationRoot.module.css`）：滚动条槽位**无条件预留**，
      槽位出现/消失不改 `clientHeight`（否则会触发跟随里的"视口变矮 ⇒ 重钉"，与滚动条互踢）。 */
   #messages {
-    flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
+    flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 12px 14px;
     scrollbar-gutter: stable;
   }
   /* 上游同款（`ChatView.module.css`）：**跟随尾部时禁掉浏览器自己的滚动锚定**。
@@ -470,6 +470,21 @@
     background: rgba(128, 128, 128, 0.06); border-radius: 0 6px 6px 0;
   }
   .msg .body hr, .chain-proc-text hr { border: none; border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.14)); margin: 0.9em 0; }
+  /* 行间公式（KaTeX 的 `.katex-display`）**自己横滚**：超宽公式在它自己的框里滚，
+     不要撑出整列/整个消息区的横向滚动条（真机 2026-10-18：网页端滚动条贴在那块公式下面，
+     插件却是整片的横滚条、还把公式截断）。
+     三条与上游同口径：`max-width: 100%` 让它别超过正文列、`overflow-x: auto` 给块内横滚、
+     `overflow-y: hidden` 防止多出一像素高的纵向条（KaTeX 的下伸部会画到行盒外一像素）。 */
+  .msg .body .katex-display, .chain-proc-text .katex-display {
+    max-width: 100%; overflow-x: auto; overflow-y: hidden; padding-bottom: 1px;
+  }
+  /* 含**行内公式**的块级元素也自己横滚：`#messages` 已经禁止横向滚动（见上），
+     不给这些块留出滚道的话，超宽的行内公式会被**静默裁掉**（比出滚动条更糟）。
+     上游只在 compact 变体这样做；插件正文只有一种变体，故这里常开。 */
+  .msg .body :is(p, li, h1, h2, h3, h4, h5, h6):has(.katex),
+  .chain-proc-text :is(p, li, h1, h2, h3, h4, h5, h6):has(.katex) {
+    overflow-x: auto; overflow-y: hidden; padding-bottom: 1px;
+  }
   .msg .body table, .chain-proc-text table { border-collapse: collapse; margin: 0 0 0.8em; width: 100%; display: block; overflow-x: auto; }
   .msg .body th, .msg .body td, .chain-proc-text th, .chain-proc-text td { border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.16)); padding: 4px 9px; font-size: 12.5px; }
   .msg .body th, .chain-proc-text th { background: rgba(128, 128, 128, 0.14); font-weight: 600; }
