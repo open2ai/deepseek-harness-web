@@ -10,9 +10,10 @@
 // 改了 `webview/chat/**` 而只跑 `tsc` 的话，`dist/chat/chat.js` 还是旧的，
 // 于是"改了没效果"（当天为此白折腾几轮：产物里 grep 不到刚加的判据）。
 import { build, context } from 'esbuild'
-import { cpSync, mkdirSync, rmSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { woff2Only } from './katex-css-woff2.mjs'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const chatDir = path.join(root, 'webview', 'chat')
@@ -33,6 +34,23 @@ function copyStatics() {
   cpSync(path.join(chatDir, 'codicon.css'), path.join(outDir, 'codicon.css'))
 }
 
+/**
+ * **KaTeX 字体只发 woff2**。
+ * 这里只在 `onLoad` 时把每个 `@font-face` 的 `src` 收窄到 woff2 那一项
+ */
+const katexWoff2Only = {
+  name: 'dsh-katex-woff2-only',
+  setup(b) {
+    b.onLoad({ filter: /katex[\\/]dist[\\/]katex(\.min)?\.css$/ }, (args) => {
+      const raw = readFileSync(args.path, 'utf8')
+      // 每个 `src:` 声明只留 woff2 那一段（含它的 `format("woff2")`）；取不到就原样保留。
+      // 改写逻辑在 `katex-css-woff2.mjs`（纯函数，守卫 `tmp/_fonts.woff2.test.mjs` 直接喂真实 CSS 断言）。
+      const css = woff2Only(raw)
+      return { contents: css, loader: 'css', resolveDir: path.dirname(args.path) }
+    })
+  },
+}
+
 const options = {
   entryPoints: [path.join(chatDir, 'chat.ts')],
   bundle: true,
@@ -45,16 +63,19 @@ const options = {
   // KaTeX 的 CSS 里用 `url(fonts/KaTeX_*.woff2)` 引字体：按**文件**输出到 `dist/chat/assets/`，
   // CSS 里的相对地址由 esbuild 自动改写成 `./assets/…` —— webview 从扩展目录加载 chat.css，相对路径可直接取到。
   // 不做 dataurl：那会把 ~1MB 字体塞进 CSS，首屏多解析一大坨 base64。
+  // **只发 woff2**（见上面 `katexWoff2Only`）：woff/ttf 从不被请求，删掉省 797KB 落盘。
+  loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' },
   // 落点由下面这行 `assetNames` 决定（实测：去掉它就退回 `dist/chat/` 根、URL 变成 `./KaTeX_….woff2`；
   // 见 `tmp/_assetnames.check.mjs`）。它同时约束以后 import 进来的图片等资源。
-  loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' },
   assetNames: 'assets/[name]-[hash]',
+  plugins: [katexWoff2Only],
 }
 
 if (watch) {
   const ctx = await context({
     ...options,
-    plugins: [{
+    // ⚠️ 这里要**追加**，不能覆盖 `options.plugins`（覆盖掉就等于 watch 下又发出 60 个字体文件）
+    plugins: [...options.plugins, {
       name: 'dsh-copy-statics',
       setup(b) {
         b.onEnd((result) => {
