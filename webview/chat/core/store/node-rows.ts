@@ -54,7 +54,9 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
         case 'compaction':
             return { kind: 'compaction', key: keyOf(r.key), compactionId: '', seq: 0, ...(typeof r.summary === 'string' ? { summary: r.summary } : {}), ...(typeof r.shadowedItemCount === 'number' ? { shadowedItemCount: r.shadowedItemCount } : {}), ...(typeof r.shadowedTokenCount === 'number' ? { shadowedTokenCount: r.shadowedTokenCount } : {}) }
         case 'retry':
-            return { kind: 'retry', key: keyOf(r.key), retryId: r.retryId, retry: r.retry, ...(r.turn === undefined ? {} : { turn: r.turn }), ...(r.step === undefined ? {} : { step: r.step }), ...(r.started === undefined ? {} : { started: r.started }), ...(r.cancelled === true ? { cancelled: true } : {}) }
+            // 末次尝试的 `mode`/`maxRetries`/`delayMs`/`failure` 必须一路带到行上（`RetryRow` 读它们）：
+            // 少搬一项就是「(1/∞)」「重试延迟：0毫秒」那种与网页端不一致
+            return { kind: 'retry', key: keyOf(r.key), retryId: r.retryId, retry: r.retry, ...(r.turn === undefined ? {} : { turn: r.turn }), ...(r.step === undefined ? {} : { step: r.step }), ...(r.provider === undefined ? {} : { provider: r.provider }), ...(r.mode === undefined ? {} : { mode: r.mode }), ...(r.maxRetries === undefined ? {} : { maxRetries: r.maxRetries }), ...(r.delayMs === undefined ? {} : { delayMs: r.delayMs }), ...(r.failure === undefined ? {} : { failure: r.failure }), ...(r.started === undefined ? {} : { started: r.started }), ...(r.cancelled === true ? { cancelled: true } : {}) }
         case 'turnNotice':
             return { kind: 'turnNotice', key: keyOf(r.key), tone: r.tone, ...(r.turn === undefined ? {} : { turn: r.turn }), ...(r.step === undefined ? {} : { step: r.step }), ...(r.message === undefined ? {} : { message: r.message }), ...(r.code === undefined ? {} : { code: r.code }) }
         case 'context':

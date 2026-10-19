@@ -106,7 +106,7 @@ export type RenderRow =
     | { kind: 'sysprompt'; key: string; text: string }
     | { kind: 'command'; key: string; name: string | null; outcome?: { kind: string; text?: string } }
     | { kind: 'compaction'; key: string; summary?: string | null; shadowedItemCount?: number | null; shadowedTokenCount?: number | null }
-    | { kind: 'retry'; key: string; retryId: string; retry: number; turn?: number; step?: number; started?: number; cancelled?: boolean }
+    | { kind: 'retry'; key: string; retryId: string; retry: number; turn?: number; step?: number; provider?: string; mode?: string; maxRetries?: number; delayMs?: number; failure?: { message?: string; code?: string }; started?: number; cancelled?: boolean }
     | { kind: 'turnNotice'; key: string; tone: 'error' | 'warning'; turn?: number; step?: number; message?: string; code?: string }
     | { kind: 'context'; key: string; content: unknown; source: unknown }
     | { kind: 'trigger'; key: string; source: unknown; content: unknown; timeMs: number }
@@ -305,8 +305,27 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel): RenderR
             break
         }
         case 'model-retry': {
-            const current = node.data['current'] as { retry?: number; retryState?: string } | undefined
-            rows.push({ kind: 'retry', key: node.key, retryId: String(node.data['retryId'] ?? node.key), retry: typeof current?.retry === 'number' ? current.retry : 0, turn: node.data['turn'] as number | undefined, step: node.data['step'] as number | undefined, ...(current?.retryState === 'started' && typeof current.retry === 'number' ? { started: current.retry } : {}), ...(current?.retryState === 'cancelled' ? { cancelled: true } : {}) })
+            // ⚠️ **末次尝试的整份数据都要带下去**（真机 2026-10-19：插件显示「(1/∞)」「重试延迟：0毫秒」，
+            // 网页端是「(1/5)」「46毫秒」）。原因就是这里只搬了 `retry`/`retryState`，
+            // 把 `mode`/`maxRetries`/`delayMs`/`failure` 丢了 —— 行的类型里明明有这几项
+            // （`RetryRow` 读的正是它们）。上游是把 `llm/retry` 的 `data` **整体**展开成节点
+            // （`conversation-nodes/retry.ts:30` 的 `...match.event.data`），这里照同一口径透传。
+            const current = node.data['current'] as Record<string, unknown> | undefined
+            const pick = <T>(key: string, guard: (v: unknown) => v is T): T | undefined => {
+                const fromCurrent = current?.[key]
+                if (guard(fromCurrent)) return fromCurrent
+                const fromNode = node.data[key]
+                return guard(fromNode) ? fromNode : undefined
+            }
+            const isStr = (v: unknown): v is string => typeof v === 'string'
+            const isNum = (v: unknown): v is number => typeof v === 'number'
+            const mode = pick('mode', isStr)
+            const maxRetries = pick('maxRetries', isNum)
+            const delayMs = pick('delayMs', isNum)
+            const provider = pick('provider', isStr)
+            const failureRaw = current?.['failure'] ?? node.data['failure']
+            const failure = failureRaw !== null && typeof failureRaw === 'object' ? failureRaw as { message?: string; code?: string } : undefined
+            rows.push({ kind: 'retry', key: node.key, retryId: String(node.data['retryId'] ?? node.key), retry: typeof current?.['retry'] === 'number' ? current['retry'] as number : 0, turn: node.data['turn'] as number | undefined, step: node.data['step'] as number | undefined, ...(provider === undefined ? {} : { provider }), ...(mode === undefined ? {} : { mode }), ...(maxRetries === undefined ? {} : { maxRetries }), ...(delayMs === undefined ? {} : { delayMs }), ...(failure === undefined ? {} : { failure }), ...(current?.['retryState'] === 'started' && typeof current['retry'] === 'number' ? { started: current['retry'] as number } : {}), ...(current?.['retryState'] === 'cancelled' ? { cancelled: true } : {}) })
             break
         }
         case 'turn-error':
