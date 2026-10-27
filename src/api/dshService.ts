@@ -1022,20 +1022,17 @@ export class DshService {
     // ---------- 共享会话 / 对话 ----------
 
     /** 取当前共享会话，没有则创建 */
-    /** 行变更回调：装配层接到下发给页面的通道上（渲染**只剩这一条通路**）。 */
-    onRows: ((rows: DshStreamRow[], turnActive: boolean) => void) | undefined;
     /**
-     * **保结构事件回调**（节点模型影子通路）：把窗口原文（`streamEvents`）下发，客户端据此建节点模型
-     *（分组/可见性/折叠/块序在客户端算）。与 `onRows` 同源同刻（都在 `flushRows`），
-     * 目前只影子对照、界面零变化；切换渲染源后 `onRows` 退役。
+     * **保结构事件回调**（页面渲染的**唯一**通路）：把窗口原文（`streamEvents`）下发，
+     * 客户端据此建节点模型（分组/可见性/折叠/块序在客户端算）。宿主行帧已退役。
      */
     onEvents: ((events: DshStreamEvent[], sessionId: string | undefined, turnActive: boolean, replaced?: boolean) => void) | undefined;
 
     /**
      * **宿主侧「这一次提交入档了」的收尾**（推 `submissions` 退休帧）。
      *
-     * 为什么单开一个回调而不是留在 `onRows` 里：页面认领本地回显靠的是 `chatEvents`（渲染源），
-     * 所以**退休帧必须排在事件帧之后**；而 `onRows` 里无论如何都在 `onEvents` 之前（见 `flushRows`）。
+     * 为什么单开一个回调而不是塞进 `onEvents` 里：页面认领本地回显靠的是 `chatEvents`（渲染源），
+     * 所以**退休帧必须排在事件帧之后**；塞进 `onEvents` 内部就成了「先退休、后给事件」。
      * 顺序错的真机表现：发送后对话区闪一下（本地回显先没、真行后到）。
      */
     onSubmissionsAdmitted: ((sessionId: string | undefined) => void) | undefined;
@@ -1358,8 +1355,8 @@ export class DshService {
     }
 
     /**
-     * 页面就绪（含面板重新打开）时补发当前会话的行：页面是**重建**的，而行的唯一来源是宿主，
-     * 不补则重开面板后对话区空白（旧的历史指令在开关打开时被忽略）。
+     * 页面就绪（含面板重新打开）时补发当前会话的窗口：页面是**重建**的，而渲染源的唯一来源是
+     * 宿主下发的**事件帧**（见 `flushRows` → `onEvents`），不补则重开面板后对话区空白。
      */
     pushCurrentRows(): void {
         if (this.currentSessionId !== undefined) {
@@ -2155,7 +2152,7 @@ export class DshService {
     }
 
     /**
-     * 行是**整表**下发：一次投递是整份 JSON。逐事件各做一次，
+     * 窗口原文是**整表**下发：一次投递是整份 JSON。逐事件各做一次，
      * 在长会话上会**算不过来** —— 真机量到：8.5 万条事件的会话，单次构建 115ms、载荷 1.45MB，
      * 而流式期间每秒有几十个帧。跟不上时最后那几个事件（**含最终 `assistant/message` 的正文**）
      * 一直排在积压里，界面于是停在"链和卡片都在、正文没有"的那个中间状态。
@@ -2167,20 +2164,20 @@ export class DshService {
      * 那个量级是几毫秒到几十毫秒，不再需要为「几百毫秒一次的全量重建」留出 300ms 的空档。
      */
     /**
-     * 行是**整表**下发的：一串事件只换一次重建，且下一次至少等上一次的代价才动（自适应节流）。
+     * 窗口原文是**整表**下发的：一串事件只换一次重建，且下一次至少等上一次的代价才动（自适应节流）。
      * 但有两种情形必须**立刻**下发、不能等：回合结束（末尾那几个事件正是答案本身）与快照替换（打开会话）。
      *
      * 节流的依据是**这次投递要付多少**，而不是只有构建：
      *   · 构建（断点续折后是几毫秒到几十毫秒，见 `rowsCheckpoint`）；
-     *   · **载荷**：整表 JSON 是几 MB 到十几 MB，页面侧要解析、要重渲。
+     *   · **载荷**：整份窗口原文的 JSON 是几 MB 到几十 MB，页面侧要解析、要折节点模型。
      *
      * 早先只看构建耗时、上限写死 300ms —— 那是「全量重折 600ms」时代的余量。现在构建快了，
-     * 若还按老公式（`buildMs * 2`，上限 120ms）就会**以十几毫秒的间隔推十几 MB**，
+     * 若还按老公式（`buildMs * 2`，上限 120ms）就会**以十几毫秒的间隔推整份窗口**，
      * 把页面侧压死（观感反而更糟）。所以载荷也进预算：每 MB 记 `PAYLOAD_MS_PER_MB` 毫秒，
      * 两条取大值。这不是"又加了个上限"，而是把**已有的投递成本**如实计进节流。
      */
     private emitRows(): void {
-        if (this.onRows === undefined) {
+        if (this.onEvents === undefined) {
             return;
         }
         if (this.rowsTimer !== undefined) {
@@ -2256,7 +2253,7 @@ export class DshService {
             clearTimeout(this.rowsTimer);
             this.rowsTimer = undefined;
         }
-        if (this.onRows === undefined) {
+        if (this.onEvents === undefined) {
             return;
         }
         const started = Date.now();
@@ -2269,19 +2266,15 @@ export class DshService {
                 console.warn(`[dsh-turn] turnActive=${String(active)} events=${String(this.streamEvents.length)}`);
             }
         }
-        this.onRows(rows, active);
-        // 保结构事件同刻下发（**渲染源**）：客户端节点模型吃同一份窗口原文。
+        // 保结构事件帧（**唯一渲染源**）：客户端节点模型吃这份窗口原文。
         // `replaced` 只在这一帧为真（窗口刚被整份换过），页面据此丢掉归一化缓存与断点。
-        this.onEvents?.(this.streamEvents, this.getSessionId(), active, this.windowReplacedForPage);
+        this.onEvents(this.streamEvents, this.getSessionId(), active, this.windowReplacedForPage);
         this.windowReplacedForPage = false;
-        // ⚠️ **认领/退休帧必须排在这两帧之后**（2026-10-10 真机：发送后对话区闪一下又回来）。
+        // ⚠️ **认领/退休帧必须排在事件帧之后**（2026-10-10 真机：发送后对话区闪一下又回来）。
         //
-        // 页面认这一次提交的入档靠的是 `chatEvents`（行帧已退役、页面不再读它）；而退休帧
-        // （`submissions` 的 `admitted`）一到，页面就收掉本地回显。若退休先到：本地回显没了、
-        // 承接它的真行还没来 —— 那一拍里这条提问**没有任何东西在表示它**（就是「闪一下」）。
-        //
-        // 原先这次退休挂在 `onRows` 末尾（那时页面还读行帧，所以顺序是对的）；渲染源换成事件之后，
-        // 它变成了「退休帧 → chatEvents」这个错误顺序。所以搬到**事件帧之后**。
+        // 页面认这一次提交的入档靠的是 `chatEvents`；而退休帧（`submissions` 的 `admitted`）一到，
+        // 页面就收掉本地回显。若退休先到：本地回显没了、承接它的真行还没来 ——
+        // 那一拍里这条提问**没有任何东西在表示它**（就是「闪一下」）。所以退休只能在事件帧之后。
         this.onSubmissionsAdmitted?.(this.getSessionId());
         // 已到期的回合结算（用**这一份**刚建好的行，不重算；见 noteTurnSettled）
         if (this.settlePending) {
@@ -2296,10 +2289,10 @@ export class DshService {
     /**
      * 记下这一帧的载荷量级（MB），供节流预算用（见 `emitRows` / `lastPayloadMb`）。
      *
-     * 由**发送处**实测填入（见 `extension.ts` 的 `onRows`）：那一层为了「只发变动的行」本来就要
-     * 把每行序列化一遍去比较，顺手就有真实字节数 —— 本类不再自己 `JSON.stringify` 整表
-     *（13 MB 整表上要几十毫秒，等于每帧白付一倍）。
-     * @param bytes - 本帧**实际发出去**的字节数。
+     * 由**发送处**实测填入（见 `extension.ts` 的 `onEvents`）：那一层按**本帧新增的事件**量出字节数
+     * —— 整份窗口原文每帧 `JSON.stringify` 一次（长会话几十 MB）等于把节流省下的钱又花掉，
+     * 所以喂的是"这一帧真正新投递的内容"这一近似值，而不是整表大小。
+     * @param bytes - 本帧**实际发出去**的字节数（近似）。
      */
     setSentPayloadBytes(bytes: number): void {
         this.lastPayloadMb = bytes / (1024 * 1024);
@@ -3188,13 +3181,13 @@ export class DshService {
         if (this.currentSessionId === sessionId && this.window.list().length === 0) {
             this.setCurrentSession(undefined);
         }
-        // 会话标识没变时 setCurrentSession 直接返回（不重读快照、不下发任何行），
-        // 而**行的唯一来源就是宿主下发**（开关打开时旧的历史指令被忽略）——
+        // 会话标识没变时 setCurrentSession 直接返回（不重读快照、不下发任何帧），
+        // 而**渲染源的唯一来源就是宿主下发的事件帧**——
         // 页面这时可能刚打开/刚清空，必须补一次基线，否则打开该会话是空白。
         if (!this.setCurrentSession(sessionId)) {
             this.pushCurrentRows();
         }
-        // **不读**旧格式的历史：行由宿主下发，这次读取既用不上，
+        // **不读**旧格式的历史：渲染由事件帧承载，这次读取既用不上，
         // 一旦它失败还会把调用方卡在 loading（真机现象「有的会话打开一直显示深度求索中」）。
         return [];
     }

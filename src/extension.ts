@@ -12,7 +12,6 @@ import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
-import { RowDiffer } from './dsh/rows/diff';
 import {
     applyNativeTitlebarContext,
     TITLEBAR_MODE,
@@ -54,10 +53,9 @@ const pushSubmissions = (sessionId: string | undefined): void => {
     postToChats({ type: 'submissions', sessionId, pending: snapshot.pending, retired: snapshot.retired });
 };
 /**
- * 行帧里那三个**子会话字段**（页面判定停止控件与"父离线锁"用的事实）。
+ * 事件帧里那三个**子会话字段**（页面判定停止控件与"父离线锁"用的事实）。
  *
- * 没有子会话事实时**一个字段都不写**（普通会话的行帧与接入前逐字相同 —— 几十套逐字节比对的行守卫
- * 都建立在这上面）。
+ * 没有子会话事实时**一个字段都不写**（普通会话的事件帧与接入前逐字相同 —— 页面按缺省处理）。
  */
 const subagentFrameFields = (
     sessionId: string | undefined
@@ -75,74 +73,112 @@ const subagentFrameFields = (
         },
     };
 };
-// 渲染源 = 宿主行（`rows` 帧）；节点模型是影子对照（`chatEvents`），只建不渲染。
-const rowDiffer = new RowDiffer<{ key: number }>();
-// `rowsSession` 用于判「换会话」：会话一变，台账把旧会话未结算的回显按 failed 退休。
-let rowsSession: string | undefined;
-dsh.onRows = (rows, turnActive) => {
-    // 带上会话标识：页面靠它判断「本地的乐观行是不是这个会话的」——
-    // 不带的话切会话时上一个会话的乐观行会被当成未认领而留下，processing 恒真（一直「深度求索中」）。
-    // 带上 turnActive：**是否在跑是本轮的显式事实**，页面从「行」推导不出来（见 dshService.turnActive）。
-    // 窗口分页事实（hasMore/loading/events）与行同帧：列表顶端的「加载更早」按钮只读它，不自己猜。
-    // `sessionOpenError` 同帧下发（**整表语义**：没有失败时明确给 `null`，页面才好清掉上一条横幅）。
-    const sessionId = dsh.getSessionId();
-    if (sessionId !== rowsSession) {
-        rowsSession = sessionId;
-        rowDiffer.requestFull();
-        // 换会话：台账把旧会话未结算的回显按 failed 退休（上游 disposal 同口径）
+// 渲染源 = 保结构事件帧（`chatEvents`）：宿主行帧已退役，页面只读事件帧建节点模型。
+// `eventsSession` 用于判「换会话」：会话一变，台账把旧会话未结算的回显按 failed 退休。
+let eventsSession: string | undefined;
+
+/**
+ * 从事件窗口里取**人类表层消息**的提交标识与正文（入档认领的输入）。
+ *
+ * 为什么在事件里认领：页面认领本地回显读的也是事件帧，宿主再折一遍行只会多一份口径。
+ * 判据与行构建的 user 行一致：`source.kind === 'user'` 才是人类消息
+ *（`source.kind !== 'user'` 的 `user/message` 是上下文注入，不是提交回显）。
+ */
+const admittedOfEvents = (events: readonly unknown[]): { ids: string[]; texts: string[] } => {
+    const ids: string[] = [];
+    const texts: string[] = [];
+    for (const raw of events) {
+        if (raw === null || typeof raw !== 'object') {
+            continue;
+        }
+        const event = raw as { type?: unknown; data?: Record<string, unknown> };
+        if (event.type !== 'user/message' || event.data === undefined) {
+            continue;
+        }
+        const source = event.data['source'];
+        if (source === null || typeof source !== 'object') {
+            continue;
+        }
+        const sourceRecord = source as { kind?: unknown; rpcId?: unknown };
+        if (sourceRecord.kind !== 'user') {
+            continue;
+        }
+        if (typeof sourceRecord.rpcId === 'string') {
+            ids.push(sourceRecord.rpcId);
+            continue;
+        }
+        // 没有提交标识时按文案兜底（与行帧时代同口径）：正文只取 text 块，拼法与行构建一致。
+        const content = event.data['content'];
+        if (!Array.isArray(content)) {
+            continue;
+        }
+        texts.push(
+            content
+                .map((b) =>
+                    b !== null && typeof b === 'object' && (b as { type?: unknown }).type === 'text'
+                        ? String((b as { text?: unknown }).text ?? '')
+                        : ''
+                )
+                .join('')
+        );
+    }
+    return { ids, texts };
+};
+
+/** 上一帧记账时窗口的事件条数 / 末尾序号：用来只量「这一帧新增的事件」的字节（见 `dsh.onEvents`）。 */
+let sentEventsCount = 0;
+let sentEventsTail = -1;
+
+/** 窗口末尾那条带 `seq` 的事件的序号（没有返回 -1）。 */
+const tailSeqOf = (events: readonly unknown[]): number => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+        const seq = (events[i] as { seq?: unknown } | null)?.seq;
+        if (typeof seq === 'number') {
+            return seq;
+        }
+    }
+    return -1;
+};
+// 保结构事件帧（**唯一渲染源**）：下发窗口原文，页面据此建节点模型。
+dsh.onEvents = (events, sessionId, turnActive, replaced) => {
+    // 换会话：台账把旧会话未结算的回显按 failed 退休；子会话事实重新读一遍（读失败不影响渲染），
+    // 读到后再推一帧，页面才不会一直用上一份事实判停止按钮与父离线锁。
+    if (sessionId !== eventsSession) {
+        eventsSession = sessionId;
         submitLedger.useSession(sessionId);
-        // 换会话：重新读"谁是谁的子会话 + 父在不在"（子会话事实只影响停止分流与输入区锁定，
-        // 读失败不影响渲染）；读到之后再推一帧，页面才不会一直用上一份事实判按钮
+        sentEventsCount = 0;
+        sentEventsTail = -1;
         void dsh.refreshSubagentFacts().then(() => {
-            if (rowsSession === sessionId) {
+            if (eventsSession === sessionId) {
                 dsh.pushCurrentRows();
             }
         });
     }
-    // 入档认领①：日志里出现了带同一 `rpcId` 的用户消息 → 那次提交的回显退休（上游 observed 退休同口径）。
-    // 判据取**宿主下发的行**（它是日志的回显），所以"没有 `rpcId` 的行"走下面的文案兜底。
-    const admittedIds: string[] = [];
-    const admittedTexts: string[] = [];
-    for (const row of rows) {
-        if (row.kind !== 'user') {
-            continue;
-        }
-        const user = row as { rpcId?: unknown; text?: unknown };
-        if (typeof user.rpcId === 'string') {
-            admittedIds.push(user.rpcId);
-        } else if (typeof user.text === 'string') {
-            admittedTexts.push(user.text);
-        }
+    // 入档认领：日志里出现带同一 `rpcId`（或同文案）的用户消息 → 那次提交的回显退休。
+    // 认领必须和这一批事件同帧完成；退休帧本身仍排在事件帧之后（见 `dsh.onSubmissionsAdmitted`）。
+    const admitted = admittedOfEvents(events);
+    submitLedger.admitById(admitted.ids);
+    submitLedger.admitByText(admitted.texts);
+    // 节流预算按**实发**字节算：行帧退役后，页面实际收的就是这份窗口原文。
+    // 整窗 `JSON.stringify` 在长会话上是几十 MB、每帧一次会把节流省下的钱又花掉，所以这里只量
+    // **本帧新增的事件**（尾部追加的那一段）——与行帧时代「只量实际发出去的差分行」同一近似口径；
+    // 整表替换（`replaced`）/ 前插更早一页 / 换会话 / 窗口收缩时量整窗一次。
+    // 这里只是节流预算的输入，不改变下发内容。
+    const count = events.length;
+    const tail = tailSeqOf(events);
+    let bytes: number;
+    if (replaced === true) {
+        bytes = JSON.stringify(events).length;
+    } else if (count === sentEventsCount && tail === sentEventsTail) {
+        bytes = 0;
+    } else if (count > sentEventsCount && tail > sentEventsTail) {
+        bytes = JSON.stringify(events.slice(sentEventsCount)).length;
+    } else {
+        bytes = JSON.stringify(events).length;
     }
-    submitLedger.admitById(admittedIds);
-    submitLedger.admitByText(admittedTexts);
-    const openError = dsh.sessionOpenFailure();
-    const { payload } = rowDiffer.diff(rows as { key: number }[]);
-    // 节流预算按**实发**字节算（差分期顺手就有；不必再序列化整表，见 dshService.setSentPayloadBytes）
-    dsh.setSentPayloadBytes(JSON.stringify(payload).length);
-    postToChats({
-        type: 'rows',
-        ...payload,
-        rows: payload.rows as unknown[] | undefined,
-        sessionId,
-        turnActive,
-        // 子会话事实（页面据此判主钮能否让出「停止」、要不要另挂独立 Stop、输入区是否被父离线锁住）：
-        // 地址来自父会话自有的子目录投影，可用性来自列表 summary（见 dshService.refreshSubagentFacts）
-        ...subagentFrameFields(sessionId),
-        historyHasMore: dsh.historyHasMore(),
-        historyLoading: dsh.historyLoading(),
-        historyEvents: dsh.windowEventCount(),
-        sessionOpenError: openError ?? null,
-    });
-    // ⚠️ **退休帧不在这里发**（2026-10-10 真机：发送后对话区闪一下）。
-    //
-    // 页面认领本地回显靠的是 `chatEvents`（渲染源），而 `onRows` 永远早于 `onEvents`
-    //（见 dshService 的 `flushRows`）—— 在这里发就成了「先退休、后给行」：本地回显先没、
-    // 承接它的真行还没到，那一拍里这条提问没有任何东西在表示它。
-    // 退休已挪到 `dsh.onSubmissionsAdmitted`（由 `flushRows` 在**事件帧之后**调用）。
-};
-// 保结构事件帧（**渲染源**）：与 `rows` 同刻下发窗口原文，页面据此建节点模型。
-dsh.onEvents = (events, sessionId, turnActive, replaced) => {
+    sentEventsCount = count;
+    sentEventsTail = tail;
+    dsh.setSentPayloadBytes(bytes);
     postToChats({
         type: 'chatEvents',
         sessionId,
@@ -162,7 +198,7 @@ dsh.onEvents = (events, sessionId, turnActive, replaced) => {
  * **提交入档的收尾**（退休帧：推 `submissions`）。
  *
  * ⚠️ 必须排在 `chatEvents` **之后**（`flushRows` 的调用顺序就是它）：页面读事件帧认领本地回显，
- * 退休帧一到就收掉回显 —— 顺序反了会闪（见 `dsh.onRows` 那段注释）。
+ * 退休帧一到就收掉回显 —— 顺序反了会闪（见 `dsh.onEvents` 那段注释）。
  */
 dsh.onSubmissionsAdmitted = (sessionId) => {
     pushSubmissions(sessionId);
@@ -542,6 +578,59 @@ function postToChats(message: unknown): void {
     }
 }
 
+/**
+ * 正文图（markdown 本地路径）允许读取的扩展名 → MIME。
+ *
+ * 为什么按扩展名收窄：上游 `api/file` 不限类型（MIME 由扩展名给、非图片自然显示失败）；插件是
+ * **扩展宿主直接读盘**，不经过 dsh 的 fs 沙箱，所以只读"明确是图片"的文件，避免正文里一句
+ * `![](C:/Users/x/.ssh/id_rsa)` 把任意文件读进页面。正文里写别的类型照样失败、照样是惰性 alt。
+ */
+const LOCAL_IMAGE_MEDIA: Readonly<Record<string, string>> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.svg': 'image/svg+xml',
+    '.avif': 'image/avif',
+    '.ico': 'image/x-icon',
+};
+
+/** 单张正文图的读取上限（与上游 `imageLimits.maxImageBytes` 同量级；超出按失败回帧，不截断）。 */
+const MAX_LOCAL_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * 读一张本地图片（正文 markdown 里写的绝对路径）。
+ * @param target - 页面解析后的绝对路径（相对路径由页面按会话 cwd 拼好）。
+ * @returns 成功给 MIME + base64；失败给 `error`（只用于诊断/帧字段，页面用自己的失败文案）。
+ */
+async function readLocalImageBytes(
+    target: string
+): Promise<{ mediaType?: string; data?: string; error?: string }> {
+    if (target === '' || target.startsWith('//') || !path.isAbsolute(target)) {
+        return { error: '不是绝对路径' };
+    }
+    const ext = path.extname(target).toLowerCase();
+    const mediaType = LOCAL_IMAGE_MEDIA[ext];
+    if (mediaType === undefined) {
+        return { error: `不是图片文件（${ext === '' ? '无扩展名' : ext}）` };
+    }
+    try {
+        const stat = await fs.promises.stat(target);
+        if (!stat.isFile()) {
+            return { error: '不是普通文件' };
+        }
+        if (stat.size > MAX_LOCAL_IMAGE_BYTES) {
+            return { error: `图片过大（${String(Math.round(stat.size / 1024 / 1024))}MB）` };
+        }
+        const bytes = await fs.promises.readFile(target);
+        return { mediaType, data: bytes.toString('base64') };
+    } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
 /** 确保至少有一个聊天 webview 可用；没有则唤起侧栏并等待 resolve */
 async function ensureChatWebview(): Promise<vscode.Webview | undefined> {
     if (chatTarget || chatPanel) {
@@ -612,7 +701,9 @@ async function loadChatHtml(
             `script-src ${webview.cspSource} 'wasm-unsafe-eval'; ` +
             `style-src ${webview.cspSource} 'unsafe-inline'; ` +
             `font-src ${webview.cspSource} data:; ` +
-            `img-src ${webview.cspSource} data: https:; ` +
+            // 图片：本页自身资源、data:（正文本地路径图由宿主读盘后转 data URL）、
+            // 以及 http(s) 远程图（上游 MarkdownImage 对 http(s) 直通、不区分协议）。
+            `img-src ${webview.cspSource} data: https: http:; ` +
             `connect-src ${webview.cspSource} https: http:;`;
         html = html.replace('<head>', `<head><meta http-equiv="Content-Security-Policy" content="${csp}">`);
         webview.html = html;
@@ -992,8 +1083,8 @@ function setupChatWebview(
                 if (pendingAsk !== undefined) {
                     post(pendingAsk);
                 }
-                // 页面是**重建**的，而行的唯一来源是宿主（开关打开时旧的历史指令被忽略）：
-                // 就绪后补发当前会话的行，否则重开面板/切换视图时对话区空白。
+                // 页面是**重建**的，而渲染源的唯一来源是宿主下发的**事件帧**：
+                // 就绪后补发整段窗口（`pushCurrentRows` → `flushRows` → `onEvents`），否则重开面板/切换视图时对话区空白。
                 dsh.pushCurrentRows();
             })();
             return;
@@ -1090,7 +1181,7 @@ function setupChatWebview(
                     // 审批/提问不再从这里接：它们由宿主侧**常驻**订阅广播（见 dsh.onApproval/onQuestion）。
                     // 挂在回合上的话，面板没开时到达的 waterfall 帧会被直接丢弃。
                     await dsh.askStreaming(parts, { requestId: submitId });
-                    // 回合的渲染结果（正文/统计/计数）由宿主下发的「行」承载。
+                    // 回合的渲染结果（正文/统计/计数）由宿主下发的事件帧在页面折出的节点承载。
                     // 用量记账与统计刷新**不在这里**：它们收在回合结算回调里（见上面的 dsh.onTurnSettled）——
                     // 忙时提交没有返回值可挂，两条提交路径只能共用一个时机。
                 } catch (e) {
@@ -1415,6 +1506,26 @@ function setupChatWebview(
                     post({ type: 'attachmentBytes', attachmentId: msg.attachmentId, error: e instanceof Error ? e.message : String(e) });
                 }
             })();
+        } else if (msg.type === 'localImageReq') {
+            /**
+             * **正文图片按绝对路径取字节**（markdown 里写的本地路径图）。
+             *
+             * 为什么放在宿主：上游把这个 URL 交给 Host 的 `api/file?path=` 本地文件路由；插件页面是
+             * `vscode-webview://` 源，本地路径加载不到（真机：回答里的图片"没显示"）。宿主读盘、回
+             * base64，页面转成 `data:` URL 再出 `<img>`（CSP 已放行 data:）。
+             *
+             * 收窄面（有意，登记在 `docs/design/12`）：只认绝对路径、只读**图片扩展名**、有大小上限
+             * ——正文里写别的文件不应被读进页面；失败也回帧，页面按自己的失败文案退成惰性 alt。
+             */
+            void (async () => {
+                const target = typeof msg.path === 'string' ? msg.path : '';
+                const image = await readLocalImageBytes(target);
+                post(
+                    image.error === undefined
+                        ? { type: 'localImageBytes', path: target, mediaType: image.mediaType, data: image.data }
+                        : { type: 'localImageBytes', path: target, error: image.error }
+                );
+            })();
         } else if (msg.type === 'chatSelectModel') {
             void (async () => {
                 try {
@@ -1485,7 +1596,7 @@ function setupChatWebview(
             })();
         } else if (msg.type === 'loadOlder') {
             // 往前翻一页历史（对齐上游 `ISession.loadOlder()`）：读更早的一页 prepend 进窗口，
-            // 完成后由 `onRows` 自然下发（带 `historyHasMore`/`historyLoading`），页面按钮据此复位。
+            // 完成后由事件帧（`onEvents`）自然下发（带 `historyHasMore`/`historyLoading`），页面按钮据此复位。
             // 失败**不上抛**：窗口没变、按钮复位即可，读不到更早的历史不是错误操作。
             void (async () => {
                 try {

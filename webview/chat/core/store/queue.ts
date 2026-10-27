@@ -48,6 +48,16 @@ export interface QueueSlice {
    * `rpcId` 去重，这里等价地在投影期去重）。
    */
   noteDurable(rpcIds: Iterable<string>): void
+  /**
+   * **宿主台账的退休事件** → 本地「发送中」条目退休（与台账同一份判据，不再自推一遍）。
+   *
+   * 为什么队列卡也必须读台账：忙时提交的乐观条目原先只有两条退休来路 ——
+   * ① 队列帧里认出同一个 `rpcId`；② 用户行回显（`noteDurable`）。两条都落空的那一类
+   * （收件箱项被放弃 / 帧里认不出标识 / 认领错拍）会让卡片**一直转圈**，而宿主台账其实早就判完了：
+   * `queued` = 队列接下（交给队列卡）/ `admitted` = 已入档 / `failed` = 被放弃。
+   * 页面再按自己的时序推一遍，就是"同一规则两份实现"。
+   */
+  settleSending(rpcIds: Iterable<string>): void
   /** 队列变更失败：按动作给提示（两种竞态不会走到这里，宿主只刷新）。 */
   showActionFailure(op: 'edit' | 'remove' | 'steer', code?: string): void
   reset(): void
@@ -164,6 +174,11 @@ export function createQueue(host: ChatHost, notify: (text: string) => void): Que
     claimSending(rpcIds)
   }
 
+  /** 台账退休 → 本地发送中退休（退休 = 归宿已定，卡片不该再转圈）。 */
+  function settleSending(rpcIds: Iterable<string>): void {
+    claimSending(rpcIds)
+  }
+
   function failSending(rpcId: string | undefined, message: string): void {
     queueSending.value = queueSending.value.map((s) =>
       rpcId !== undefined && s.rpcId !== rpcId ? s : { ...s, failed: true, error: message }
@@ -236,6 +251,7 @@ export function createQueue(host: ChatHost, notify: (text: string) => void): Que
     addSending,
     claimSending,
     noteDurable,
+    settleSending,
     failSending,
     showActionFailure,
     reset,

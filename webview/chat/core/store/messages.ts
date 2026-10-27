@@ -1,4 +1,4 @@
-// 消息行模型切片：宿主下发的行（整表替换 + 乐观行认领）、通知行与审批行。
+// 消息行模型切片：客户端节点模型映射出的行（整表替换 + 乐观行认领）、通知行与审批行。
 // 行 key 计数器在本切片内（per-store），不跨 store 实例共享——key 只用于同一列表内的替换匹配
 // 与列表渲染 diff，各自从 1 计数即可。
 import { computed, signal, type Signal } from '@preact/signals'
@@ -6,9 +6,7 @@ import type { ChatHost } from '../host'
 import { isVisibleChatRow } from '../chat-visibility'
 import type { ImageAttachment, AttachmentRef } from '../protocol'
 import { formatMsgClock } from '../format'
-import type { DshStreamRow } from '../../../../src/dsh/rows/types'
 import type { SubagentFacts } from '../stop-control'
-import { toChatRows } from './host-rows'
 import type { ChatRow, ChatStore, PendingEcho, RefSnap } from './types'
 import type { RenderSeatKeys } from '../nodes/render-plan'
 
@@ -84,10 +82,7 @@ export interface MessagesSlice {
   resetRows(): void
   /** 座位计划（上游 render entry 同形）；与行表同帧更新。 */
   seatPlan: Signal<ReadonlyArray<SeatPlanEntry>>
-  /** 接受宿主下发的行（阶段 4）：映射后写入列表，并保留本地尚未被回显认领的乐观行。
-   *  `sessionId` 用于判归属：会话一变，上一个会话的乐观行必须丢弃（否则 processing 恒真）。 */
-  applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void
-  /** 接受**节点模型**映射出的 ChatRow：与 applyHostRows 同一条整表替换 + 认领逻辑。 */
+  /** 接受**节点模型**映射出的 ChatRow：整表替换 + 回显认领（页面渲染源的唯一入口）。 */
   applyNodeRows(rows: ChatRow[], sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts, seats?: ReadonlyArray<SeatPlanEntry>): void
   /** 更早的历史还没有进窗口（宿主给的窗口事实）：列表顶端据此出「加载更早」。 */
   historyHasMore: Signal<boolean>
@@ -97,7 +92,7 @@ export interface MessagesSlice {
   historyEvents: Signal<number>
   /** **打开历史失败**的事实（上游 `openState === 'error'`）：列表顶端据此出一条横幅；`undefined` = 没有失败。 */
   sessionOpenError: Signal<{ message: string; code?: string } | undefined>
-  /** 记下宿主给的窗口事实（跟 `rows` 帧一起来，见 core/protocol 的 `rows`）。 */
+  /** 记下宿主给的窗口事实（跟 `chatEvents` 帧一起来，见 core/protocol 的 `chatEvents`）。 */
   applyHistory(info: {
     hasMore?: boolean
     loading?: boolean
@@ -363,7 +358,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   let optUserKey = -1
   /** 本地时刻的展示文案（与宿主行的 `time` 同格式）。 */
   const nowTime = (): string => formatMsgClock(Date.now())
-  /** 当前列表属于哪个会话：会话一变就丢弃本地乐观行（见 applyHostRows） */
+  /** 当前列表属于哪个会话：会话一变就丢弃上一个会话的本地行（见 installMappedRows） */
   let rowsSessionId: string | undefined
   /** 上一次宿主下发里出现过的提交标识：判「这条本地行是否已被服务端回显认领」 */
   let claimedRpcIds = new Set<string>()
@@ -429,7 +424,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
         chain: [],
         counts: { toolCallCount: 0, messageCount: 0, subagentCount: 0 },
         bodyStarted: false,
-        // 本地占位：整表推行时必须被显式保留（见 `applyHostRows` 的 `localPlaceholder`）
+        // 本地占位：整表替换时必须被显式保留（见 `installMappedRows` 的 `localPlaceholder`）
         local: true,
       })
       idx = messages.value.length - 1
@@ -456,18 +451,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
     // 实时本地上送用本地时刻;恢复历史时传入事件自带时间戳,不覆盖为"现在"
     push({ kind: 'user', key: optUserKey--, text: textMsg, images: imgs, time: time !== undefined ? formatMsgClock(time) : nowTime(), refs, ...(imageRefs && imageRefs.length > 0 ? { imageRefs } : {}), ...(files && files.length > 0 ? { files } : {}), ...(rpcId !== undefined ? { rpcId } : {}) })
   }
-  /**
-   * 接受宿主下发的行（阶段 4，见 docs/design/08 §11）：**整表替换** —— 宿主是行列表的唯一权威。
-   * **没有例外**：本地回显不在这张表里 —— 它在 `pendingEchoes`（会话级状态），由 `visibleRows` 按 `rpcId`
-   * 推导可见性（宿主行里已有同标识 ⇒ 那条回显当场不画，与上游同口径）。
-   * 所以这里不再有「留住未认领乐观行」那条例外、也没有随之而来的 10s 宽限。
-   */
-  /** 接受宿主下发的行：映射成 ChatRow 后整表替换（宿主是行列表的唯一权威）。 */
-function applyHostRows(rows: unknown, sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts): void {
-    installMappedRows(toChatRows(Array.isArray(rows) ? (rows as DshStreamRow[]) : []), sessionId, turnActive, subagent)
-}
-
-/** 接受节点模型映射出的 ChatRow：与 applyHostRows 同一条整表替换 + 认领。 */
+  /** 接受节点模型映射出的 ChatRow：整表替换 + 回显认领（页面渲染源的唯一入口）。 */
 function applyNodeRows(rows: ChatRow[], sessionId?: string, turnActive?: boolean, subagent?: SubagentFacts, seats?: ReadonlyArray<SeatPlanEntry>): void {
     // 座位计划与行表**同帧更新**：它是行的"分组说明书"（哪些行属于同一项），
     // 分两帧更新就会出现"计划指向已经不在的行"这种中间态。
@@ -687,7 +671,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
   const bumpScroll = (): void => {
     scrollPend.value = scrollPend.value + 1
   }
-  /** 记下宿主给的窗口事实（跟 `rows` 帧一起来；缺项不动，避免每帧把已知状态清回默认）。 */
+  /** 记下宿主给的窗口事实（跟 `chatEvents` 帧一起来；缺项不动，避免每帧把已知状态清回默认）。 */
   const applyHistory = (info: {
     hasMore?: boolean
     loading?: boolean
@@ -721,7 +705,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     groupFoldOpen.value = new Map<string, boolean>()
     outerAnswerStep.value = new Map<number, number>()
     outerFoldedByReader.value = new Map<number, number>()
-    // 窗口事实随会话一起换：新会话的窗口由它自己的 `rows` 帧重写
+    // 窗口事实随会话一起换：新会话的窗口由它自己的事件帧重写
     historyHasMore.value = false
     historyLoading.value = false
     historyEvents.value = 0
@@ -758,7 +742,6 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     openFile,
     openAttachment,
     openAttachmentBytes,
-    applyHostRows,
     applyNodeRows,
     failSubmission,
     applySubmissions,

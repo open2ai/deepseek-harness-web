@@ -21,21 +21,10 @@ import { resetNodeKeyMap, rowKeyOfNodeKey, toChatRowsFromNodes } from './node-ro
 import type { ChatNodeModel, SessionEvent } from '../nodes/types'
 
 /**
- * **行帧的拼装缓存**（§3.3 的"只发变动的行"）：宿主只发变动的行 + 全量 `rowKeys`，
- * 页面按 `key` 覆盖缓存、再按 `rowKeys` 拼回渲染顺序 —— 结果与"宿主发整表"逐字节等价。
- *
- * 缓存放在**摄入边界**（这里）而不向下改 `applyHostRows` 的契约：乐观行认领、去重那些逻辑
- * 一行不动，照旧看到"整表"。
- */
-let rowCache = new Map<number, unknown>()
-let rowCacheSession: string | undefined
-
-/**
- * **节点模型（渲染源切换）**：宿主 `chatEvents` 帧 → `buildChatNodes` 的产物。
- * `USE_NODE_MODEL` 开时渲染列表从它取；关时 `rows` 帧仍是渲染源（影子对照）。
+ * **节点模型（唯一渲染源）**：宿主 `chatEvents` 帧 → `buildChatNodes` 的产物。
+ * 旧的宿主行通路已删除，这里是页面渲染列表的**唯一**来源；要回退只能靠 git。
  */
 let chatNodeModel: ChatNodeModel | undefined
-const USE_NODE_MODEL = true
 let nodeRowsSessionId: string | undefined
 
 /** 把帧上的保结构事件原文归一化成节点模型的 SessionEvent。 */
@@ -185,51 +174,6 @@ function headSeqOf(list: readonly { seq?: unknown }[]): number | undefined {
     return out
 }
 
-/** 读当前节点模型（诊断/守卫用）。 */
-export function readChatNodeModel(): ChatNodeModel | undefined {
-    return chatNodeModel
-}
-
-/** 按本帧（整表 或 delta + keys）拼出整表；会话一变就丢缓存重来。 */
-function assembleRows(m: {
-  rows?: unknown[]
-  rowDelta?: unknown[]
-  rowKeys?: number[]
-  sessionId?: string
-}): unknown[] {
-  if (m.sessionId !== rowCacheSession) {
-    rowCache = new Map()
-    rowCacheSession = m.sessionId
-  }
-  // 整表帧（首帧 / 窗口整表替换）：直接替换缓存
-  if (m.rows !== undefined) {
-    rowCache = new Map()
-    for (const row of m.rows) {
-      const key = (row as { key?: unknown } | null)?.key
-      if (typeof key === 'number') rowCache.set(key, row)
-    }
-    return m.rows
-  }
-  for (const row of m.rowDelta ?? []) {
-    const key = (row as { key?: unknown } | null)?.key
-    if (typeof key === 'number') rowCache.set(key, row)
-  }
-  const keys = m.rowKeys ?? []
-  const out: unknown[] = []
-  for (const key of keys) {
-    const row = rowCache.get(key)
-    if (row !== undefined) out.push(row)
-  }
-  // 缓存里已不在顺序中的键（窗口前移丢掉的行）清掉，免得越积越多
-  if (rowCache.size > keys.length) {
-    const kept = new Set(keys)
-    for (const key of [...rowCache.keys()]) {
-      if (!kept.has(key)) rowCache.delete(key)
-    }
-  }
-  return out
-}
-
 export interface ReducerDeps {
   messages: MessagesSlice
   composer: ComposerSlice
@@ -250,33 +194,12 @@ export interface ReducerSlice {
   store: Pick<ChatStore, 'onHostMessage'>
 }
 
-/**
- * 从宿主行数组里取出用户行的提交标识。
- * 形状按宿主行模型只认 `kind`/`rpcId` 两个字段，认不出的行直接跳过（页面不解析宿主行的其余结构）。
- */
-function userRpcIdsOf(rows: unknown): string[] {
-  if (!Array.isArray(rows)) {
-    return []
-  }
-  const out: string[] = []
-  for (const r of rows) {
-    if (r === null || typeof r !== 'object') {
-      continue
-    }
-    const row = r as { kind?: unknown; rpcId?: unknown }
-    if (row.kind === 'user' && typeof row.rpcId === 'string') {
-      out.push(row.rpcId)
-    }
-  }
-  return out
-}
-
 export function createReducer(deps: ReducerDeps): ReducerSlice {
   const { messages, composer, catalogs, selectors, question, status, prefs, attachments, outbox, feedback, queue, reset } = deps
   /**
    * **本 store 自己的**摄入缓存与续折断点（**不能提到模块级** —— 换会话 / 连续挂载不同窗口会串窗口，
    * 详见上面 `ingestEvents` 的注释与守卫 `_doneline.wiring.dom.test.mjs`【5】）。
-   * `chatNodeModel` 仍留在模块级：它是 `readChatNodeModel()` 给别的模块读的**只读出口**，不是缓存。
+   * `chatNodeModel`（模块级）是**每次 fold 后的产物**，只在本文件里消费；别把它挪进切片或当缓存。
    */
   let ingestState: { events: SessionEvent[]; session: string | undefined } = { events: [], session: undefined }
   let nodesCheckpoint: NodesCheckpoint | undefined
@@ -327,6 +250,9 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       // 收掉 `queued` 的本地回显、并把已退休未入档的标成未提交成功（见 messages.applySubmissions）
       case 'submissions':
         messages.applySubmissions(m.pending ?? [], m.retired ?? [])
+        // 台账退休 → 队列卡的「发送中」也一起退休：它原先只靠队列帧 / 用户行回显认领，
+        // 两条都落空时那张卡会一直转圈（宿主台账早就判完了，页面不该再自推一遍）。
+        queue.settleSending((m.retired ?? []).map((r) => r.rpcId))
         break
       case 'queueActionFailed':
         queue.showActionFailure(m.op, m.code)
@@ -402,7 +328,7 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         prefs.apply(m)
         break
       case 'chatEvents': {
-        // 保结构事件帧 → 节点模型 → 渲染行 → messages（渲染源切换）。
+        // 保结构事件帧 → 节点模型 → 渲染行 → messages（事件帧是唯一渲染源）。
         // 摄入只在窗口增长时补新增那一段；折叠只在同一回合内追加时重折尾巴（见上面缓存段的说明）。
         const ingested = ingestEvents(ingestState, m.sessionId, m.events, m.replaced === true)
         ingestState = ingested.state
@@ -412,63 +338,28 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         const folded = buildChatNodesIncremental(ingested.evs, nodesCheckpoint)
         chatNodeModel = folded.model
         nodesCheckpoint = folded.checkpoint
-        if (USE_NODE_MODEL) {
-            // 换会话清节点 key 映射（节点 key 是会话内语义串，跨会话会撞号）
-            if (m.sessionId !== undefined && m.sessionId !== nodeRowsSessionId) {
-                nodeRowsSessionId = m.sessionId
-                resetNodeKeyMap()
-            }
-            messages.applyNodeRows(
-                toChatRowsFromNodes(nodesToRows(chatNodeModel), m.changesSummary),
-                m.sessionId,
-                m.turnActive,
-                m.subagent,
-                // ⚠️ 座位计划的行 key 必须与行表**同一套数字 key**（由 `keyOf` 分配）：
-                // 直接下发计划里的字符串 key（`turn-process:1:seg1`）会导致按 key 查表 100% 落空。
-                nodesToSeatRows(chatNodeModel, rowKeyOfNodeKey),
-            )
-            messages.applyHistory({ hasMore: m.historyHasMore, loading: m.historyLoading, events: m.historyEvents, openError: m.sessionOpenError })
-            // 与 `rows` 帧同款的三条收尾：队列「发送中」认领 + 反馈按会话丢弃 + 回合结束后收起提问弹窗
-            queue.noteDurable(userRpcIdsOfEvents(m.events))
-            feedback.onSession(m.sessionId)
-            if (m.turnActive === false) question.reset()
+        // 换会话清节点 key 映射（节点 key 是会话内语义串，跨会话会撞号）
+        if (m.sessionId !== undefined && m.sessionId !== nodeRowsSessionId) {
+          nodeRowsSessionId = m.sessionId
+          resetNodeKeyMap()
         }
+        messages.applyNodeRows(
+          toChatRowsFromNodes(nodesToRows(chatNodeModel), m.changesSummary),
+          m.sessionId,
+          m.turnActive,
+          m.subagent,
+          // ⚠️ 座位计划的行 key 必须与行表**同一套数字 key**（由 `keyOf` 分配）：
+          // 直接下发计划里的字符串 key（`turn-process:1:seg1`）会导致按 key 查表 100% 落空。
+          nodesToSeatRows(chatNodeModel, rowKeyOfNodeKey),
+        )
+        messages.applyHistory({ hasMore: m.historyHasMore, loading: m.historyLoading, events: m.historyEvents, openError: m.sessionOpenError })
+        // 三条收尾：队列「发送中」认领（判据是**事件里的**提交标识）+ 反馈按会话丢弃
+        // + 回合结束后收起提问弹窗（上游没有 resolved 类事件，弹窗存活期只能由回合生命周期兜住）。
+        queue.noteDurable(userRpcIdsOfEvents(m.events))
+        feedback.onSession(m.sessionId)
+        if (m.turnActive === false) question.reset()
         break
       }
-      case 'rows':
-        // 渲染源是节点模型时 `rows` 帧退役；影子期仍走宿主行。
-        if (USE_NODE_MODEL) break
-        // 宿主下发的行（阶段 4，见 docs/design/08 §11）：渲染源切到宿主侧
-        // **只发变动的行**（§3.3）：`rowDelta` + `rowKeys` 在这里拼回整表 —— 等价性是硬约束
-        //（守卫 `tmp/_rows.diff.test.mjs` 逐前缀比对两种口径），拼装逻辑只此一处。
-        // 拼一次整表：`applyHostRows` 与下面的 `noteDurable` 必须看**同一份**（见那处的注释）
-        const assembled = assembleRows(m)
-        messages.applyHostRows(assembled, m.sessionId, m.turnActive, m.subagent)
-        // 窗口分页事实（「加载更早」按钮的门与进行态）：跟同一帧下发，页面只做镜像
-        // `sessionOpenError` 同帧（整表语义：`null` = 没有失败，用来清掉上一条横幅）
-        messages.applyHistory({
-          hasMore: m.historyHasMore,
-          loading: m.historyLoading,
-          events: m.historyEvents,
-          openError: m.sessionOpenError,
-        })
-        // 队列卡的本地「发送中」也按提交标识认领：这次提交可能落在对话流（空闲）或队列（忙时），
-        // 两条路都以同一个 `rpcId` 回显 —— 只认队列帧的话，竞态下会有一条「发送中」永远挂着。
-        // 同时记下「日志里已落账」的标识：pending 插话气泡据此去重（队列帧可能比行帧慢一帧）。
-        // 判据必须是**拼好的整表**（`assembled`），不是帧上的 `m.rows`：差分帧（`rowDelta` + `rowKeys`，
-        // 也就是常态）根本没有 `rows` 字段 —— 拿 `m.rows` 只会得到空集合，于是每次差分都把这份
-        // 「日志里已落账」的名单清空：插话气泡的去重恒不生效，一条旧提问的气泡就永远挂在列表末尾
-        //（真机 2026-10-07：发新问题时，最早那条提问又出现在「思考 / 深度求索中」上方）。
-        queue.noteDurable(userRpcIdsOf(assembled))
-        // 反馈是**按会话**的：会话一变就丢弃上一会话的评价，否则标记会串到新会话的行上
-        feedback.onSession(m.sessionId)
-        // 本轮已结束（宿主说不在跑）→ 仍挂着的提问不可能还有效，收起弹窗。
-        // 上游**没有** resolved 类事件（只有 `user-questions/request`），弹窗的存活期只能由**回合生命周期**兜住；
-        // 不关的话用户点关闭会去取消一个已解决的提问 —— 报「未找到对应的提问」并把整轮又停一次（真机现象）。
-        if (m.turnActive === false) {
-          question.reset()
-        }
-        break
       case 'todos':
         // 任务清单（输入框上方的常驻条）：宿主已折好，页面只整表替换
         status.applyTodos(m.todos)

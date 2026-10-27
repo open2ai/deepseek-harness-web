@@ -1,7 +1,8 @@
 // 节点模型渲染行 → ChatRow（渲染源切换的桥）：把 `nodesToRows` 的 RenderRow 映射成组件消费的 ChatRow。
 // 与旧「宿主行→渲染行」映射同角色（旧通路已退役）：展示派生（标题/摘要/时钟）在组件侧，这里只搬运事实 + 补缺省。
 //
-// key：节点模型用语义串（`user:2`/`1:1`/`tool:c1`），ChatRow.key 是 number —— 用会话内稳定的字符串→整数映射（同 reducer 的 rowCache 思路）。
+// key：节点模型用语义串（`user:2`/`1:1`/`tool:c1`），ChatRow.key 是 number —— 用会话内稳定的字符串→整数映射
+//（同一节点每帧必须拿到同一个 key，否则组件会卸载再挂载）。
 import { contextForm, contextProducer } from '../nodes/event-projection'
 import { deriveToolSummary, formatMsgClock, toolTitle } from '../format'
 import { scheduleCardOf } from '../details-card'
@@ -17,7 +18,7 @@ function keyOf(s: string): number {
     if (n === undefined) { n = keySeq++; keyMap.set(s, n) }
     return n
 }
-/** 换会话/清空时复位 key 映射（与 rowCache 同生命周期）。 */
+/** 换会话/清空时复位 key 映射（节点 key 是会话内语义串，跨会话会撞号）。 */
 export function resetNodeKeyMap(): void {
     keyMap.clear()
     keySeq = 1

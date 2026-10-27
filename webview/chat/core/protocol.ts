@@ -193,6 +193,14 @@ export type HostToViewMessage =
   | { type: 'fileUploaded'; key: string; receiptId?: string; name?: string; bytes?: number; error?: string }
   // 附件字节（附件大类）：结果帧只带附件引用，渲染层要显示时按 id 向宿主懒取
   | { type: 'attachmentBytes'; attachmentId: string; mediaType?: string; data?: string; error?: string }
+  /**
+   * **本地路径图片的字节**（回答正文里 markdown 写的本地路径图，见 `core/md-images`）。
+   *
+   * 为什么不复用 `attachmentBytes`：那条按**内容寻址 id** 取，而正文里只有文件路径；
+   * 上游走的是 `api/file?path=…` 的本地文件路由，插件宿主侧对等能力就是「按绝对路径读盘」。
+   * `path` 原样回带（页面按它配缓存）；失败也回帧（渲染侧退化成惰性 alt 文本）。
+   */
+  | { type: 'localImageBytes'; path: string; mediaType?: string; data?: string; error?: string }
   | {
       type: 'chatInfo'
       projections?: Record<string, unknown>
@@ -244,7 +252,7 @@ export type HostToViewMessage =
        * 缺省（`undefined`）语义 = **没换过**：`append` / `prepend` 都只增不减，缓存可以续用。
        */
       replaced?: boolean
-      /** 与 `rows` 帧同款的子会话事实（普通会话不带）。 */
+      /** 子会话事实（普通会话不带）。 */
       subagent?: {
         parentSessionId: string
         mode: string
@@ -258,48 +266,6 @@ export type HostToViewMessage =
       sessionOpenError?: { message: string; code?: string } | null
       /** 已取回的回合改动摘要（`seq` → 摘要对象）。 */
       changesSummary?: Record<string, unknown>
-    }
-  // 宿主下发的「行」（切渲染源后页面据此渲染；开关关闭时不下发）。
-  // 形状为宿主侧的行模型，页面消费时做一次映射。
-  | {
-      type: 'rows'
-      rows?: unknown[]
-      /**
-       * **本帧变了/新增的行**（"只发变动的行"）：与 `rowKeys` 一起给。
-       * 页面按 `key` 覆盖缓存，再按 `rowsKeys`（原文 `rowKeys`）重排 —— 结果与整表逐字节等价。
-       */
-      rowDelta?: unknown[]
-      /** **全量顺序**（行的 `key`）：几百个小整数，每帧全发也不值一提；页面靠它拼回渲染顺序。 */
-      rowKeys?: number[]
-      /** 该批行属于哪个会话（页面据此丢弃上一个会话的本地乐观行） */
-      sessionId?: string
-      /** 本会话是否有一轮**正在跑**（显式事实：页面据此决定「停止」按钮可用，不从行推导） */
-      turnActive?: boolean
-      /**
-       * **子会话事实**（宿主下发；普通会话**不带这个键**）。页面据此判三件事（见 `core/stop-control.ts`）：
-       * 主钮能不能让出「停止」、要不要另挂一个独立 Stop、输入区要不要被"父离线"锁住。
-       */
-      subagent?: {
-        /** 直接父会话（有它 = 这个会话本身是子会话）。 */
-        parentSessionId: string
-        /** `continuable` = 可继续（才有独立 Stop 与父离线锁）。 */
-        mode: string
-        /** 父 Agent 是否可用；缺省 = 还没读到。 */
-        parentAvailable?: boolean
-        /** 列表事实是否读到过（决定"父不可用"要不要下结论）。 */
-        factsReady?: boolean
-      }
-      /** 更早的历史还没进窗口（窗口分页事实）：列表顶端据此出「加载更早」。 */
-      historyHasMore?: boolean
-      /** 「加载更早」这一页是否在飞（宿主侧的事实，页面按钮据此禁用）。 */
-      historyLoading?: boolean
-      /** 当前窗口里的事件条数（诊断用；页面只展示不判定）。 */
-      historyEvents?: number
-      /**
-       * **打开历史失败**（上游 `openState === 'error'` 的 `chat.loadError` 横幅）。
-       * **整表语义**：`null` = 当前没有失败（页面据此清掉上一条横幅）。
-       */
-      sessionOpenError?: { message: string; code?: string } | null
     }
   // 消息反馈的状态回帧（列表 / 写入结果 / 业务失败）。**不是渲染指令**：它只喂反馈切片。
   | {
@@ -379,6 +345,13 @@ export type ViewToHostMessage =
   | { type: 'chatModeConfig'; agentPreset: string }
   | { type: 'pickFile' }
   | { type: 'attachmentReq'; attachmentId: string }
+  /**
+   * **按绝对路径取一张正文图片的字节**（markdown 本地路径图）。
+   *
+   * 路径由页面解析（相对路径按会话 cwd 拼绝对，对齐上游 `resolveWorkspacePath`），宿主只读盘；
+   * 宿主按扩展名给 MIME、有大小上限，失败回 `localImageBytes.error`。
+   */
+  | { type: 'localImageReq'; path: string }
   // 在编辑器区打开一个文件（相对路径由宿主按 cwd 解析）；line 为 1 起的行号
   | { type: 'openFile'; path: string; line?: number; cwd?: string }
   /**
@@ -420,5 +393,5 @@ export type ViewToHostMessage =
   // 「@」引用：按查询串请求文件/会话候选
   | { type: 'atListReq'; query: string }
   // 往前翻一页历史（对齐上游 `ISession.loadOlder()`）：宿主读更早的一页并 prepend 到窗口，
-  // 然后用 `rows` 帧（带 `historyHasMore`/`historyLoading`）回答。页面在飞时不重复发。
+  // 然后用 `chatEvents` 帧（带 `historyHasMore`/`historyLoading`）回答。页面在飞时不重复发。
   | { type: 'loadOlder' }

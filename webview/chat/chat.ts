@@ -13,6 +13,8 @@ import type { HostToViewMessage } from './core/protocol'
 import { createChatStore } from './core/store/chat'
 // 代码块工具栏（换行 / 复制）的**全局委托**：装配点在下面，理由见那里的注释
 import { installCodeToolbarDelegation } from './core/code-toolbar'
+// 正文图片增强（本地路径图取字节 / 灯箱 / 失败回退）：装配点在下面，理由见那里的注释
+import { installMarkdownImageEnhancer } from './core/md-images'
 import { ChatApp } from './components/app'
 import { initChatTitlebar } from './titlebar'
 
@@ -31,6 +33,13 @@ const store = createChatStore(host)
  * 委托必须**只此一处**：再在局部挂一份会让换行被切换两次，表现成"点了没反应"。
  */
 installCodeToolbarDelegation(document, (text) => store.copy(text))
+
+/*
+ * **正文里的图片**：markdown 渲染只出占位（本地路径图要等宿主读盘取字节），
+ * 由这里在 DOM 层升级成 `<img>` 并负责灯箱 / 失败回退（口径见 `core/md-images` 文件头）。
+ * 与代码块工具栏同理，全局只装一次。
+ */
+installMarkdownImageEnhancer({ host, cwd: () => store.sessionCwd.value })
 
 // 宿主 → store(聊天消息;标题栏消息归 titlebar,store 内部忽略)
 host.onMessage((msg) => store.onHostMessage(msg as HostToViewMessage))

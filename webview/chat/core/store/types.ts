@@ -638,7 +638,7 @@ export interface ChatStore {
    *  `collapsed`=所有回合都有（含进行中）、`history`=仅已关闭回合（进行中平铺）、`none`=不分组。
    *  消费点在 `core/process-fold.ts`（决定进行中回合出不出折叠头）。 */
   stepGrouping: Signal<'collapsed' | 'history' | 'none'>
-  /** 收起时机（上游 `ui-chat.collapseTiming`）：`completion`=定稿即收（默认）；`next-input`=最新交互段
+  /** 收起时机（上游 0.2.1 新增的 `collapseTiming` 偏好）：`completion`=定稿即收（默认）；`next-input`=最新交互段
    *  定稿后先保持展开，直到下一次普通输入。消费点在 `core/node-exchanges.ts` 与 `core/process-fold.ts`。 */
   collapseTiming: Signal<'completion' | 'next-input'>
   /** 渲染源开关（宿主下发，见 docs/design/08 §11）：true = 页面只认宿主下发的「行」，

@@ -1460,7 +1460,14 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
             nodes: new Map([...model.nodes].filter(([k]) => before(k))),
             order: model.order.filter((k) => before(k)),
             entries: model.entries.filter((e) => before(e.key)),
-            groups: [],
+            /**
+             * ⚠️ **前缀的片必须按回合切着带过去**（2026-10-26 修）：续折只重折「最后一条 `turn/start`
+             * 之后」的尾巴，更早回合的片（片头 + 成员）只能由前缀带。这里原先是 `groups: []`，
+             * 于是**每个增量帧里所有更早回合的片全部消失** —— 真机表现就是
+             * 「回答过程中，之前回复里的步骤一会出现一会消失」，直到下一个 `turn/start` 走全量才回来。
+             * 判据与上面 `byTurn` 同一把尺（按回合号切）。
+             */
+            groups: typeof cutTurn === 'number' ? model.groups.filter((g) => g.data.turn < cutTurn) : model.groups,
             presentations: byTurn(model.presentations),
             turnTimes: byTurn(model.turnTimes),
             turnStats: byTurn(model.turnStats),

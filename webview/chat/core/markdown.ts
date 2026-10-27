@@ -185,6 +185,106 @@ md.renderer.rules.fence = (tokens, idx, _options, env) => {
 }
 
 /**
+ * markdown 图片的**目标分类**（对齐上游 `MarkdownImage` 的取源规则）：
+ *   · `remote`：http(s) 远程图 —— 原样交给 `<img>`；
+ *   · `local`：本地文件路径（绝对路径，或相对路径 —— 交给页面用会话 cwd 拼绝对路径）；
+ *   · `inert`：不是可取回的图片（`file:`/`data:`/`blob:`/UNC/其它协议、空串、控制字符）——
+ *     退化成惰性 alt 文本，**不产生破图**（上游同样只接受作者写出的 http(s) 与本地路径）。
+ *
+ * 为什么抽成纯函数：判据要能被守卫逐条钉住（`tmp/_mdimages.test.mjs`），
+ * 渲染规则只做「分类 → 输出哪种 DOM」这一步。
+ */
+export type MdImageKind = 'remote' | 'local' | 'inert'
+
+/** 图片目标（`src` 已按上游口径**只解码一次**、去掉 `#`/`?` 后缀）。 */
+export interface MdImageTarget {
+  kind: MdImageKind
+  /** 供后续取字节的路径 / 远程 URL；`inert` 时是空串。 */
+  src: string
+}
+
+/**
+ * 把 markdown 图片目标归类。
+ * @param raw - markdown-it token 上的原始 `src`。
+ * @returns 分类 + 规范化后的目标字符串。
+ */
+export function mdImageTarget(raw: string): MdImageTarget {
+  // 上游对百分号转义只解一次，解不开按不可取回处理
+  let value: string
+  try {
+    value = decodeURIComponent(raw)
+  } catch {
+    return { kind: 'inert', src: '' }
+  }
+  // `#` 是行号/锚点后缀；本地路径还允许 `?`（上游同样先切掉再取图）
+  value = value.split('#')[0] ?? ''
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    return { kind: 'inert', src: '' }
+  }
+  if (/^https?:\/\//i.test(value)) {
+    return { kind: 'remote', src: value }
+  }
+  // UNC（`\\host\x`、`//host/x`）：上游显式拒绝，插件也不去读网络共享
+  if (value.startsWith('//') || value.startsWith('\\\\')) {
+    return { kind: 'inert', src: '' }
+  }
+  const path = value.split('?')[0] ?? ''
+  if (path === '') {
+    return { kind: 'inert', src: '' }
+  }
+  // Windows 盘符绝对路径（两种分隔符）或 POSIX 绝对路径
+  if (/^[A-Za-z]:[/\\]/.test(path) || path.startsWith('/')) {
+    return { kind: 'local', src: path }
+  }
+  // 其它带 scheme 的（file:/data:/blob:/javascript:…）一律不认
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path)) {
+    return { kind: 'inert', src: '' }
+  }
+  return { kind: 'local', src: path }
+}
+
+/**
+ * 相对路径按会话 cwd 拼成绝对路径（对齐上游 `resolveWorkspacePath`；页面拿不到 cwd 时返回 `undefined`）。
+ * @param cwd - 会话工作区根（`''` = 未知）。
+ * @param path - 已分类为 `local` 的路径。
+ * @returns 绝对路径；cwd 未知且路径是相对时返回 `undefined`。
+ */
+export function resolveMdImagePath(cwd: string, path: string): string | undefined {
+  if (/^[A-Za-z]:[/\\]/.test(path) || path.startsWith('/')) {
+    return path
+  }
+  if (cwd === '') {
+    return undefined
+  }
+  const relative = path.replace(/^[/\\]+/, '')
+  const windows = /^[A-Za-z]:/.test(cwd) || cwd.includes('\\')
+  const base = cwd.replace(/[/\\]+$/, '')
+  return windows ? `${base}\\${relative}` : `${base}/${relative}`
+}
+
+/**
+ * **markdown 图片渲染规则**（替换 markdown-it 默认的 `<img>`）。
+ *
+ * 为什么不能直接用默认规则：默认规则会把本地路径原样写进 `src`，而 webview 的文档源是
+ * `vscode-webview://`，本地路径解析不到 —— 图就是不可见（真机：回答里的图片"没显示"）。
+ * 这里只输出**占位元素**，由 `core/md-images` 在 DOM 里按宿主取回的字节升级成 `<img>`；
+ * 远程 URL 也走同一入口，保证点击灯箱、失败回退二者行为一致。
+ *
+ * 流式期间本地路径**只出 alt 文本**：上游的本地路径词表只在定稿渲染里启用（流式时正文还没定型）。
+ */
+md.renderer.rules.image = (tokens, idx, _options, env) => {
+  const token = tokens[idx]
+  const raw = String(token?.attrGet('src') ?? '')
+  const alt = String(token?.content ?? '')
+  const target = mdImageTarget(raw)
+  const streaming = (env as { streaming?: boolean } | undefined)?.streaming === true
+  if (target.kind === 'inert' || (target.kind === 'local' && streaming)) {
+    return `<span class="md-image-alt">${escapeHtml(alt)}</span>`
+  }
+  return `<span class="md-image" data-md-image="${target.kind}" data-md-src="${escapeHtml(target.src)}" data-md-alt="${escapeHtml(alt)}">${escapeHtml(alt)}</span>`
+}
+
+/**
  * 净化配置。
  *
  * `ADD_TAGS` 只放 **KaTeX 的 MathML 臂**要用的三个：

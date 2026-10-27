@@ -14,20 +14,10 @@ import { turnRowIndex, turnSeatFacts } from '../../core/nodes/seat-facts'
 import { controlRowTargetIndex } from '../../core/control-row-place'
 import { anchoredTopAfterPrepend } from '../../../../src/dsh/rows/paging'
 import { RowBoundary } from '../RowBoundary'
-import { UserRow } from './UserRow'
-import { AssistantRow } from './AssistantRow'
-import { ApprovalRow } from './ApprovalRow'
-import { QuestionRow } from './QuestionRow'
-import { TriggerRow } from './TriggerRow'
-import { NoticeRow } from './NoticeRow'
-import { CommandRow } from './CommandRow'
-import { CompactionRow } from './CompactionRow'
-import { RetryRow } from './RetryRow'
-import { TurnNoticeRow } from './TurnNoticeRow'
 import { attachTailNotices } from '../../core/tail-notice'
-import { ContextInjectionRow } from './ContextInjectionRow'
 import { TurnStatus } from './TurnStatus'
 import { PendingSteeringList } from './PendingSteeringRow'
+import { renderRow } from './row-renderers'
 
 /**
  * 跟随要盯住的元素（顺序：内容列在前，滚动视口在后）。
@@ -525,52 +515,21 @@ export function MessageList({ store }: { store: ChatStore }) {
         const userLatest = i === lastUserAt && !steeringPending
         // 每条行各包一层错误边界：`key` 放在边界上（边界自己也是行级 vnode），
         // 内部再按行 key 分层，保证「换行」与「重试换子树」两件事互不干扰。
-        const body = (() => {
-          switch (row.kind) {
-            case 'user':
-              return html`<${UserRow} key=${row.key} row=${row} store=${store} latest=${userLatest} />`
-            case 'context':
-              // 已被上面的可见性过滤挡掉（到这里只剩含工具增删块的注入行）；类型上仍可能出现，故保留分支
-              return html`<${ContextInjectionRow} key=${row.key} row=${row} />`
-            case 'sysprompt':
-              // **聊天区不显示系统提示词**（上游 0.1.7-alpha.1 起 `isVisibleChatNode` 排除该 kind）。
-              // 数据仍在会话日志里、宿主照旧下发，只是不再渲染 —— 这里返回 null 只作防御。
-              return null
-            case 'assistant': {
-              const head = row.turn === undefined ? undefined : turnHeadRow.get(row.turn)
-              return html`<${AssistantRow} key=${row.key} row=${row} store=${store} latest=${latest}
-                turnTail=${turnTailKeys.has(row.key)}
-                ownsHead=${head === undefined || head.key === row.key}
-                outerHidden=${rowOuterHidden(row)}
-                seatKey=${seatKeyOfRow(row)}
-                turnCurrentStep=${row.turn === undefined ? undefined : currentStepOf(row.turn)}
-                deferFold=${deferOfRow(row)}
-                tailNotices=${tailNotices} />`
-            }
-            case 'approval':
-              return html`<${ApprovalRow} key=${row.key} row=${row} store=${store} />`
-            case 'question':
-              return html`<${QuestionRow} key=${row.key} row=${row} store=${store} />`
-            case 'notice':
-              return html`<${NoticeRow} key=${row.key} row=${row} />`
-            case 'turnNotice':
-              // 回合终局通知行（上游 `turn-error` / `turn-max-tokens`）：独立行，永远可见（不参与过程折叠）
-              return html`<${TurnNoticeRow} key=${row.key} row=${row} />`
-            case 'trigger':
-              // 触发卡（上游 `turn-trigger`）：某条非 human 通知唤醒了本轮，独立行、永远可见
-              return html`<${TriggerRow} key=${row.key} row=${row} />`
-
-            case 'retry':
-              // 模型重试链（上游 `model-retry`）：一行一条链，首条 `llm/retry` 的 seq 就是它的位置
-              return html`<${RetryRow} key=${row.key} row=${row} />`
-            case 'compaction':
-              // 自动压缩标记（上游 `compaction`）：只有检查点落地才有这一行，摘要可展开
-              return html`<${CompactionRow} key=${row.key} row=${row} store=${store} />`
-            case 'command':
-              // 手动命令行（上游 `command`）：`permission` 已在可见性过滤里剔除
-              return html`<${CommandRow} key=${row.key} row=${row} />`
-          }
-        })()
+        // 行级事实在这里**按行**算好再交给注册表（`row-renderers`）——可见性/排序/折叠/边界
+        // 是整表级事务，留在本组件；注册表只负责 kind → 视图。
+        const turnHead = row.kind === 'assistant' && row.turn !== undefined ? turnHeadRow.get(row.turn) : undefined
+        const body = renderRow(row, {
+          store,
+          latest,
+          userLatest,
+          turnHead,
+          turnTail: turnTailKeys.has(row.key),
+          currentStepOf,
+          seatKeyOfRow,
+          deferOfRow,
+          outerHidden: rowOuterHidden,
+          tailNotices,
+        })
         // `data-turn` 是右侧导轨的跳转锚（上游用 Conversation Context key，效果同）
         const turnAttr = typeof (row as { turn?: unknown }).turn === 'number' ? String((row as { turn: number }).turn) : undefined
         // ⚠️ 折的落点是**行内的内容容器**（`Chain` 的 `.chain-body` + `AssistantRow` 的 `.body`），
@@ -583,7 +542,7 @@ export function MessageList({ store }: { store: ChatStore }) {
         // 另两个标记供**流程间距**用（数值逐档对齐上游，见 `chat.css`）：
         //   · `data-turn-process-head` = 本行承着回合头（上游 `[data-chat-flow-kind="turn-process"]`）→ 它与其后一项 16px；
         //   · `data-outer-folded` = 本行的内容被折起（上游对 `hidden` 的 seat 不给间距）。
-        const headRow = row.kind === 'assistant' && row.turn !== undefined && turnHeadRow.get(row.turn)?.key === row.key
+        const headRow = row.kind === 'assistant' && row.turn !== undefined && turnHead?.key === row.key
         const foldedRow = row.kind === 'assistant' && rowOuterHidden(row)
         /**
          * **整行折起 → 整行不占位**（对齐上游"隐藏的 seat 零高、零间距"）。

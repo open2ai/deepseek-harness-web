@@ -12,7 +12,8 @@
 //   · 弹层打开时 `Enter`/`Tab` 归弹层（选中候选），不发送；
 //   · 已认领的命令行（`/命令 参数…`）：提交换行 = **执行命令**（加速手势也只是另一种 submit 手势）；
 //     已认领的技能行与普通正文同路（它本来就是一封普通消息）；
-//   · 空草稿 + 在跑 + 有排队项 + 支持插话 = **整队插话**（上游 `canSteerQueue` 的四项；不发空消息）。
+//   · 空草稿 + **加速手势** + 在跑 + 有排队项 + 支持插话 = **整队插话**（上游 `canSteerQueue` 的四项
+//     外加"只有 accelerated 才转队列动作"这一条；普通 Enter 空草稿什么也不做 —— 见 ⑤ 的注释）。
 
 /** 判定用的按键事实（只取用得到的字段，便于脚本造事件）。 */
 export interface InputKeyEvent {
@@ -90,11 +91,18 @@ export function decideInputKey(e: InputKeyEvent, ctx: InputKeyContext): InputKey
   if (ctx.claim === 'command') {
     return { action: 'run-command' }
   }
-  // ⑤ 空草稿：退化为**整队插话**（上游 `canSteerQueue`：`!locked && !machineBusy && !commandMenuOpen
-  //   && empty && running && steeringAvailable`；本插件对应的四项是后三条 + 真有排队项）。
-  //   不满足时什么也不做 —— 避免发出空消息。
+  // ⑤ 空草稿：**只有加速手势**才退化为整队插话（上游的整队动作只挂在加速手势这一支：
+  //   `accelerated && canSteerQueue`；其余情况走普通提交 —— 空草稿会被机器拒绝，即什么也不发生）。
+  //   `canSteerQueue` 的其余几项：`!locked && !machineBusy && !commandMenuOpen && empty && running &&
+  //   steeringAvailable`；本插件对应的剩余项是"在跑 + 支持插话 + 真有排队项"（弹层已在 ③ 拦掉）。
+  //
+  //   ⚠️ 普通 `Enter` **不能**也触发整队插话（2026-10-27 真机事故）：用户连发三条、队列里有三条时，
+  //   空输入框里按一下 Enter 就把整队插进当前回合 —— 三条消息在同一 step 被取用、在对话区"叠到一起"，
+  //   而上游只会把它们各自留到下一轮。手势门漏写就是这一下的来路。
   if (empty) {
-    return ctx.running && steeringAvailable && ctx.queued ? { action: 'steer-whole-queue' } : { action: 'none' }
+    return accelerated && ctx.running && steeringAvailable && ctx.queued
+      ? { action: 'steer-whole-queue' }
+      : { action: 'none' }
   }
   // ⑥ 交付方式：逐条镜像上游 `resolveSubmitMode`
   return { action: 'send', mode: resolveSubmitMode(ctx, accelerated ? 'accelerated' : 'enter') }

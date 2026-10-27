@@ -2088,3 +2088,37 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.35);
   }
   .fb-toast.is-error { color: var(--vscode-errorForeground, #f48771); }
+
+/* ---- 正文图片（markdown 本地路径图 / 远程图）与灯箱 ----
+ * 口径对齐上游 `MarkdownText` 的图片样式：正文图整行、宽度自适应、圆角、contain；
+ * 未解析/不可取回时是惰性斜体 alt 文本（不产生破图）。 */
+.md-image {
+  display: inline-block; max-width: 100%; font-size: 12px; font-style: italic;
+  color: var(--vscode-descriptionForeground, #999);
+}
+.md-image-alt {
+  font-size: 12px; font-style: italic; color: var(--vscode-descriptionForeground, #999);
+}
+.md-image-btn {
+  display: block; width: fit-content; max-width: min(100%, 640px); padding: 0; margin: 4px 0;
+  border: none; background: none; cursor: zoom-in; border-radius: 8px; overflow: hidden; line-height: 0;
+}
+.md-image-btn:focus-visible { outline: 2px solid var(--vscode-focusBorder, #3794ff); outline-offset: 2px; }
+.md-image-el {
+  display: block; width: auto; max-width: 100%; height: auto; max-height: 360px;
+  border-radius: 8px; object-fit: contain;
+}
+.md-lightbox {
+  position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(0, 0, 0, 0.72);
+}
+.md-lightbox-img {
+  max-width: min(100%, 1200px); max-height: 100%; object-fit: contain; border-radius: 8px;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+.md-lightbox-close {
+  position: absolute; top: 12px; right: 12px; width: 30px; height: 30px; border: none; border-radius: 8px;
+  cursor: pointer; font-size: 14px; color: var(--vscode-foreground, #ddd); background: rgba(0, 0, 0, 0.5);
+}
+.md-lightbox-close:hover { background: rgba(0, 0, 0, 0.7); }
+

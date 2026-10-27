@@ -22,7 +22,7 @@ export type DshTranscriptView = 'normal' | 'compact';
 export type DshStepGrouping = 'collapsed' | 'history' | 'none';
 
 /**
- * 收起时机（上游 `ui-chat.collapseTiming`，0.2.1 新增）：已定稿回合的过程**什么时候**恢复历史呈现。
+ * 收起时机（上游 0.2.1 新增的 `collapseTiming` 偏好）：已定稿回合的过程**什么时候**恢复历史呈现。
  *
  * - `completion`：回合一定稿就收起（默认，等于接入前的固有形态）；
  * - `next-input`：最新交互段里的已定稿回合**先不收**，保持运行中的呈现，直到出现下一次普通输入、

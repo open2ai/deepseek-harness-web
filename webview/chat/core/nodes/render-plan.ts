@@ -673,7 +673,18 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
     const closeSegment = (): void => {
         const hasMembers = cur.nodes.length > 0 || cur.groupKeys.length > 0
         if (!hasMembers) { curOrphan = false; return }
-        if (!curOrphan) { segments.push(cur); curOrphan = false; return }
+        /**
+         * ⚠️ **被边界切出来的孤儿段必须自成一行**（与上游分组口径同）：
+         * 孤儿态只由 `markBoundary` 置起，所以"孤儿段"就是**人类输入之后**、还没等到回答步的那一段。
+         * 把它并回上一段 = 把边界之后的过程搬到人类输入**上面** —— 上游分组表是
+         * `G[T1] → steering → G[T2]`，插话之后那一片自成一个 seat；并回去就会让运行中的片头
+         * （「正在分析请求 · …」）挂在插话**前面**那条回答行里。
+         * 并回上一段只在**没有边界**（段被切出来却没有边界锚）或**无可渲染成员**
+         * （不会画出任何东西，不必多一条行）时才成立。
+         */
+        const renderable = cur.groupKeys.length > 0
+            || cur.nodes.some((n) => n.visibility === 'visible' && n.kind !== 'system-prompt')
+        if (!curOrphan || (cur.boundary !== undefined && renderable)) { segments.push(cur); curOrphan = false; return }
         const host = segments.length > 0 ? segments[segments.length - 1] as Segment : null
         const target = host ?? cur
         for (const n of cur.nodes) if (!target.nodes.includes(n)) target.nodes.push(n)
@@ -796,7 +807,9 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
         || segment.nodes.some((n) => n.kind === 'tool-call')
     while (segments.length >= 2) {
         const tail = segments[segments.length - 1] as Segment
-        if (tail.hasReplyStep || hasTool(tail)) break
+        // ⚠️ 边界之后的纯思考尾段**也不能并回边界之前**：它就是插话之后那一片的片头
+        // （运行中 =「正在分析请求」），并回去就又跑到人类输入上面（同 `closeSegment` 那条口径）。
+        if (tail.hasReplyStep || hasTool(tail) || tail.boundary !== undefined) break
         segments.pop()
         const host = segments[segments.length - 1] as Segment
         for (const n of tail.nodes) if (!host.nodes.includes(n)) host.nodes.push(n)

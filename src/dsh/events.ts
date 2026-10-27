@@ -355,7 +355,7 @@ class RemoteEventHub {
         // 却没有任何 approval/decided，会话就停在 approval/asked 上。同型样本含
         // 「read-only 下 write 被拒 → 请求提权到 workspace-write → 无人应答」。
         // 归属：**插件自身的 bug，与 dsh 0.1.x 的版本无关** —— 同型日志早于后来那次升级（最早 2026-08-31），
-        // 因为病灶在页面侧的行合并（见 webview/chat/core/store/messages.ts 的 applyHostRows）。
+        // 因为病灶在页面侧的行合并（见 webview/chat/core/store/messages.ts 的 installMappedRows）。
         // 注：不要在这里写死命中条数（每复现一次就变），需要时重跑扫描脚本。
         if (process.env['DSH_RAWLOG'] !== undefined) {
             console.warn(

@@ -1,39 +1,22 @@
-// 工具行（ToolRow，纯分发器）：收起 = 一行(图标 + 标题 + 摘要 + 状态)，展开按卡体分派。
-// 分派顺序照上游 ToolRow 的瀑布（先到先得，一个调用只渲染一张卡）：
-//   交付文件行 → 提问卡 → 终端卡 → 差异卡 → 图片卡 → 读文件卡 → 搜索卡 → web 卡 → 通用「输入/输出」卡（兜底）
-// 交付文件（`present`）是**专属行**：自带头部与展开体，不走上面的通用头（见 PresentRow）。
-// 提问卡只在取到问答记录时接管；取不到（进行中/配对不上/结果坏形）同样落到通用卡（上游同口径）。
-// 各卡体独立文件，改一种不影响其它。
+// 工具行（ToolRow）：收起 = 一行(图标 + 标题 + 摘要 + 状态)，展开按卡体分派。
+// 本文件只做两件事：① 算**通用事实**（状态、摘要、图标、退出码、通用头与展开体外壳）；
+// ② 按 `TOOL_VIEWS` 的顺序逐项试，第一个返回非 null 的注册项接管这一行（注册表见 `tool-views.ts`）。
+// 分派顺序、各卡的判据与卡体都在注册表/各自组件里 —— 加一张卡 = 加一个注册项 + 卡体组件，别在本文件加分支。
+// 交付文件（`present`）是**专属行**：自带头部与展开体，不走通用头（见 PresentRow）。
 // 铁律：文案/结构与上游一致，不自行翻译、不编造展示。
 import { html } from 'htm/preact'
 import { useState } from 'preact/hooks'
-import type { DshTurnProcessItem, ChatStore } from '../../core/store/chat'
-import { toolTitle, toolIconOfTool, resultFirstLine, codeBodyOf, toolVariantOf } from '../../core/format'
-import { renderMd } from '../../core/markdown'
+import type { ComponentChild, VNode } from 'preact'
+import type { ChatStore } from '../../core/store/chat'
+import { toolTitle, toolIconOfTool, resultFirstLine, autoReviewDenialOf } from '../../core/format'
 import { toolGlyphOf } from './ToolIcons'
 import { toolStateLabel, ToolState } from '../../core/states'
-import { exitBadgeLabel, filePathOf, recordedPathOf, terminalCardModel, relativizeToCwd, shellWantsGenericCard } from '../../core/terminal'
-import { webCardModel } from '../../core/web-card'
+import { exitBadgeLabel, filePathOf, recordedPathOf, relativizeToCwd, terminalCardModel } from '../../core/terminal'
 import { askCardModel } from '../../core/ask-card'
-import { skillCardModel, SKILL_LABELS } from '../../core/skill-card'
-import { diffCardModel } from '../../core/diff-card'
-import { readCardModel } from '../../core/read-card'
-import { searchCardModel } from '../../core/search-card'
-import { imageCardModel } from '../../core/image-card'
+import { skillCardModel } from '../../core/skill-card'
 import { detailsCardModel } from '../../core/details-card'
-import { autoReviewDenialOf } from '../../core/format'
 import { todoDiffModel } from '../../core/todo-diff'
-import { WebCard } from './WebCard'
-import { PresentRow } from './PresentRow'
-import { AskCardBody } from './AskCardBody'
-import { ImageCard } from './ImageCard'
-import { TerminalBlock } from './TerminalBlock'
-import { DiffCard } from './DiffCard'
-import { ReadCard } from './ReadCard'
-import { SearchCard } from './SearchCard'
-import { DetailsCardBody } from './DetailsCardBody'
-
-type Tool = Extract<DshTurnProcessItem, { kind: 'tool' }>
+import { TOOL_VIEWS, type Tool, type ToolCardInput, type ToolRowState, type ToolViewCtx } from './tool-views'
 
 export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   const [open, setOpen] = useState(false)
@@ -43,8 +26,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // 一旦工具真被调用（`tool/call` 到达）宿主会把它原地升级成 `running`，这里自然恢复正常。
   const preparing = item.status === 'preparing'
   /** 喂给卡模型的形状：准备中一律按「运行中且无参数」求解（准备阶段没有任何卡数据）。 */
-  type CardInput = Parameters<typeof terminalCardModel>[0]
-  const cards = (preparing ? { ...item, status: ToolState.Running } : item) as CardInput
+  const cards = (preparing ? { ...item, status: ToolState.Running } : item) as ToolCardInput
   // **Auto review 拒绝**：被拒的工具**根本没执行**，专属卡（终端/差异/读文件…）全是空壳。
   // 上游 `ToolCallTree` 遇到它就**绕过 keyed toolview 改走通用卡**，并把摘要与输出换成两句话。
   const autoReview = autoReviewDenialOf(item)
@@ -54,16 +36,12 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   // 部分守卫/旧桩的 store 里没有 `canAnswerLate` 这个切片 —— 直接调会 `TypeError` 把**整行渲染**打断
   //（真机不会，但 tmp/ 下十来个挂真 store/DOM 的守卫会整片崩）。缺切片按「不可补答」处理。
   const askAnswerable = item.callId !== undefined && (store.canAnswerLate?.(item.callId) ?? false)
-  // 技能行（上游 `ui-skill` 注册在 `key: 'skill'` 上）：只认这一个名字，互斥于其余卡。
+  // **通用头**要用的五个卡模型：状态（提问/终端覆盖宿主判定）与摘要（技能/详情/todo 覆盖通用摘要）
+  // 都取自它们，所以必须在分派前求出来；其余卡模型只服务自己的卡体，留在 `tool-views.ts` 里现算
+  //（避免给每一行都白解析一遍参数 JSON —— 大 diff 的参数可以很大）。
   const skill = autoReview === null ? skillCardModel(cards) : null
-  // 六个卡模型都求值，按上游瀑布取第一个命中的（各自形状不符即 null，自然落到下一张）
   const ask = autoReview === null ? askCardModel(cards, askAnswerable) : null
   const terminal = autoReview === null ? terminalCardModel(cards, cwd) : null
-  const diff = autoReview === null ? diffCardModel(cards) : null
-  const read = autoReview === null ? readCardModel(cards, cwd) : null
-  const image = autoReview === null ? imageCardModel(cards, cwd) : null
-  const search = autoReview === null ? searchCardModel(cards) : null
-  const web = autoReview === null ? webCardModel(cards) : null
   // 详情卡（goal / schedule / 子代理协调类）与 todo 卡（todo_write）只在**专属工具**上命中；
   // 形状不符一律 null，自然落到下面的通用卡。两者只认 `item`（含 todoBaseline），不走 `cards`。
   const details = detailsCardModel(item)
@@ -76,7 +54,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   //      （退出状态是结果数据，不是调用失败），由 `terminal.state` 按上游 `terminalFailed` 口径标成 error，
   //      与调用真失败（isError）同序；行不再自己判一次
   //   3) 其余用宿主判好的 item.status（由 isError + code 特例判出，见 src/dsh/official/tool-status.ts）
-  const rowState = ask?.state ?? terminal?.state ?? item.status
+  const rowState: ToolRowState = ask?.state ?? terminal?.state ?? item.status
   const running = rowState === 'running' || preparing
   /**
    * **退出状态胶囊**（上游 `ExitCodeBadge` + `terminalExitLabel`）：只对「已结算、失败、前台」的命令出。
@@ -173,7 +151,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
           : html`<span class=${'chain-row-preview' + (summaryTone === 'error' ? ' is-error' : summaryTone === 'stopped' ? ' is-stopped' : '')}>${headSummary}</span>`}`
       : null}
     ${/* 退出状态胶囊：中性底 + 一个失败点，文案是"退出码 N / 信号 X / 未正常退出"（不发明数字）。
-         它在展开态也保留 —— 这是这一行的结果事实，不是摘要的补充。 */ ''}
+          它在展开态也保留 —— 这是这一行的结果事实，不是摘要的补充。 */ ''}
     ${exitLabel !== null ? html`<span class="chain-exit-badge" data-exit-badge title=${exitLabel}>
       <span class="chain-exit-dot" aria-hidden></span>${exitLabel}</span>` : null}
   </${preparing ? 'div' : 'button'}>`
@@ -190,7 +168,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
    * 2026-10-11 我一度把它挪进 `wrap()` 的展开体（当时的理由是"父行收起时不该看见子行"），
    * 结果与网页端相反：网页端**片展开后、父`代码`行仍收起时，子行照样显示**。
    */
-  const subCallsBody =
+  const subCallsBody: VNode | null =
     item.subCalls !== undefined && item.subCalls.length > 0
       ? html`<div class="chain-subcalls" data-subcalls>
           ${item.subCalls.map((child) => html`<${ToolRow} key=${child.key} item=${child} store=${store} />`)}
@@ -201,7 +179,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
    *
    * 返回**片段**：disclosure 之后跟着子调用容器（与上游 `callRow` 同构）。
    */
-  const wrap = (body: unknown): unknown =>
+  const wrap = (body: ComponentChild): VNode =>
     html`<div class=${'chain-disclosure' + (running ? ' is-running' : '')}>
       ${head}
       ${open && !preparing && body !== null ? html`<div class="chain-disclosure-body">${body}</div>` : null}
@@ -212,7 +190,7 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
    * 写成**函数**是刻意的：终端/差异/读文件/搜索/web 各有专属卡，若在分派前先算好，等于
    * 给它们每次都白解析一遍参数 JSON（大 diff 的参数可以很大）。
    */
-  const ioBody = (overrideOutput?: string): unknown => {
+  const ioBody = (overrideOutput?: string): VNode | null => {
     let bodyText = item.argsRaw ?? ''
     if (bodyText) {
       try {
@@ -241,94 +219,29 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
       : null
   }
 
-  /**
-   * **`code` 变体（`run_code`）**：展开体先出**程序**（markdown 围栏 → 上游 `CodeBlock` 同款横幅：
-   * 语言标签 + 换行开关 + 复制），再出**输出**段；输入段**不出**（上游 `cardBody = variant === 'code' ? null : bodyText`）。
-   * 程序文本取 `formatToolBody` 那一支（见 `codeBodyOf`）；取不到（参数坏形/无 `code`）才退回通用体。
-   */
-  const codeBody = (): unknown => {
-    const program = codeBodyOf(item.argsRaw)
-    if (program === null) return ioBody()
-    const outputText = item.output ?? ''
-    return html`<div class="chain-code-card">
-      <div class="chain-code-program" dangerouslySetInnerHTML=${{ __html: renderMd('```typescript\n' + program + '\n```') }}></div>
-      ${outputText !== ''
-        ? html`<div class="chain-io-card">
-            <div class="chain-io-section">
-              <span class="chain-io-label">输出</span>
-              <span class=${'chain-io-text' + (rowState === 'error' ? ' is-error' : '')}>${outputText}</span>
-            </div>
-          </div>`
-        : null}
-    </div>`
+  const ctx: ToolViewCtx = {
+    store,
+    cwd,
+    cards,
+    rowState,
+    autoReview,
+    askAnswerable,
+    skill,
+    ask,
+    terminal,
+    details,
+    todoDiff,
+    wrap,
+    ioBody,
+    subCallsBody,
   }
-
-  // ---- 代码卡（run_code：展开体是程序本身 + 输出）----
-  if (toolVariantOf(item.name) === 'code') return wrap(codeBody())
-
-  // ---- 交付文件（`present`）----
-  // 专属行：四态标记 + 可见状态词 + 声明路径，展开体只有结果正文。**先于通用头返回**（自带头部）。
-  // 子调用容器与其它行一样跟在后面（上游 `callRow` 里 toolview 之后就是 `{children}`）。
-  if (item.name === 'present') return html`<${PresentRow} item=${item} />${subCallsBody}`
-
-  // ---- 提问卡（ask_user_question）：只做问答记录；交互在 composer 上方 waterfall 弹窗 ----
-  // **有问答记录才出提问卡**；无记录（运行中 / 问答配对不上 / 结果坏形）落回通用「输入/输出」区。
-  // **只影响 ask 行**：其余卡的分派与渲染一字未动。
-  if (skill !== null) {
-    // 上游：`expandable = output !== null`；展开体是一张「说明」卡（`<pre>` 放结果文本）。
-    // 结果为空就没有可展开的东西 → 退回通用「输入/输出」区（上游此时整行不可展开、也不出按钮）。
-    return wrap(
-      skill.output === null
-        ? ioBody()
-        : html`<div class="chain-skill-card">
-            <div class="chain-skill-head">${SKILL_LABELS.instructions}</div>
-            <pre class="chain-skill-body" data-error=${skill.state === 'error' ? 'true' : undefined}>${skill.output}</pre>
-          </div>`
-    )
+  // 瀑布：第一个非 null 的注册项接管这一行（顺序见 `tool-views.ts`；最后一项是通用兜底）。
+  for (const view of TOOL_VIEWS) {
+    const body = view.render(item, ctx)
+    if (body !== null) return body
   }
-  if (ask !== null) {
-    // 补答入口也算「有内容」：即使问答记录取不到（问题清单坏形），只要该条仍可补答也要出卡片
-    const lateAnswerable = askAnswerable
-    return wrap(
-      ask.transcript === null && !lateAnswerable ? ioBody() : html`<${AskCardBody} card=${ask} store=${store} />`
-    )
-  }
-
-  // ---- 终端卡（bash / pwsh / shell）----
-  // ⚠️ **不是所有 shell 调用都画终端卡**：上游 `BashRow` 只覆盖"前台、已带 `description`、正常结算"
-  // 的那一类，另外三类**故意退回通用「输入 / 输出」卡**（判据见 `shellWantsGenericCard`）——
-  // 调用失败（沙箱拒绝之类）正是其中一类，那时上游把**命令原文放进「输入」段**、用错误色渲染「输出」段。
-  if (terminal !== null && !shellWantsGenericCard(item.name, item.argsRaw, item.output, item.subCalls, item.status)) {
-    return wrap(html`<${TerminalBlock} card=${terminal} store=${store} />`)
-  }
-
-  // ---- 差异卡（write / edit：文件改动）----
-  if (diff !== null) return wrap(html`<${DiffCard} card=${diff} store=${store} />`)
-
-  // ---- 图片卡（read_image：结果里带图片附件引用）----
-  // 卡只在「已结算成功 + 工具是 read_image + 内容全由 text/image 构成 + 有信封文本」时出（见 core/image-card）
-  if (image !== null) return wrap(html`<${ImageCard} card=${image} store=${store} />`)
-
-  // ---- 读文件卡（read：带行号的文件内容）----
-  if (read !== null) return wrap(html`<${ReadCard} card=${read} store=${store} />`)
-
-  // ---- 搜索卡（grep / glob）----
-  if (search !== null) return wrap(html`<${SearchCard} card=${search} store=${store} />`)
-
-  // ---- web 卡（web_fetch / web_search）----
-  if (web !== null) return wrap(html`<${WebCard} card=${web} />`)
-
-  // ---- todo 卡（todo_write：与上次清单的 diff）----
-  if (todoDiff !== null) return wrap(html`<${DetailsCardBody} model=${todoDiff.details} store=${store} />`)
-
-  // ---- 详情卡（goal / schedule / 子代理协调类）----
-  if (details !== null) return wrap(html`<${DetailsCardBody} model=${details} store=${store} />`)
-
-  // ---- Auto review 拒绝：通用卡 + 换过的输出（`bodyRaw` 不给：拒的是操作本身，参数没有可看的）----
-  if (autoReview !== null) return wrap(ioBody(autoReview.output))
-
-  // ---- 通用兜底：其余工具都用上面的 ioBody（「输入」调用参数 pretty JSON + 「输出」调用结果）----
-  return wrap(ioBody())
+  // 通用兜底恒非 null，正常到不了这里；保留返回以满足类型。
+  return null
 }
 
 // 这里**不做组件层跳渲**（曾经试过 `memo`）：卡片会读若干**会话级信号**（`sessionCwd`、

@@ -18,7 +18,7 @@ export interface ChatPrefsPatch {
   liveProcessDetail?: boolean
   /** 上游四档策略门：过程分组头的覆盖范围（`collapsed`/`history`/`none`） */
   stepGrouping?: 'collapsed' | 'history' | 'none'
-  /** 收起时机（上游 `ui-chat.collapseTiming`）：`next-input` = 最新交互段定稿后先不收 */
+  /** 收起时机（上游 0.2.1 新增的 `collapseTiming` 偏好）：`next-input` = 最新交互段定稿后先不收 */
   collapseTiming?: 'completion' | 'next-input'
 }
 
