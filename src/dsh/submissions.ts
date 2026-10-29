@@ -30,13 +30,22 @@ export type DshSubmitPlacement = 'transcript' | 'queued' | 'steering';
  */
 export type DshSubmitOutcome = 'admitted' | 'queued' | 'failed';
 
-/** 台账里一条待结算的提交（下发给页面的形状）。 */
+/** 台账里一条待结算的提交（下发给页面的形状；字段与上游 `PendingSubmission` 同构）。 */
 export interface DshPendingSubmission {
     rpcId: string;
     placement: DshSubmitPlacement;
+    /** 提交开始时的客户端墙钟毫秒（上游 `PendingSubmission.time`：`beginSubmission` 里 `Date.now()`）。 */
+    time: number;
     /** 正文（没带 `rpcId` 的旧回显只能靠它兜底认领，与上游"标识为准 + 文案兜底"的次序一致）。 */
     text: string;
+    /** 回显附件（与上游 `PendingSubmissionAttachment` 同构：图片带预览、文件带名字/字节）。 */
+    attachments: DshPendingAttachment[];
 }
+
+/** 回显附件：与上游 `PendingSubmissionAttachment` 同构（图片有预览、文件有名字与字节）。 */
+export type DshPendingAttachment =
+    | { kind: 'image'; name?: string; preview?: { mediaType: string; data: string } }
+    | { kind: 'file'; name: string; bytes?: number };
 
 /** 已退休的一条（下发给页面：页面据此收掉本地行）。 */
 export interface DshRetiredSubmission {
@@ -69,7 +78,7 @@ export interface SubmitLedger {
     /** 换会话：旧会话未结算的全部按 failed 退休，再切到新会话。 */
     useSession(sessionId: string | undefined): void;
     /** 提交那一刻登记（必须在提示词发出**之前**）。 */
-    begin(rpcId: string, placement: DshSubmitPlacement, text: string): void;
+    begin(rpcId: string, placement: DshSubmitPlacement, text: string, attachments?: readonly DshPendingAttachment[]): void;
     /** 日志里观察到这些 `rpcId`（durable 回显）→ 退休为 `admitted`。 */
     admitById(rpcIds: Iterable<string>): void;
     /**
@@ -127,8 +136,8 @@ export function createSubmitLedger(): SubmitLedger {
             }
             seenInInbox.clear();
         },
-        begin(rpcId: string, placement: DshSubmitPlacement, text: string): void {
-            pending.set(rpcId, { rpcId, placement, text });
+        begin(rpcId: string, placement: DshSubmitPlacement, text: string, attachments: readonly DshPendingAttachment[] = []): void {
+            pending.set(rpcId, { rpcId, placement, time: Date.now(), text, attachments: [...attachments] });
             seenInInbox.delete(rpcId);
         },
         admitById(rpcIds: Iterable<string>): void {

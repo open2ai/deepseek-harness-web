@@ -6,14 +6,12 @@ import type { ChatStore } from './types'
 import type { ComposerSlice } from './composer'
 import type { CatalogsSlice } from './catalogs'
 import type { MessagesSlice } from './messages'
-import type { QueueSlice } from './queue'
 
 export interface OutboxDeps {
   host: ChatHost
   composer: ComposerSlice
   catalogs: CatalogsSlice
   messages: MessagesSlice
-  queue: QueueSlice
 }
 
 export interface OutboxSlice {
@@ -23,7 +21,7 @@ export interface OutboxSlice {
 }
 
 export function createOutbox(deps: OutboxDeps): OutboxSlice {
-  const { host, composer, catalogs, messages, queue } = deps
+  const { host, composer, catalogs, messages } = deps
   const { text, attachments, images, refs, runSlash } = composer.store
   const { slashCatalog, requestSlashList } = catalogs.store
   const { processing } = messages.store
@@ -33,7 +31,8 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
    *
    * 两条路，按**回合是否在跑**分：
    * - 空闲：提交 + 等这一轮（现有行为），本地面板里立刻出行；
-   * - 忙：只提交，消息**不进对话流** —— 它在队列卡里挂一条「发送中」，等宿主队列帧按 `rpcId` 认领。
+   * - 忙：只提交，消息**不进对话流** —— 它的「发送中…」行由宿主台账（`submissions.pending`）推导，
+   *   页面不另登记（上游 `QueueDock.pendingQueue` 同款）。
    *   队列不属于任何回合，所以忙时既不 `addUser`、也不 `beginAssistant`、也不置 `processing`
    *   （那个「处理中」是别人的回合）。
    *
@@ -70,7 +69,7 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
       messages.store.showNotice(fileLabels().stillUploading)
       return
     }
-    const files = attach.map((a) => ({ receiptId: a.receiptId as string, name: a.name, path: a.path }))
+    const files = attach.map((a) => ({ receiptId: a.receiptId as string, name: a.name, path: a.path, ...(a.bytes === undefined ? {} : { bytes: a.bytes }) }))
     const refTokens = refs.value.map((r) => r.token)
     const prompt = [...refTokens, msg].filter(Boolean).join('\n\n') // 发给宿主：含引用 token
     const display = msg
@@ -85,29 +84,10 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     messages.store.promptError.value = undefined
 
     if (processing.value) {
-      // 忙时：消息**不进对话流**（队列不属于任何回合），只在队列卡挂一条「发送中」，
-      // 等宿主队列帧按 `rpcId` 认领。也不 bumpScroll —— 对话区这一瞬没有任何新内容。
+      // 忙时：消息**不进对话流**（队列不属于任何回合）。**「发送中…」行与插话气泡都由宿主台账
+      // （`submissions.pending`）推导** —— 页面不登记第二份行状态（上游 `QueueDock` 同款）。
       // 记下这次发出去的内容：提交失败时按提交标识还原到输入区（上游"草稿留在机器里"同口径）
       composer.rememberSentDraft(rpcId, { text: display, images: imgs, attachments: attach, refs: refSnap })
-      queue.addSending({
-        rpcId,
-        mode,
-        text: display,
-        attachments: [
-          // 图片带上本地预览：pending 插话气泡要立刻显示缩略图（权威条目取不到字节，只有本地回显有）
-          ...imgs.map((i) => ({
-            kind: 'image' as const,
-            ...(i.name ? { name: i.name } : {}),
-            preview: { mediaType: i.mediaType, data: i.data },
-          })),
-          ...attach.map((f) => ({
-            kind: 'file' as const,
-            name: f.name,
-            ...(f.bytes === undefined ? {} : { bytes: f.bytes }),
-          })),
-        ],
-        ...(refSnap.length > 0 ? { refs: refSnap } : {}),
-      })
       attachments.value = []
       images.value = []
       refs.value = []

@@ -9,14 +9,14 @@ import { html } from 'htm/preact'
 import { useState } from 'preact/hooks'
 import type { ChatStore } from '../core/store/chat'
 import type { QueueItemView } from '../core/protocol'
-import type { QueueSendingAttachment } from '../core/store/types'
+import type { PendingAttachment, PendingSubmission } from '../core/store/types'
 import { fileSizeText } from '../core/file-labels'
 import { maskCredentials } from '../core/secret-mask'
 import { SecretText } from './message/SecretText'
 
-type QueueAttachment = NonNullable<QueueItemView['attachments']>[number] | QueueSendingAttachment
+type QueueAttachment = NonNullable<QueueItemView['attachments']>[number] | PendingAttachment
 
-/** 附件摘要：图片只报「图片」，文件报名字与大小（排队阶段没有本地路径，也不显示缩略图）。 */
+/** 附件摘要：图片只报「图片」，文件报名字与大小（排队阶段没有本地路径）。 */
 function attachmentLabel(a: QueueAttachment): string {
   if (a.kind === 'image') {
     return a.name ? `图片 ${a.name}` : '图片'
@@ -27,7 +27,11 @@ function attachmentLabel(a: QueueAttachment): string {
 export function QueueCard({ store }: { store: ChatStore }) {
   // 只列排队项：插话不在这张卡里（它在对话区末尾，见文件头）
   const items = store.queueItems.value.filter((i) => i.placement === 'queued')
-  const sending = store.queueSending.value.filter((s) => s.mode === 'queue')
+  /**
+   * 「发送中…」行**只从宿主台账推导**（上游 `QueueDock` 的 `pendingQueue` 同款：placement='queued' 且
+   * 收件箱还没接下它）。页面不持第二份行状态 —— 否则就要靠"按 rpcId 认领"来退休，漏一帧就永远转圈。
+   */
+  const sending = store.pendingSubmissions.value.filter((s) => s.placement === 'queued')
   const editing = store.queueEditing.value
   const busyId = store.queueBusy.value
   const running = store.turnRunning.value
@@ -101,21 +105,28 @@ export function QueueCard({ store }: { store: ChatStore }) {
               </li>`
             })}
             ${sending.map(
-              (s) => html`<li class="queue-item is-sending" key=${s.rpcId}>
+              (s: PendingSubmission) => html`<li class="queue-item is-sending" key=${s.rpcId}>
                 <span class="codicon codicon-list-ordered queue-glyph" aria-hidden="true"></span>
                 <span class="queue-main">
                   ${s.attachments.length > 0
-                    ? html`<span class="queue-atts">${s.attachments.map(
-                        (a, i) => html`<span class="queue-att" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`}>${attachmentLabel(a)}</span>`
+                    ? html`<span class="queue-atts">${s.attachments.map((a, i) =>
+                        a.kind === 'image' && a.preview !== undefined
+                          ? html`<img class="queue-thumb" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`}
+                              src=${`data:${a.preview.mediaType};base64,${a.preview.data}`}
+                              alt="排队消息图片" title=${a.name ?? ''} />`
+                          : html`<span class="queue-att" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`}>${attachmentLabel(a)}</span>`
                       )}</span>`
                     : null}
                   <span class="queue-text" title=${maskCredentials(s.text)}><${SecretText} text=${s.text} /></span>
                 </span>
                 <span class="queue-actions">
-                  ${s.failed === true
-                    ? html`<span class="queue-status is-error" role="status">${s.error ?? '发送失败'}</span>`
-                    : html`<span class="codicon codicon-loading codicon-modifier-spin queue-spin" aria-hidden="true"></span>
-                        <span class="queue-status" role="status">发送中…</span>`}
+                  <span class="queue-status" role="status">发送中…</span>
+                  <button type="button" class="queue-act" aria-label="编辑排队消息" title="发送中…" disabled>
+                    <span class="codicon codicon-edit"></span></button>
+                  <button type="button" class="queue-act" aria-label="删除排队消息" title="发送中…" disabled>
+                    <span class="codicon codicon-trash"></span></button>
+                  <button type="button" class="queue-act" aria-label="插话发送" title="发送中…" disabled>
+                    <span class="codicon codicon-send"></span></button>
                 </span>
               </li>`
             )}

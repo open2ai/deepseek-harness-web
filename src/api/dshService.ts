@@ -453,6 +453,14 @@ export class DshService {
     private todosKey = '';
     /** 合并窗口的定时器（见 emitRows）：非空 = 已排队，不重复安排。 */
     private rowsTimer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * 本次提交后**第一条内容**要立刻下发（`beginTurn` 置位、`ingestEvents` 消费一次）。
+     *
+     * 上游同进程：提交后首条内容一到就渲染，没有节流这一拍。插件的事件帧是整表下发，
+     * 若首条内容也排进合并窗口（24ms~1000ms，随窗口大小/载荷增长），观感就是「发了消息半天没动静」
+     * —— 2026-10-29 真机：同一会话网页端及时、插件端迟一拍。所以只给这一条开豁免，稳态流式仍按帧节流。
+     */
+    private submitFirstContentPending = false;
     /** 上一次构建的耗时（毫秒）：节流的下限取它，慢会话不会把自己堆死。 */
     private lastBuildMs = 0;
     /**
@@ -2093,9 +2101,21 @@ export class DshService {
      */
     private ingestEvents(incoming: readonly DshStreamEvent[]): void {
         this.appendEvents(incoming);
-        // 回合结束**立刻**下发：末尾那几个事件正是答案本身（正文与终止原因），
-        // 排在合并窗口后面就是"跑完了但正文还没上屏"（真机现象）。
-        if (incoming.some((e) => e.type === 'turn/end')) {
+        // 回合**开始/结束**立刻下发，不等合并节流（见 emitRows 的预算）：
+        //   · 结束：末尾那几个事件正是答案本身（正文与终止原因），排在合并窗口后面就是"跑完了但正文还没上屏"；
+        //   · 开始：这一批带 `turn/start`，「发送后」的进行中指示（`turnActive`）就靠它上屏 ——
+        //     上游在进程内提交即置运行态，插件这边若等一次节流（24ms~1000ms，随窗口大小/载荷增长），
+        //     观感就是「按了发送没反应」（真机 2026-10-29：同一会话网页端即时、插件端迟一拍）。
+        //     首帧只多付一次构建，值得。
+        if (incoming.some((e) => e.type === 'turn/end' || e.type === 'turn/start')) {
+            this.flushRows();
+            return;
+        }
+        // 本次提交后的**首条内容**同样不等节流：上游在进程内「内容一到就渲染」，
+        // 插件这边若也排队，观感就是「发了消息半天没动静」（见 submitFirstContentPending）。
+        if (this.submitFirstContentPending
+            && incoming.some((e) => e.type === 'assistant-stream' || e.type === 'assistant/message')) {
+            this.submitFirstContentPending = false;
             this.flushRows();
             return;
         }
@@ -2438,6 +2458,8 @@ export class DshService {
         this.checkpointUses = 0;
         // 载荷读数同理：新会话第一次投递不该按上一个会话的十几 MB 去等
         this.lastPayloadMb = 0;
+        // 「提交后首条内容豁免」属于上一个会话的提交：换会话时丢掉
+        this.submitFirstContentPending = false;
         // 回合安全网轮询跟着会话走：上一个会话的表不该在新会话上继续跑
         this.stopTurnWatch();
     }
@@ -2451,6 +2473,8 @@ export class DshService {
         this.turnRunning = true;
         // 记账登记（见 noteTurnSettled）：一次提交对应一次结算
         this.ownPendingTurns += 1;
+        // 提交后首条内容不等合并节流（见 submitFirstContentPending）
+        this.submitFirstContentPending = true;
         // 认为自己在跑 → 开安全网轮询（见 startTurnWatch）：别处停掉时按钮要能自己复位
         this.startTurnWatch();
     }
@@ -2462,6 +2486,7 @@ export class DshService {
     endTurn(): void {
         this.turnRunning = false;
         this.ownPendingTurns = Math.max(0, this.ownPendingTurns - 1);
+        this.submitFirstContentPending = false;
         this.stopTurnWatch();
     }
 

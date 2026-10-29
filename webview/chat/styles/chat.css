@@ -1459,6 +1459,8 @@
   .queue-spin { font-size: 13px; color: var(--vscode-descriptionForeground, #999); }
   .queue-status { flex: none; font-size: 11.5px; color: var(--vscode-descriptionForeground, #999); white-space: nowrap; }
   .queue-status.is-error { color: var(--vscode-errorForeground, #f48771); }
+  /* 「发送中…」行里的图片缩略图（上游 PendingSubmission 的 previewUrl 缩略图同款） */
+  .queue-thumb { flex: none; width: 16px; height: 16px; border-radius: 4px; object-fit: cover; }
   /* 用量 / 用时 图标+弹窗 */
   .turn-meta { position: relative; display: flex; gap: 6px; margin-top: 3px; }
   .tm-btn {

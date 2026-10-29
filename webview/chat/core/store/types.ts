@@ -346,38 +346,38 @@ export type ChatRow =
   | { kind: 'trigger'; key: number; source: unknown; content: unknown[]; time: string }
   | { kind: 'notice'; key: number; text: string; command?: string; tone?: 'error' | 'ok' }
 
-/** 本地「发送中」条目里的附件：比权威条目多一份**本地图片预览**（内联 base64，只有本地回显拿得到）。 */
-export interface QueueSendingAttachment {
+/** 本地提交回显的附件（上游 `PendingSubmissionAttachment` 同构：图片带预览、文件带名字/字节）。 */
+export interface PendingAttachment {
   kind: 'image' | 'file'
   name?: string
   bytes?: number
-  /** 图片的内联预览（仅本地回显；权威条目只有引用与名字，取不到字节） */
+  /** 图片的内联预览（上游是客户端自持的 blob URL；插件由宿主把提交时的 base64 带回，等价物） */
   preview?: { mediaType: string; data: string }
 }
 
-/** 对话区末尾的 pending 插话气泡：还没进日志的那条插话（本地回显或服务端收件箱里的 steering 项）。 */
+/** 对话区末尾的 pending 插话气泡：还没进日志的那条插话（服务端收件箱里的 steering 项 / 台账里的 pending）。 */
 export interface PendingSteering {
-  /** 稳定 key：权威条目用条目 id，本地回显用 rpcId（两类不会同时存在同一条） */
+  /** 稳定 key：权威条目用条目 id，台账回显用 rpcId（两类不会同时存在同一条） */
   key: string
   text: string
-  attachments: QueueSendingAttachment[]
+  attachments: PendingAttachment[]
   /** 引用贴片快照（见 `RefSnap`）：本地回显先把贴片补齐，权威帧到达后由正文解析接手 */
   refs?: RefSnap[]
 }
 
-/** 本地「发送中」的排队条目：忙时提交后立刻显示，宿主队列帧按 `rpcId` 认领后消失。 */
-export interface QueueSending {
-  /** 提交标识（本面板 mint）：与队列帧里的 `rpcId` 配对 */
+/**
+ * 一条**还没落账**的本地提交（宿主台账 `pendingSubmissions` 的页面镜像）。
+ *
+ * 与上游 `PendingSubmission` 逐字段同构：`placement` + `time`（提交时墙钟）+ `text` + `attachments`。
+ * 队列卡的「发送中…」行与插话气泡都由它推导 —— 页面**不持第二份行状态**、也不做「按 rpcId 认领」。
+ */
+export interface PendingSubmission {
   rpcId: string
-  /** 投递方式：queue = 排队发送；steer = 插话发送 */
-  mode: 'queue' | 'steer'
+  placement: 'transcript' | 'queued' | 'steering'
+  /** 提交开始时的客户端墙钟毫秒（上游 `PendingSubmission.time`，`beginSubmission` 里 `Date.now()`） */
+  time: number
   text: string
-  attachments: QueueSendingAttachment[]
-  /** 引用贴片快照（见 `RefSnap`） */
-  refs?: RefSnap[]
-  /** 提交失败（宿主回的 `chatError{scope:'queue'}`）：留在卡里作历史，但不再算「在等」 */
-  failed?: boolean
-  error?: string
+  attachments: PendingAttachment[]
 }
 
 /** 队列卡里的行内编辑态（纯页面态，不发给宿主）。 */
@@ -525,6 +525,13 @@ export interface ChatStore {
    * 退休由 `applySubmissions` 单点负责（见 `08` §13.3）。
    */
   pendingEchoes: Signal<readonly PendingEcho[]>
+  /**
+   * 宿主台账里还没结算的提交（`submissions` 帧的 `pending` 镜像，与上游 `SessionSnapshot.pendingSubmissions` 同构）。
+   *
+   * 队列卡的「发送中…」行**只**从它推导（上游 `QueueDock` 的 `pendingQueue` 同款）；
+   * 页面不另持一份行状态，因此不会出现"本地那条没人认领"的残留。
+   */
+  pendingSubmissions: Signal<readonly PendingSubmission[]>
   /** **渲染用的行表（推导）**：耐久行按 `rpcId` 去重 ∪ 未进日志的回显；渲染只读它，不读 `messages`。 */
   visibleRows: Signal<readonly ChatRow[]>
   /**
@@ -612,8 +619,6 @@ export interface ChatStore {
   todos: Signal<TodoItem[]>
   /** 排队消息（宿主下发的整表；队列卡数据源）。**不是行** —— 队列不属于任何回合，空数组 = 卡片不渲染 */
   queueItems: Signal<QueueItemView[]>
-  /** 本地「发送中」的排队条目（忙时提交后立刻显示；宿主队列帧按 `rpcId` 认领即消失） */
-  queueSending: Signal<QueueSending[]>
   /** 正在行内编辑的排队项；null = 没有在编辑 */
   queueEditing: Signal<QueueEditing | null>
   /** 正在提交变更的条目标识：该行三个按钮禁用；null = 空闲 */

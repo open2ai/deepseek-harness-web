@@ -10,7 +10,6 @@ All notable changes to the "deepseek-harness-web" extension will be documented i
 
 - 会话区渲染修改；回答正文图片显示问题修复
 
-
 ## [0.1.19] — 2026-10-19
 
 ### 变更

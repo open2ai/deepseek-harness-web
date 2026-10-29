@@ -231,9 +231,8 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
           break
         }
         if (m.scope === 'queue') {
-          queue.failSending(m.rpcId, m.message ?? '发送失败')
-          // 错误原因走输入区那条错误条（与空闲提交同一格）；队列卡自己只留「发送失败」的状态词。
-          // 同时把这次的内容放回输入区（上游：草稿留在机器里，用户直接重发）。
+          // 错误原因走输入区那条错误条（与空闲提交同一格）；把这次的内容放回输入区
+          //（上游：草稿留在机器里，用户直接重发）。「发送中…」行由台账退休自动消失。
           messages.store.promptError.value = { message: m.message ?? '发送失败', ...(m.code === undefined ? {} : { code: m.code }) }
           composer.restoreSentDraft(m.rpcId)
           break
@@ -242,20 +241,24 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         composer.restoreSentDraft(m.rpcId)
         messages.failSubmission(m.rpcId, m.message ?? '发送失败', m.code)
         break
-      // 排队消息（整表替换）：队列不是行，它自持在队列切片里（见 store/queue）
+      // 排队消息（整表替换）：队列不是行，它自持在队列切片里（见 store/queue）。
+      // 「发送中…」行由台账 pending 推导（messages.pendingSubmissions），本帧只负责权威排队项。
       case 'queue':
         queue.applyQueue(m.sessionId, (m.items ?? []) as QueueItemView[])
         break
       // 提交台账（整表 pending + 增量 retired）：页面据此撑住"提交→开跑"那一拍的「处理中」、
-      // 收掉 `queued` 的本地回显、并把已退休未入档的标成未提交成功（见 messages.applySubmissions）
+      // 收掉 `queued` 的本地回显、并把已退休未入档的标成未提交成功（见 messages.applySubmissions）。
+      // 队列卡的「发送中…」行读的就是这份 pending —— 台账一退休，行自然消失（页面不再自己认领）。
       case 'submissions':
         messages.applySubmissions(m.pending ?? [], m.retired ?? [])
-        // 台账退休 → 队列卡的「发送中」也一起退休：它原先只靠队列帧 / 用户行回显认领，
-        // 两条都落空时那张卡会一直转圈（宿主台账早就判完了，页面不该再自推一遍）。
-        queue.settleSending((m.retired ?? []).map((r) => r.rpcId))
+        break
+      // 队列动作已结算（宿主 ack）：无条件清该行忙碌态 —— 上游在动作 Promise 的 finally 里清，
+      // 不依赖后续队列帧（帧慢一拍就转圈，2026-10-29 真机）
+      case 'queueActionDone':
+        queue.clearBusy(m.itemId)
         break
       case 'queueActionFailed':
-        queue.showActionFailure(m.op, m.code)
+        queue.showActionFailure(m.op)
         break
       // 上下文占用（发送按钮左侧的环）：单独一条轻帧（投影值小，不必随 chatInfo 重推整串）
       case 'context':

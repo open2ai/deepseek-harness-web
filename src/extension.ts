@@ -12,6 +12,7 @@ import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
+import type { DshPendingAttachment } from './dsh/submissions';
 import {
     applyNativeTitlebarContext,
     TITLEBAR_MODE,
@@ -1147,14 +1148,30 @@ function setupChatWebview(
                     // **宿主自己**的在跑事实 + 投递模式推导 —— 页面那份 `processing` 是推导值，竞态下不可信
                     //（真机 2026-10-06：页面以为空闲、宿主这边还在跑 → 这次提交进了收件箱，回显永远认领不到）。
                     if (submitId !== undefined) {
+                        // 回显附件按 prompt 顺序：先图片（带提交时的 base64 预览，上游是客户端 blob URL 的等价物）、
+                        // 再文件（名字/字节，上游 `PendingSubmissionAttachment` 同构）。
+                        const echoImages = (msg.images ?? []) as Array<{ mediaType: string; data: string; name?: string }>;
+                        const echoFiles = (msg.files ?? []) as Array<{ receiptId: string; name: string; bytes?: number }>;
+                        const echoAttachments: DshPendingAttachment[] = [
+                            ...echoImages.map((img) => ({
+                                kind: 'image' as const,
+                                ...(img.name === undefined ? {} : { name: img.name }),
+                                preview: { mediaType: img.mediaType, data: img.data },
+                            })),
+                            ...echoFiles.map((f) => ({
+                                kind: 'file' as const,
+                                name: f.name,
+                                ...(f.bytes === undefined ? {} : { bytes: f.bytes }),
+                            })),
+                        ];
                         submitLedger.useSession(dsh.getSessionId());
-                        submitLedger.begin(submitId, placementOf(dsh.isTurnActive(), mode), typeof msg.text === 'string' ? msg.text : '');
+                        submitLedger.begin(submitId, placementOf(dsh.isTurnActive(), mode), typeof msg.text === 'string' ? msg.text : '', echoAttachments);
                         pushSubmissions(dsh.getSessionId());
                     }
                     // 诊断：与 buildRows 的 `user/message … rpcId=…` 对照，能直接断定标识配不配得上
                     console.warn(`[dsh-send] rpcId=${submitId ?? '(页面未给)'} mode=${mode}`);
-                    // 忙时提交：**只提交、不等这一轮** —— 正在跑的那一轮由常驻订阅渲染，
-                    // 这条消息的去向由队列流的投影呈现（页面本地只留一条「发送中」，等权威帧按 rpcId 认领）。
+                    // 忙时提交：**只提交、不等这一轮** —— 正在跑的那一轮由常驻订阅渲染；
+                    // 这条消息的去向由队列/台账帧呈现（页面把台账 pending 当「发送中…」行，上游同款）。
                     // 不走下面的 askStreaming：它是「提交 + 等本轮结束」，忙时用会把这次提交绑到**别人的回合**上。
                     if (dsh.isTurnActive()) {
                         try {
@@ -1227,11 +1244,25 @@ function setupChatWebview(
                     await dsh.updateQueue(msg.itemId, action);
                 } catch (e) {
                     const code = e instanceof DshRpcError ? e.code : undefined;
-                    // 两种竞态都表示「这条已经不在队列里了」：刷新即可，不是错误
-                    if (code !== 'session/steer-unavailable' && code !== 'session/queue-item-not-found') {
+                    // **编辑 / 删除失败一律提示**（对齐上游队列卡：这两类失败上游照常抛错 → 卡片弹
+                    // 「…这条消息可能已经开始发送」）。原先静默刷新会让用户以为点勾把消息发出去了
+                    //（2026-10-29 真机：编辑后点勾，消息"自己发送"了，界面却没有任何解释）。
+                    //
+                    // **插话的两种竞态是收敛，不提示**：上游队列服务的动作接口对 steer +
+                    // `session/steer-unavailable` / `session/queue-item-not-found` **静默返回**，
+                    // 整条队列的插话动作同样直接 `return`（上游测试："pre-admission races as
+                    // converged Queue delivery"）。整队插话（Ctrl/Cmd+Enter）时回合结束是常态，
+                    // 按失败弹会连弹一串误报。
+                    const steerRace =
+                        op === 'steer'
+                        && (code === 'session/steer-unavailable' || code === 'session/queue-item-not-found');
+                    if (!steerRace) {
                         post({ type: 'queueActionFailed', op, code });
                     }
                 } finally {
+                    // 动作已结算：页面据此**无条件**清该行忙碌态（上游在动作 Promise 的 finally 里
+                    // `setBusy(null)`；插件原先要等下一帧队列帧，帧慢一拍就一直转圈）。
+                    post({ type: 'queueActionDone', itemId: msg.itemId });
                     // 成败都补一帧权威整表：成功时界面立刻反映（不等队列增量），竞态下这正是「刷新」那一步
                     dsh.pushQueue();
                 }

@@ -152,18 +152,38 @@ export type HostToViewMessage =
   // 与「行」不同源：队列只在服务端的收件箱里、不进日志，它来自队列流的投影。
   | { type: 'queue'; sessionId?: string; items?: QueueItemView[] }
   // **提交台账**（宿主侧每次提交的本地回显 + 它的退休时刻，与上游 `SessionSnapshot.pendingSubmissions` 同构）：
-  //   · `pending` —— **整表**：还在等结算的提交（位置由宿主按"当时在不在跑 + 投递模式"推导）；
+  //   · `pending` —— **整表**：还在等结算的提交（位置由宿主按"当时在不在跑 + 投递模式"推导；字段与上游
+  //     `PendingSubmission` 同构：`placement` + `time`（提交墙钟）+ `text` + `attachments`）；
   //   · `retired` —— **增量**：自上一帧以来退休的（`admitted` 已入档 / `queued` 队列接下 / `failed` 失败或被放弃）。
-  // 页面据此撑住"提交之后、回合真正开跑"那一拍的「处理中」，并收掉 `queued` 的本地回显（交给队列卡）。
+  // 页面据此撑住"提交之后、回合真正开跑"那一拍的「处理中」，并由它推导队列卡的「发送中…」行与插话气泡
+  // —— 页面不持第二份本地行状态（上游 `QueueDock.pendingQueue` 同款）。
   | {
       type: 'submissions'
       sessionId?: string
-      pending?: Array<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>
+      pending?: Array<{
+        rpcId: string
+        placement: 'transcript' | 'queued' | 'steering'
+        /** 提交开始时的客户端墙钟毫秒（上游 `PendingSubmission.time`） */
+        time: number
+        text: string
+        attachments: Array<{
+          kind: 'image' | 'file'
+          name?: string
+          bytes?: number
+          /** 图片的内联预览（上游是客户端自持的 blob URL；插件由宿主把提交时的 base64 带回） */
+          preview?: { mediaType: string; data: string }
+        }>
+      }>
       retired?: Array<{ rpcId: string; outcome: 'admitted' | 'queued' | 'failed' }>
     }
   // 队列动作失败（编辑 / 删除 / 转插话）：宿主只给动作与错误码，文案由页面按动作选。
-  // 两种竞态（条目已被取走 / 回合已不在跑）宿主**不发**这一帧 —— 那表示「刷新即可」，不是错误。
+  // **所有失败都发**（含"条目已被取走 / 回合已不在跑"两种竞态）：上游对它们同样弹提示
+  // （「编辑失败：这条消息可能已经开始发送。」）。静默刷新会让用户以为"点了勾就把消息发出去了"
+  // —— 实际是那一刻回合结束、队列被服务端取用（2026-10-29 真机）。
   | { type: 'queueActionFailed'; op: 'edit' | 'remove' | 'steer'; code?: string }
+  // 队列动作**已结算**（成功 / 失败 / 竞态都发）：页面无条件清该行的忙碌态。
+  // 上游在动作 Promise 的 finally 里 `setBusy(null)`；插件原先只在"收到队列帧"时清 —— 帧慢一拍就转圈。
+  | { type: 'queueActionDone'; itemId?: string }
   // 上下文占用（发送按钮左侧的环）：两条投影各自可能缺失；都缺 = 该 dsh 没这个能力 → 页面不渲染那个环
   | { type: 'context'; sessionId?: string; pressure?: ContextPressure; breakdown?: ContextBreakdown }
   // 会话投影**整表**（会话统计 / token 用量 / plan / goal / 权限…）：来自宿主的 `session/control` 订阅，
@@ -311,7 +331,7 @@ export type ViewToHostMessage =
   // rpcId：本面板 mint 的提交标识，宿主拿它当 session/prompt 的 requestId；
   // 服务端回显 user/message 时带回同一值，页面据此认领本地已出的一行（避免重复出行）
   // mode：投递方式 —— 空闲发送恒 queue；忙时由键位决定（queue = 排队，steer = 插话，投到当前回合的下一步）
-  | { type: 'chatSend'; text: string; images?: ImageAttachment[]; files?: Array<{ receiptId: string; name: string; path?: string }>; rpcId?: string; mode?: 'queue' | 'steer' }
+  | { type: 'chatSend'; text: string; images?: ImageAttachment[]; files?: Array<{ receiptId: string; name: string; path?: string; bytes?: number }>; rpcId?: string; mode?: 'queue' | 'steer' }
   // 排队项变更（编辑 / 删除 / 转插话）：宿主转成服务端的队列变更调用，结果以队列帧为准（非乐观）。
   // edit 只带**文本**：含图/文件的条目在卡片上已被禁用编辑。
   | { type: 'queueUpdate'; itemId: string; action: { kind: 'edit'; text: string } | { kind: 'remove' } | { kind: 'steer' } }

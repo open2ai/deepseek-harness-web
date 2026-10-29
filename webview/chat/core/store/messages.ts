@@ -7,7 +7,7 @@ import { isVisibleChatRow } from '../chat-visibility'
 import type { ImageAttachment, AttachmentRef } from '../protocol'
 import { formatMsgClock } from '../format'
 import type { SubagentFacts } from '../stop-control'
-import type { ChatRow, ChatStore, PendingEcho, RefSnap } from './types'
+import type { ChatRow, ChatStore, PendingEcho, PendingSubmission, RefSnap } from './types'
 import type { RenderSeatKeys } from '../nodes/render-plan'
 
 
@@ -22,6 +22,7 @@ export interface MessagesSlice {
   store: Pick<
     ChatStore,
     | 'pendingEchoes'
+    | 'pendingSubmissions'
     | 'visibleRows'
     | 'pendingTranscriptInput'
     | 'messages'
@@ -61,7 +62,7 @@ export interface MessagesSlice {
    * 于是「处理中」不再有一条"没人回收的本地乐观行"的腿（真机 2026-10-06 的卡死来路）。
    */
   applySubmissions(
-    pending: ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>,
+    pending: readonly PendingSubmission[],
     retired: ReadonlyArray<{ rpcId: string; outcome: string }>
   ): void
   /** 开启（或复用）当前进行中的 assistant 行。 */
@@ -155,8 +156,17 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * 在聊天区**一条行都不占**，那就该是欢迎页。同理受益的还有「只有 system-prompt /
    * 普通 context 注入」这类空会话。
    */
+  /**
+   * **已提交过**（上游 `SessionSnapshot.promptAttempted` 的同义物）：提交那一刻置真，换会话 / reset 才复位。
+   *
+   * 上游 `conversationPhase` 拿它把壳层从 `blank` 切到 `engaging`（`contract/snapshot.ts:26-33`），
+   * 于是提交当帧欢迎页就让位、对话区立刻可以画出 `pendingSubmissions` 的回显。只看耐久行的话，
+   * 空白会话的首条消息要等服务端 `user/message` 回来（ensureRunning / 建会话 / 首帧窗口 / prompt
+   * 往返，几秒）才有反应 —— 真机 2026-10-29：发出去几秒后对话区才显示。
+   */
+  const submitted = signal(false)
   const view = computed<'welcome' | 'chat'>(() =>
-    messages.value.some((row) => isVisibleChatRow(row)) ? 'chat' : 'welcome'
+    submitted.value || messages.value.some((row) => isVisibleChatRow(row)) ? 'chat' : 'welcome'
   )
   const processing = signal(false)
   /**
@@ -280,7 +290,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * `transcript` 在"提交之后、回合真正开跑"那一拍撑住「处理中」（上游 `awaitingFirstTurn` 的等价物）。
    * 于是「处理中」不再有一条"没人回收的本地乐观行"的腿（真机 2026-10-06 的卡死来路）。
    */
-  const pendingSubmissions = signal<ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>>([])
+  const pendingSubmissions = signal<readonly PendingSubmission[]>([])
   /**
    * 台账里还有**待结算的普通直发**（`placement === 'transcript'`）。
    *
@@ -444,6 +454,8 @@ export function createMessages(host: ChatHost): MessagesSlice {
     // **有提交标识 = 刚发出去、还没进日志那条**：只登记会话级回显，**不进行表**
     //（与上游同口径：回显是会话状态，行表里只有日志里的东西）。
     if (rpcId !== undefined && rpcId !== '') {
+      // 提交当帧就离开欢迎页（上游 `beginSubmission` 同步置 `promptAttempted`，见 `view` 的说明）
+      submitted.value = true
       pendingEchoes.value = [...pendingEchoes.value, { rpcId, placement, text: textMsg, time: time ?? Date.now(), images: imgs, ...(imageRefs !== undefined && imageRefs.length > 0 ? { imageRefs } : {}), ...(files !== undefined && files.length > 0 ? { files } : {}), ...(refs !== undefined ? { refs } : {}) }]
       return
     }
@@ -490,6 +502,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
         retiredSubmissions.value = []
         // 会话级回显同理（上游把回显挂在**会话**上，换会话天然不残留）
         pendingEchoes.value = []
+        submitted.value = false
         echoKeys.clear()
         // 子会话事实也属于上一个会话：先清掉，等宿主把新的那一份随行帧发来（否则会拿旧会话的
         // "这是子会话"去判新会话的主钮）
@@ -593,7 +606,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
    * 会话切换 / reset 时整表清空（回显只属于当前会话）。
    */
   function applySubmissions(
-    pending: ReadonlyArray<{ rpcId: string; placement: 'transcript' | 'queued' | 'steering'; text: string }>,
+    pending: readonly PendingSubmission[],
     retired: ReadonlyArray<{ rpcId: string; outcome: string }>
   ): void {
     pendingSubmissions.value = pending
@@ -697,6 +710,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     // 换会话/重连：上一条提交失败的错误条不属于这个会话，必须清（否则一直挂在输入区上方）
     promptError.value = undefined
     runAnchorMs.value = undefined
+    // 「已提交」闩随会话走：换会话 / 重连又该回到欢迎页
+    submitted.value = false
     pendingSubmissions.value = []
     retiredSubmissions.value = []
     subagentFacts.value = undefined
@@ -725,6 +740,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
       scrollPend,
       seatPlan,
       pendingEchoes,
+      pendingSubmissions,
       visibleRows,
       pendingTranscriptInput,
       historyHasMore,

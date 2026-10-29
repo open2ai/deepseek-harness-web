@@ -45,12 +45,12 @@ export function createChatStore(host: ChatHost): ChatStore {
   const question = createQuestion(host)
   const attachments = createAttachments(host)
   // 队列卡：它不是行（见 store/queue 文件头）。失败提示借用消息切片的通知行（与 selectors 同一注入方式）
-  const queue = createQueue(host, (text) => messages.store.showNotice(text))
+  const queue = createQueue(host, (text) => messages.store.showNotice(text), () => messages.store.pendingSubmissions.value)
   // 显示偏好：全局量，故不参与下面的 reset（见 store/prefs 文件头）
   const prefs = createPrefs()
 
   // 3. 发送动作（跨输入区 + 目录 + 消息域 + 队列卡，依赖注入）
-  const outbox = createOutbox({ host, composer, catalogs, messages, queue })
+  const outbox = createOutbox({ host, composer, catalogs, messages })
   // 消息反馈：与其它切片无 import 边，装配层直接持有
   const feedback = createFeedback(host)
 
@@ -86,6 +86,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     // 座位计划（渲染粒度对齐上游 render entry；逐座位改造的输入，只读）
     seatPlan: messages.store.seatPlan,
     pendingEchoes: messages.store.pendingEchoes,
+    pendingSubmissions: messages.store.pendingSubmissions,
     visibleRows: messages.store.visibleRows,
     pendingTranscriptInput: messages.store.pendingTranscriptInput,
     historyHasMore: messages.store.historyHasMore,
@@ -195,7 +196,6 @@ export function createChatStore(host: ChatHost): ChatStore {
     todos: status.store.todos,
     // 排队消息（输入框上方的队列卡）：与清单同级，但**不是行**
     queueItems: queue.store.queueItems,
-    queueSending: queue.store.queueSending,
     queueEditing: queue.store.queueEditing,
     queueBusy: queue.store.queueBusy,
     // 对话区末尾的 pending 插话气泡（队列卡只列排队项；插话在对话区等被取用）
