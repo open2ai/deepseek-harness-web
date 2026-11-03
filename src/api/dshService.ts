@@ -136,6 +136,17 @@ const HOST_CONFLICT_GATE: boolean = false;
 const PAYLOAD_MS_PER_MB = 6;
 
 /**
+ * 语音转写的 **HTTP（插件侧）超时** —— 这不是上游的 API 设置项，是本插件的传输层兜底。
+ *
+ * 上游事实（rc.4）：`speech/transcribe` 没有超时参数；服务端在 `speech-to-text` 的 provider 配置里
+ * 用 `inferenceTimeoutMs`（默认 **120 000**）自己掐推理，客户端只传 `AbortSignal` 做取消。
+ * 插件走的是「HTTP POST /api/speech/transcribe」，通用 RPC 超时只有 15 s（`RPC_TIMEOUT_MS`），
+ * 首次加载模型很容易被误杀，所以单给这一条放宽到 **150 s = 上游推理预算 120 s + 30 s 余量**：
+ * 让服务端自己的 `SPEECH_INFERENCE_TIMEOUT` 先返回（用户能看到真正原因），而不是插件先断开。
+ */
+export const SPEECH_TRANSCRIBE_TIMEOUT_MS = 150_000;
+
+/**
  * 「这一轮还在跑吗」安全网轮询的周期（见 `startTurnWatch`）。
  *
  * 只在插件认为**有轮在跑**时开表，所以正常情况下它一次都不跑（权威投影帧先到就先停了）。
@@ -293,6 +304,40 @@ export class DshNoWorkspaceError extends Error {
         super('请先选择或创建工作区，再开启会话');
         this.name = 'DshNoWorkspaceError';
     }
+}
+
+/**
+ * dsh **实验性语音识别**（`speech` Remote，由 voice-input-bundle 提供）的目录。
+ *
+ * 只取插件用得到的字段：provider 就绪状态、默认选择、录音上限。字段与上游
+ * `SpeechCatalog` 同形（见 `api-speech-to-text/src/types.ts`）。
+ */
+export interface DshSpeechCatalog {
+    providers?: Array<{
+        id?: string;
+        name?: string;
+        location?: string;
+        languages?: readonly string[];
+        preparation?: {
+            phase?: string;
+            /** 准备失败时的安全文案（上游 `SpeechPreparationState.failed.message`）。 */
+            message?: string;
+            completedBytes?: number;
+            totalBytes?: number;
+        };
+    }>;
+    selection?: { providerId?: string; language?: string };
+    /** 单次请求的解码后 WAV 字节上限（服务端校验）。 */
+    maxAudioBytes?: number;
+    /** 单次录音时长上限（秒）。 */
+    maxDurationSeconds?: number;
+}
+
+/** 一次识别的结果（上游 `Transcript`：文字 + 音频/推理耗时）。 */
+export interface DshTranscript {
+    text?: string;
+    audioSeconds?: number;
+    inferenceSeconds?: number;
 }
 
 
@@ -610,8 +655,8 @@ export class DshService {
      * 通用通道：可调任意 DSH API（session / goal / subagent / workspace / llm / host ...）。
      * 新增功能只需调用 call(method, payload)，无需改动本层。
      */
-    call<T = unknown>(method: string, payload: unknown = {}): Promise<T> {
-        return rpcCall<T>(method, payload);
+    call<T = unknown>(method: string, payload: unknown = {}, timeoutMs?: number): Promise<T> {
+        return rpcCall<T>(method, payload, timeoutMs);
     }
 
     // ---------- 进程 ----------
@@ -3267,6 +3312,59 @@ export class DshService {
         } catch {
             // 服务未就绪：控制流随后会推变化
         }
+    }
+
+    /**
+     * dsh **实验性语音识别**的目录（`speech.catalog`）：有哪些 provider、默认选择、录音上限。
+     *
+     * 为什么录之前先问：上限（`maxDurationSeconds` / `maxAudioBytes`）由服务端定，录超了会被
+     * `speech/invalid-audio` 拒；provider 未就绪（模型没下载/没加载）也要在录之前就报。
+     *
+     * @returns provider 列表（含 preparation 相位）、默认 provider/language、录音限制
+     */
+    async speechCatalog(): Promise<DshSpeechCatalog> {
+        // 用 wire 名（斜杠）；`auth.argsWrap` 已把它登记为**无参** remote（`{ args: {} }`），
+        // 多包一层 request 会被网关拒（`gateway/arguments-invalid`）。
+        const raw = await this.call<Partial<DshSpeechCatalog>>('speech/catalog', {});
+        return { ...raw, providers: raw.providers ?? [] };
+    }
+
+    /**
+     * 把一段规范 WAV（16 kHz / 单声道 / 16-bit PCM，base64）交给 dsh 自带的识别 provider。
+     *
+     * 与网页端语音输入走同一条 RPC：**音频不进会话、不落盘**，只把识别出的文字带回来。
+     *
+     * @param request - audioBase64（无 data URL 前缀）、可选的 providerId / language
+     * @param timeoutMs - 传输层超时；传 `undefined` 用默认（`SPEECH_TRANSCRIBE_TIMEOUT_MS`）。
+     *   调用方应按服务端目录的 `maxDurationSeconds` 放大（见 `transcribeVoiceCapture`），
+     *   否则上游把录音上限调大时，插件会比服务端先超时。
+     * @returns 识别结果（`text` 可能为空串 = 没听清）
+     */
+    async speechTranscribe(
+        request: { audioBase64: string; providerId?: string; language?: string },
+        timeoutMs: number = SPEECH_TRANSCRIBE_TIMEOUT_MS
+    ): Promise<DshTranscript> {
+        const args: Record<string, unknown> = { audioBase64: request.audioBase64 };
+        if (request.providerId !== undefined) {
+            args['providerId'] = request.providerId;
+        }
+        if (request.language !== undefined) {
+            args['language'] = request.language;
+        }
+        return this.call<DshTranscript>('speech/transcribe', args, timeoutMs);
+    }
+
+    /**
+     * 触发 dsh 的语音模型准备（`speech/prepare`）：首次使用要加载/校验模型，慢的话十几秒到几十秒。
+     *
+     * 与上游网页端同一条 RPC；它是"启动/加入一个 Host 任务"，不等待完成 —— 是否就绪看
+     * `speechCatalog()` 里 provider 的 `preparation.phase`。
+     *
+     * @param providerId - 要准备的 provider（来自 catalog）
+     */
+    async speechPrepare(providerId: string): Promise<void> {
+        // 远端签名是 `prepare(providerId, options?)`：两个**命名形参**，必须平铺（见 auth.ts 的 FLAT_ARGS_METHODS）
+        await this.call('speech/prepare', { providerId });
     }
 
     /**

@@ -7,12 +7,14 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { createHash } from 'crypto';
-import { DshService, DshNoWorkspaceError } from './api/dshService';
+import { DshService, DshNoWorkspaceError, SPEECH_TRANSCRIBE_TIMEOUT_MS } from './api/dshService';
+import type { DshSpeechCatalog } from './api/dshService';
 import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { DshPanel } from './dshPanel';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
 import type { DshPendingAttachment } from './dsh/submissions';
+import { VoiceRecorder } from './dsh/voice';
 import {
     applyNativeTitlebarContext,
     TITLEBAR_MODE,
@@ -535,6 +537,54 @@ let chatPanel: vscode.WebviewPanel | undefined;
 const readyChats = new WeakSet<vscode.Webview>();
 
 /**
+ * 各聊天 webview 的**宿主侧录音句柄**（语音输入，实验版）。
+ *
+ * 为什么录音在宿主：VS Code webview 的 iframe 既不在 Electron 的 `media` 权限白名单里，
+ * 也没有 `microphone` 的 Permissions Policy，`getUserMedia` 一律被拒（见 `design/12` 的登记）。
+ * 每个 webview 同一时刻只允许一段录音；页面重载（`ready`）时会把残留的录音取消。
+ */
+const voiceRecordings = new Map<vscode.Webview, VoiceRecorder>();
+
+/**
+ * 各 webview 的**语音代际**：页面每次 `voiceStart` / `voiceStop` / `voiceCancel` 都 +1。
+ *
+ * 异步回来时（等模型就绪、转写 RPC）如果代际变了，说明用户已经取消/重来 ——
+ * 旧结果**直接丢弃**（不插文字、不弹错误），这正是"取消录音"必须有的服务端语义：
+ * 录音可以在任意时刻被取消，取消后迟到的识别结果不得再落到输入框里。
+ */
+const voiceGenerations = new Map<vscode.Webview, number>();
+
+/** 取该 webview 的录音句柄（懒建）。 */
+function voiceRecorderOf(webview: vscode.Webview): VoiceRecorder {
+    let recorder = voiceRecordings.get(webview);
+    if (recorder === undefined) {
+        recorder = new VoiceRecorder();
+        voiceRecordings.set(webview, recorder);
+    }
+    return recorder;
+}
+
+/** 推进该 webview 的语音代际，返回新代际。 */
+function bumpVoiceGeneration(webview: vscode.Webview): number {
+    const next = (voiceGenerations.get(webview) ?? 0) + 1;
+    voiceGenerations.set(webview, next);
+    return next;
+}
+
+/** 该 webview 当前的语音代际。 */
+function voiceGenerationOf(webview: vscode.Webview): number {
+    return voiceGenerations.get(webview) ?? 0;
+}
+
+/** 语音流程被取消（代际已变）：调用方静默收场，不再回结果/错误。 */
+class VoiceAborted extends Error {
+    constructor() {
+        super('voice aborted');
+        this.name = 'VoiceAborted';
+    }
+}
+
+/**
  * 待答的交互帧（`chatApproval` / `chatQuestion`）：只发给发起该回合的 webview，且不进日志，
  * 故缓存最后一帧供新 webview（如「在编辑区打开」）ready 时重放。
  */
@@ -577,6 +627,57 @@ function postToChats(message: unknown): void {
             // 视图重建期间的旧引用：忽略，下次 resolve 会换新目标
         }
     }
+}
+
+/**
+ * 模型准备（首次下载/加载 + 预热）的**插件侧**耐心上限。
+ *
+ * 不是上游设置：上游 `speech-to-text` 的 provider 配置里 `prepareTimeoutMs` 默认 **3 600 000（1 小时）**，
+ * 客户端只是 `await` 那个 `prepare` 任务、用 `AbortSignal` 取消。插件没有那条复用连接，
+ * 只能轮询 `speech/catalog`，所以取**与上游默认同量级**的 1 小时；等待期间用户可以随时取消
+ * （`✕`/Esc，走语音代际丢弃）—— 比"120s 就报准备超时、首次下载直接不可用"更贴近上游行为。
+ */
+const SPEECH_PREPARE_TIMEOUT_MS = 3_600_000;
+
+/**
+ * 语音插件（dsh `voice-input-bundle`）可用性探测：`speech/catalog` 通 = 已挂载。
+ *
+ * 插件被关掉时这条 RPC 会报 `typert gateway: speech/catalog: its strict definition was
+ * withdrawn and SRC fallback is forbidden`（真机 2026-11-03）。这种状态下**麦克风入口本身
+ * 就不该出现** —— 页面收到 `voiceAvailability{available:false}` 后不渲染话筒。
+ */
+let voiceProbeTimer: ReturnType<typeof setInterval> | undefined;
+
+/** 探测一次并广播给所有聊天页；返回是否可用。 */
+async function refreshVoiceAvailability(): Promise<boolean> {
+    try {
+        await dsh.speechCatalog();
+        postToChats({ type: 'voiceAvailability', available: true });
+        return true;
+    } catch (e) {
+        postToChats({
+            type: 'voiceAvailability',
+            available: false,
+            reason: e instanceof Error ? e.message : String(e),
+        });
+        return false;
+    }
+}
+
+/**
+ * 页面就绪时探测一次，并挂一个**低频**轮询：dsh 的 profile 补丁支持热生效，
+ * 语音插件可能在页面打开期间被启用/关闭，入口要跟着出现/消失（60s 一次，代价可忽略）。
+ */
+function ensureVoiceAvailabilityWatch(): void {
+    if (voiceProbeTimer !== undefined) {
+        return;
+    }
+    void refreshVoiceAvailability();
+    voiceProbeTimer = setInterval(() => {
+        void refreshVoiceAvailability();
+    }, 60_000);
+    // 不阻止扩展宿主退出（Node 定时器）
+    voiceProbeTimer.unref?.();
 }
 
 /**
@@ -951,6 +1052,109 @@ function setupChatWebview(
     };
 
     /**
+     * 语音输入（实验）：把一次宿主录音交给 dsh 自带的识别 provider，再把文字作为**可撤销的插入**回给页面。
+     *
+     * 与网页端语音输入走同一条 `speech.transcribe`：音频不进会话、不落盘；文字只**插进输入框**，
+     * 不自动发送（上游 `InputActions.insertText` 同口径）。失败只回 `voiceError`，不落任何行。
+     *
+     * @param capture - 宿主录音产物（规范 WAV 的 base64 与时长）
+     * @param gen - 本次语音流程的代际；转写回来时代际已变 = 用户取消了，结果直接丢弃
+     */
+    async function transcribeVoiceCapture(capture: { audioBase64: string; audioSeconds: number }, gen: number): Promise<void> {
+        if (voiceGenerationOf(webview) !== gen) {
+            throw new VoiceAborted();
+        }
+        const catalog = await dsh.speechCatalog();
+        if (voiceGenerationOf(webview) !== gen) {
+            throw new VoiceAborted();
+        }
+        const maxBytes = catalog.maxAudioBytes;
+        if (maxBytes !== undefined && maxBytes > 0) {
+            const bytes = Math.floor((capture.audioBase64.length * 3) / 4);
+            if (bytes > maxBytes) {
+                throw new Error('录音太长了（超出 dsh 允许的上限），请缩短后重试');
+            }
+        }
+        // 传输层超时跟着**服务端给的录音上限**走：上游默认 maxDurationSeconds=120 → 150s；
+        // 上游把上限调大（例如 300s）时自动变 330s，不会插件先超时把服务端的真错误盖掉。
+        const transcribeTimeoutMs = Math.max(
+            SPEECH_TRANSCRIBE_TIMEOUT_MS,
+            Math.round((catalog.maxDurationSeconds ?? 120) * 1000) + 30_000
+        );
+        const result = await dsh.speechTranscribe({
+            audioBase64: capture.audioBase64,
+            ...(catalog.selection?.providerId === undefined ? {} : { providerId: catalog.selection.providerId }),
+            ...(catalog.selection?.language === undefined ? {} : { language: catalog.selection.language }),
+        }, transcribeTimeoutMs);
+        // **取消后迟到的识别结果不得落进输入框**（用户点了取消/重新开始）
+        if (voiceGenerationOf(webview) !== gen) {
+            throw new VoiceAborted();
+        }
+        const text = (result.text ?? '').trim();
+        post({ type: 'voiceState', state: 'idle' });
+        // **没识别到就什么都不显示**（真机 2026-11-03：不说话点停止，会话区冒出「没有听清」；
+        // 语音的中间态/失败一律留在输入区）。空结果连行内提示都不给。
+        if (text === '') {
+            return;
+        }
+        post({
+            type: 'voiceResult',
+            text,
+            ...(result.audioSeconds === undefined ? {} : { audioSeconds: result.audioSeconds }),
+        });
+    }
+
+    /**
+     * 确保 dsh 的语音 provider 可用：等 `speech/catalog` 里的 `preparation.phase` 到
+     * `ready` 或 `standby`（列表里只需第一项可用）。
+     *
+     * - `standby` = 模型文件已在、尚未加载：**可以录**，`speech/transcribe` 会在调用时加载；
+     * - `unprepared` / `cancelled` / `downloading` / `checking` / `loading` / `waking` = 还没好：
+     *   触发一次 `speech/prepare`（与网页端同一个 Host 任务）并轮询；等到 `standby/ready` 才放行；
+     * - `failed` = 直接报原因（下载/校验失败，交给 dsh 网页端处理）。
+     *
+     * @returns 就绪时的目录与所选 provider（`maxDurationSeconds` 等以服务端为准）
+     */
+    async function waitSpeechReady(gen: number): Promise<{
+        catalog: DshSpeechCatalog;
+        providerId: string;
+    }> {
+        const deadline = Date.now() + SPEECH_PREPARE_TIMEOUT_MS;
+        let prepareStarted = false;
+        for (;;) {
+            if (voiceGenerationOf(webview) !== gen) {
+                throw new VoiceAborted();
+            }
+            const catalog = await dsh.speechCatalog();
+            if (voiceGenerationOf(webview) !== gen) {
+                throw new VoiceAborted();
+            }
+            const selected = catalog.selection?.providerId;
+            const provider = catalog.providers?.find((p) => p.id === selected) ?? catalog.providers?.[0];
+            if (provider === undefined || typeof provider.id !== 'string') {
+                throw new Error('dsh 里没有可用的语音识别 provider');
+            }
+            const preparation = provider.preparation;
+            const phase = preparation?.phase;
+            if (phase === 'ready' || phase === 'standby') {
+                return { catalog, providerId: provider.id };
+            }
+            if (phase === 'failed') {
+                throw new Error(`语音模型准备失败：${preparation?.message ?? '未知原因（可在 dsh 网页端重试）'}`);
+            }
+            if (!prepareStarted) {
+                prepareStarted = true;
+                post({ type: 'voiceState', state: 'preparing' });
+                await dsh.speechPrepare(provider.id).catch(() => undefined);
+            }
+            if (Date.now() >= deadline) {
+                throw new Error('语音模型准备超时（首次使用需要下载/加载模型）');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 700));
+        }
+    }
+
+    /**
      * 本插件提交的回合结算：用量记账与统计刷新的**唯一时机**。
      *
      * 空闲发送与忙时排队/插话都走这里 —— 忙时提交没有返回值可挂（它不等本轮结束），
@@ -1065,6 +1269,10 @@ function setupChatWebview(
     webview.onDidReceiveMessage((msg) => {
         if (msg.type === 'ready') {
             readyChats.add(webview);
+            // 页面重载 = 上一段录音的宿主侧会话已无主：取消并清临时文件（不把残留录音带进新页面）
+            void voiceRecorderOf(webview).cancel().catch(() => undefined);
+            // 语音插件是否挂载：探测一次 + 低频轮询（插件热启停时入口跟着出现/消失）
+            ensureVoiceAvailabilityWatch();
             void (async () => {
                 try {
                     await dsh.ensureRunning();
@@ -1074,6 +1282,8 @@ function setupChatWebview(
                 }
                 await postChatInfo(webview);
                 await postChatPrefs();
+                // 服务已经起来了 → 立刻复核一次语音插件（上面那次探测可能赶在 ensureRunning 之前失败）
+                void refreshVoiceAvailability();
                 // 诊断留痕：输入框下方那两块读数（会话统计 / 模型用量）**全部来自投影**。
                 // 真机排查「统计/用量不显示」先看这一行：键不在 → 宿主没拿到（服务端组合/时序）；
                 // 键在但界面空 → 页面的显示门（`steps===0 && !hasTokens` 或简洁档两枚药丸都算不出）。
@@ -1269,6 +1479,70 @@ function setupChatWebview(
             })();
         } else if (msg.type === 'cancel') {
             stopTurn();
+        } else if (msg.type === 'voiceStart') {
+            // 语音输入（实验）：**宿主侧录音**（webview 拿不到麦克风）。
+            // 开始前先问 dsh 的 `speech/catalog`：provider 就绪与录音上限都以服务端为准；
+            // 模型没准备好（首次/进程重启后 standby 之外的状态）就先触发 `speech/prepare` 并轮询。
+            // 每次 start/stop/cancel 都推进代际：取消后迟到的准备/转写结果直接丢弃。
+            const gen = bumpVoiceGeneration(webview);
+            void (async () => {
+                const recorder = voiceRecorderOf(webview);
+                try {
+                    await recorder.cancel();
+                    const ready = await waitSpeechReady(gen);
+                    if (voiceGenerationOf(webview) !== gen) {
+                        throw new VoiceAborted();
+                    }
+                    const seconds = ready.catalog.maxDurationSeconds ?? 120;
+                    const maxMs = Math.min(120_000, Math.max(5_000, Math.round(seconds * 1000)));
+                    await recorder.start(maxMs);
+                    if (voiceGenerationOf(webview) !== gen) {
+                        await recorder.cancel().catch(() => undefined);
+                        throw new VoiceAborted();
+                    }
+                    post({ type: 'voiceState', state: 'recording', maxDurationMs: maxMs });
+                } catch (e) {
+                    await recorder.cancel().catch(() => undefined);
+                    if (e instanceof VoiceAborted) {
+                        return;
+                    }
+                    // 插件被关掉（或探测过期）：先复核可用性 —— 不可用就**隐藏入口**并给一句人话，
+                    // 不把 typert 的 "withdrawn / SRC fallback forbidden" 原文甩给用户。
+                    const available = await refreshVoiceAvailability();
+                    if (!available) {
+                        post({ type: 'voiceError', message: '语音插件未启用，已隐藏语音入口' });
+                        return;
+                    }
+                    post({ type: 'voiceError', message: e instanceof Error ? e.message : String(e) });
+                }
+            })();
+        } else if (msg.type === 'voiceStop') {
+            // 页面点了"停止"：先告诉页面在转写（按钮变忙碌），再收录音、走 dsh 识别、回插入文字。
+            const gen = bumpVoiceGeneration(webview);
+            void (async () => {
+                const recorder = voiceRecorderOf(webview);
+                try {
+                    post({ type: 'voiceState', state: 'transcribing' });
+                    const capture = await recorder.stop();
+                    if (voiceGenerationOf(webview) !== gen) {
+                        throw new VoiceAborted();
+                    }
+                    await transcribeVoiceCapture(capture, gen);
+                } catch (e) {
+                    if (e instanceof VoiceAborted) {
+                        return;
+                    }
+                    post({ type: 'voiceState', state: 'idle' });
+                    post({ type: 'voiceError', message: e instanceof Error ? e.message : String(e) });
+                }
+            })();
+        } else if (msg.type === 'voiceCancel') {
+            // 取消：推进代际（在途的准备/转写结果作废）→ 停掉宿主录音并清临时文件 → 页面回待命。
+            bumpVoiceGeneration(webview);
+            void (async () => {
+                await voiceRecorderOf(webview).cancel().catch(() => undefined);
+                post({ type: 'voiceState', state: 'idle' });
+            })();
         } else if (msg.type === 'chatFork') {
             // 从某条回答分叉（上游 session/fork）：建子会话 → 升号 → 切过去。
             // **不禁用输入区**（busy:loading 会连「终止」一起挡）——分叉是后台动作，失败只提示。

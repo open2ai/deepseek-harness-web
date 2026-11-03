@@ -747,6 +747,8 @@
   }
   .composer-error .codicon { flex: none; margin-top: 2px; font-size: 12px; }
   .composer-error-text { min-width: 0; }
+  /* 语音失败的行内提示（复用错误条外观，只贴着输入框；识别为空时整行不渲染） */
+  #voice-hint { margin-bottom: 4px; }
   #inputbox:focus-within { border-color: var(--vscode-focusBorder, #4daafc); }
   /* @ 引用贴片：叠在 textarea 首行行首(absolute，不占高)；textarea 用 text-indent 只缩进首行 → 回车/换行回到最左
      （试过改成 padding-left 整块让位：光标确实不会跑到贴片左边，但正文整块右缩不好看，已回退。） */
@@ -858,6 +860,38 @@
   }
   #modeBtn.readonly { opacity: 0.55; cursor: default; }
   #modeBtn.readonly:hover { background: none; }
+  /* 语音输入（实验）：与输入区其它图标钮同尺寸；录音=红点脉冲，转写=半透明不可点。
+     录音本身在宿主进程做（webview 无麦克风权限，见 design/12），这里只是状态指示。 */
+  #mic {
+    width: 22px; height: 22px; border: none; background: none;
+    color: var(--vscode-foreground, #ddd); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0;
+    flex: none; line-height: 0; border-radius: 6px; transition: background 0.12s ease;
+    position: relative;
+  }
+  #mic svg { display: block; }
+  #mic:hover:not(:disabled) { background: rgba(128,128,128,0.28); }
+  #mic:focus { outline: none; }
+  #mic:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(128, 128, 128, 0.7); }
+  #mic.recording { color: var(--vscode-errorForeground, #f48771); }
+  #mic.busy { opacity: 0.55; cursor: default; }
+  /* 取消语音（✕）：只在非待命时出现，紧挨麦克风右侧；小一号、弱色，避免和主钮抢注意力 */
+  #mic-cancel {
+    width: 18px; height: 18px; border: none; background: none; padding: 0;
+    color: var(--vscode-descriptionForeground, #999); cursor: pointer; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center; flex: none;
+    line-height: 0; transition: background 0.12s ease, color 0.12s ease;
+  }
+  #mic-cancel svg { display: block; }
+  #mic-cancel:hover { background: rgba(128,128,128,0.28); color: var(--vscode-foreground, #ddd); }
+  #mic-cancel:focus { outline: none; }
+  #mic-cancel:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(128, 128, 128, 0.7); }
+  .mic-rec-dot {
+    position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--vscode-errorForeground, #f48771);
+    animation: mic-pulse 1s ease-in-out infinite;
+  }
+  @keyframes mic-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
   /* 图标 + 选择文字作为一个紧凑单元；窄面板可收缩，避免把右侧按钮挤出可视区 */
   #composer, #inputbox, #inputbar { min-width: 0; }
   /* 文字宽时可全显；空间不足时才收缩。min-width 保 22px 图标不被压小：组最窄只缩文字到 0(省略号→消失)，

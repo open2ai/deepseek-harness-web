@@ -16,6 +16,7 @@ import { createPrefs } from './prefs'
 import { createOutbox } from './outbox'
 import { createFeedback } from './feedback'
 import { createQueue } from './queue'
+import { createVoice } from './voice'
 import { createReducer } from './reducer'
 import type { ChatStore } from './types'
 
@@ -51,6 +52,8 @@ export function createChatStore(host: ChatHost): ChatStore {
 
   // 3. 发送动作（跨输入区 + 目录 + 消息域 + 队列卡，依赖注入）
   const outbox = createOutbox({ host, composer, catalogs, messages })
+  // 语音输入（实验）：录音在宿主；这里只维护状态 + 把转写文字插到光标处（借用 composer.insertText）
+  const voice = createVoice(host, composer.store.insertText)
   // 消息反馈：与其它切片无 import 边，装配层直接持有
   const feedback = createFeedback(host)
 
@@ -66,10 +69,11 @@ export function createChatStore(host: ChatHost): ChatStore {
     attachments.reset()
     feedback.reset()
     queue.reset()
+    voice.reset()
   }
 
   // 5. 归约器（宿主消息 → 各切片；需要 reset 做全量清空）
-  const reducer = createReducer({ messages, composer, catalogs, selectors, question, status, attachments, prefs, outbox, feedback, queue, reset })
+  const reducer = createReducer({ messages, composer, catalogs, selectors, question, status, attachments, prefs, outbox, feedback, queue, voice, reset })
 
   // 显式列举装配（不用展开）：字段漏装配被返回类型拦截，字段重复在编译期直接报错。
   return {
@@ -148,6 +152,14 @@ export function createChatStore(host: ChatHost): ChatStore {
     readImageFile: composer.store.readImageFile,
     // 光标处插入（语音转写落点；与 `draft` 帧的整条追加刻意分开）
     insertText: composer.store.insertText,
+    // 语音输入（实验）：宿主侧录音；页面只读四态 + 可用性、发控制帧，结果插入光标处
+    voiceAvailable: voice.store.voiceAvailable,
+    voiceState: voice.store.voiceState,
+    voiceMaxDurationMs: voice.store.voiceMaxDurationMs,
+    voiceHint: voice.store.voiceHint,
+    startVoice: voice.store.startVoice,
+    stopVoice: voice.store.stopVoice,
+    cancelVoice: voice.store.cancelVoice,
     // 目录切片
     slashCatalog: catalogs.store.slashCatalog,
     atCatalog: catalogs.store.atCatalog,

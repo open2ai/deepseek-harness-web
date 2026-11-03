@@ -15,6 +15,7 @@ import type { AttachmentsSlice } from './attachments'
 import type { OutboxSlice } from './outbox'
 import type { FeedbackSlice } from './feedback'
 import type { QueueSlice } from './queue'
+import type { VoiceSlice } from './voice'
 import { buildChatNodesIncremental, type NodesCheckpoint } from '../nodes/chat-nodes'
 import { nodesToRows, nodesToSeatRows } from '../nodes/render-plan'
 import { resetNodeKeyMap, rowKeyOfNodeKey, toChatRowsFromNodes } from './node-rows'
@@ -186,6 +187,7 @@ export interface ReducerDeps {
   outbox: OutboxSlice
   feedback: FeedbackSlice
   queue: QueueSlice
+  voice: VoiceSlice
   /** 清空全部切片（clear 帧）。 */
   reset(): void
 }
@@ -195,7 +197,7 @@ export interface ReducerSlice {
 }
 
 export function createReducer(deps: ReducerDeps): ReducerSlice {
-  const { messages, composer, catalogs, selectors, question, status, prefs, attachments, outbox, feedback, queue, reset } = deps
+  const { messages, composer, catalogs, selectors, question, status, prefs, attachments, outbox, feedback, queue, voice, reset } = deps
   /**
    * **本 store 自己的**摄入缓存与续折断点（**不能提到模块级** —— 换会话 / 连续挂载不同窗口会串窗口，
    * 详见上面 `ingestEvents` 的注释与守卫 `_doneline.wiring.dom.test.mjs`【5】）。
@@ -398,6 +400,20 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       case 'wsDropdownList':
       case 'wsDropdownSessions':
       case 'wsActionDone':
+        break
+      // 语音输入（实验）：录音在宿主进程做；页面只收可用性/状态/结果。
+      // 结果文字由切片插到输入框光标处（不自动发送、可撤销）。
+      case 'voiceAvailability':
+        voice.applyAvailability(m.available)
+        break
+      case 'voiceState':
+        voice.applyState(m.state, m.maxDurationMs)
+        break
+      case 'voiceResult':
+        voice.applyResult(m.text)
+        break
+      case 'voiceError':
+        voice.applyError(m.message)
         break
     }
   }

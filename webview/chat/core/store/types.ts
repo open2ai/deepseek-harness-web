@@ -809,6 +809,30 @@ export interface ChatStore {
    * 正在写的这句话里"，并且**不覆盖**已有草稿。
    */
   insertText(insert: string): void
+  /**
+   * 语音输入（实验）：录音/转写在**宿主进程**做（webview 拿不到麦克风），
+   * 页面只维护四态（待命 / 准备模型 / 录音中 / 转写中）并收转写文字；
+   * `voiceMaxDurationMs` 是服务端 `speech/catalog` 给的录音上限。
+   */
+  /**
+   * dsh 实例有没有挂载语音插件。**false = 不渲染麦克风入口**：
+   * 插件关着时点它只会报 typert `speech/catalog` 错误，入口本身就不该出现。
+   */
+  voiceAvailable: Signal<boolean>
+  voiceState: Signal<'idle' | 'preparing' | 'recording' | 'transcribing'>
+  voiceMaxDurationMs: Signal<number>
+  /**
+   * 语音失败的**行内提示**（输入区下方；undefined = 不显示）。
+   *
+   * 语音的中间态/失败一律留在输入区，**不进会话区**，识别为空则连提示都不给。
+   */
+  voiceHint: Signal<string | undefined>
+  /** 开始录音（宿主先问服务端目录；失败走 `voiceError` → 输入区行内提示）。 */
+  startVoice(): void
+  /** 结束录音并转写（宿主回 `voiceResult` → 文字插到光标处）。 */
+  stopVoice(): void
+  /** 放弃本次录音（不转写、不落任何文字）。 */
+  cancelVoice(): void
   togglePopup(w: 'perm' | 'model' | 'mode'): void
   /** 打开「仅模型列表的可搜索弹窗」（/model 斜杠入口用；与按钮的完整模型弹窗区分） */
   openModelSearch(): void

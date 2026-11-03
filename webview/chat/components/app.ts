@@ -513,6 +513,20 @@ export function Composer({ store }: { store: ChatStore }) {
     store.images.value.length > 0 ||
     store.refs.value.length > 0
   const plan = store.planState.value
+  // 语音输入：**Escape 取消**（对齐上游"取消、Escape 或隐藏页面会丢弃录音"）。
+  // 弹层/模态/队列编辑自己处理 Escape，这里不抢。
+  useEffect(() => {
+    const onVoiceEscape = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || store.voiceState.value === 'idle') return
+      const modalEl = document.getElementById('dshModal')
+      const modalOpen = modalEl !== null && !modalEl.classList.contains('hidden')
+      if (modalOpen || store.openPopup.value !== null || store.queueEditing.value !== null) return
+      e.preventDefault()
+      store.cancelVoice()
+    }
+    window.addEventListener('keydown', onVoiceEscape, true)
+    return () => window.removeEventListener('keydown', onVoiceEscape, true)
+  }, [])
   return html`<div id="composer" class=${busy ? 'is-busy' : ''}
     onDragOver=${(e: Event) => e.preventDefault()}
     onDrop=${(e: DragEvent) => {
@@ -547,6 +561,12 @@ export function Composer({ store }: { store: ChatStore }) {
       ? html`<div class="composer-busy" aria-hidden="true">
           <span class="codicon codicon-loading codicon-modifier-spin"></span>
           ${busy === 'switching' ? '正在切换…' : '正在加载会话…'}
+        </div>`
+      : null}
+    ${/* 语音失败的**行内提示**：与会话区无关，只挨着输入框显示（识别为空时连这行都没有）。 */ ''}
+    ${store.voiceHint.value !== undefined
+      ? html`<div class="composer-error voice-hint" role="status" id="voice-hint">
+          <span class="codicon codicon-error"></span><span class="composer-error-text">${store.voiceHint.value}</span>
         </div>`
       : null}
     <${AttachmentBar} store=${store} />
@@ -611,6 +631,44 @@ export function Composer({ store }: { store: ChatStore }) {
         </div>`
           : null}
         <span class="send-group">
+          ${/*
+            语音输入（实验，v1）：按钮放在**发送键左侧**（send-group 内；回合在跑且有独立
+            终止键时也在它左侧）。录音/转写在**宿主进程**做 —— VS Code webview 拿不到麦克风
+            ，所以这里只发控制帧、显示四态；转写文字由宿主回帧、切片插到
+            光标处（不自动发送）。
+          */
+          (() => {
+            // 插件没挂载（voice-input-bundle 关闭）→ **不渲染入口**（点了只会报 typert 错误）
+            if (!store.voiceAvailable.value) return null
+            const voice = store.voiceState.value
+            const busyVoice = voice === 'preparing' || voice === 'transcribing'
+            const title = voice === 'preparing' ? '正在准备语音模型（首次使用）…'
+              : voice === 'recording' ? '停止录音'
+                : voice === 'transcribing' ? '正在转写…'
+                  : '语音输入'
+            return html`<button id="mic" type="button" aria-label="语音输入"
+              class=${'mic-btn' + (voice === 'recording' ? ' recording' : '') + (busyVoice ? ' busy' : '')}
+              title=${title} disabled=${busyVoice}
+              onClick=${() => {
+                if (voice === 'idle') store.startVoice()
+                else if (voice === 'recording') store.stopVoice()
+              }}>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg>
+              ${voice === 'recording' ? html`<span class="mic-rec-dot" aria-hidden="true"></span>` : null}
+            </button>`
+          })()}
+          ${/* 取消：录音中/准备中/转写中都能一键丢弃（对齐上游"取消或 Escape 会丢弃录音"）。 */
+          (() => {
+            if (!store.voiceAvailable.value) return null
+            return store.voiceState.value === 'idle'
+              ? null
+              : html`<button id="mic-cancel" type="button" aria-label="取消语音输入"
+                  title="取消录音"
+                  onClick=${() => store.cancelVoice()}>
+                  <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor"
+                    stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>`
+          })()}
           ${extraStop
             ? html`<button id="stop-extra" class="stop" title="停止生成" aria-label="停止生成"
                 onClick=${() => store.cancel()}>

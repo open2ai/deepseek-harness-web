@@ -166,6 +166,11 @@ const NO_ARGS_METHODS = new Set<string>([
     'agentPresets/list',
     'settings/describe',
     'permissionPresets/catalog',
+    // 语音输入（实验 v1）：`speech.catalog()` 是**无参** remote（见 dsh 的
+    // `api-speech-to-text` 生成物 `typert.host.js` 的 descriptors）。多包一层 `request`
+    // 会被网关拒：`gateway/arguments-invalid: args fields do not match the descriptor:
+    // unexpected "request"` —— 真机点麦克风报的就是这条。
+    'speech/catalog',
 ]);
 /** 平铺 args 的方法（payload 对象直接作为 args 的字段集）。
  *
@@ -195,6 +200,9 @@ const FLAT_ARGS_METHODS = new Set<string>([
     // 【停止子会话】父级中断的远端签名是**三个命名形参**（childSessionId / parentSessionId / mode），
     // 必须平铺（同上：包一层 request 会被网关拒）。
     'subagents/interruptByParent',
+    // 【语音输入 v1】`speech/prepare(providerId, options?)`：两个命名形参，必须平铺
+    //（参数名见 dsh 生成物 `typert.host.js`；包一层 request 会被网关拒）。
+    'speech/prepare',
 ]);
 
 export function hasAuthCookie(port: number): boolean {

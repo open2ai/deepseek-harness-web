@@ -42,9 +42,10 @@ export class DshRpcError extends Error {
         this.details = err.details;
     }
 }
-/** 通用 RPC：调当前端点的任意 DSH 方法并返回 result.value（别名点号自动换算 + args 包装）。 */
-export async function rpcCall<T = unknown>(method: string, payload: unknown = {}): Promise<T> {
-    return rpcCallAt<T>(getEndpoint().port, method, payload);
+/** 通用 RPC：调当前端点的任意 DSH 方法并返回 result.value（别名点号自动换算 + args 包装）。
+ *  `timeoutMs` 可选：慢接口（如语音转写首次加载模型）要传更长，默认沿用 15s。 */
+export async function rpcCall<T = unknown>(method: string, payload: unknown = {}, timeoutMs?: number): Promise<T> {
+    return rpcCallAt<T>(getEndpoint().port, method, payload, timeoutMs);
 }
 /** 向 $events 流回传一次应答（rc.1 Remote Event waterfall 的结果通道）。 */
 export async function sendRemoteEventResult(
@@ -58,7 +59,8 @@ function sendClientRequest(
     port: number,
     wireMethod: string,
     json: string,
-    cookie: string | undefined
+    cookie: string | undefined,
+    timeoutMs: number = RPC_TIMEOUT_MS
 ): Promise<RpcResponse> {
     return new Promise<RpcResponse>((resolve, reject) => {
         const headers: Record<string, string> = {
@@ -75,7 +77,7 @@ function sendClientRequest(
                 path: `/api/${wireMethod}`,
                 method: 'POST',
                 headers,
-                timeout: RPC_TIMEOUT_MS,
+                timeout: timeoutMs,
             },
             (res) => {
                 let data = '';
@@ -112,20 +114,20 @@ function resolveRpcResponse<T>(parsed: RpcResponse<T>, wireMethod: string): T {
     }
     throw new DshRpcError(wireMethod, parsed.result.error);
 }
-async function rpcCallAt<T = unknown>(port: number, method: string, payload: unknown = {}): Promise<T> {
+async function rpcCallAt<T = unknown>(port: number, method: string, payload: unknown = {}, timeoutMs?: number): Promise<T> {
     const wireMethod = wireMethodName(method);
     const body: RpcRequest = { type: 'client-request', rpcId: crypto.randomUUID(), method: wireMethod, payload: argsWrap(wireMethod, payload) };
     const json = JSON.stringify(body);
     let parsed: RpcResponse;
     try {
-        parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port));
+        parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port), timeoutMs);
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const needAuth = msg.includes('HTTP 401') || msg.includes('HTTP 403');
         if (needAuth && getEndpoint().port === port && getEndpoint().authUrl) {
             const loggedIn = await loginEndpoint(getEndpoint());
             if (loggedIn) {
-                parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port));
+                parsed = await sendClientRequest(port, wireMethod, json, authCookieForPort(port), timeoutMs);
             } else {
                 throw e;
             }

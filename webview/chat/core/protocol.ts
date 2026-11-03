@@ -324,6 +324,14 @@ export type HostToViewMessage =
   | { type: 'slashResult'; ok?: boolean; command?: string; message?: string }
   // 「@」引用：候选(文件/目录 + 会话)，query=候选对应查询串
   | { type: 'atCatalog'; query: string; files: AtFileRef[]; sessions: AtSessionRef[] }
+  // 语音输入（实验）：录音在**宿主进程**做（VS Code webview 拿不到麦克风权限），
+  // 页面只收状态与结果；`voiceResult` 的文字由页面插到输入框光标处（不自动发送）。
+  // `voiceAvailability`：dsh 实例有没有挂载语音插件（voice-input-bundle）。false = 页面**不渲染**麦克风
+  // （插件被关掉时点它只会报 typert 错误，入口本身就不该出现）。
+  | { type: 'voiceAvailability'; available: boolean; reason?: string }
+  | { type: 'voiceState'; state: 'idle' | 'preparing' | 'recording' | 'transcribing'; maxDurationMs?: number }
+  | { type: 'voiceResult'; text: string; audioSeconds?: number }
+  | { type: 'voiceError'; message: string }
 
 // ---------- 页面 → 宿主 ----------
 export type ViewToHostMessage =
@@ -415,3 +423,7 @@ export type ViewToHostMessage =
   // 往前翻一页历史（对齐上游 `ISession.loadOlder()`）：宿主读更早的一页并 prepend 到窗口，
   // 然后用 `chatEvents` 帧（带 `historyHasMore`/`historyLoading`）回答。页面在飞时不重复发。
   | { type: 'loadOlder' }
+  // 语音输入（实验）：页面只发控制帧；录音/转写全在宿主侧。
+  | { type: 'voiceStart' }
+  | { type: 'voiceStop' }
+  | { type: 'voiceCancel' }
