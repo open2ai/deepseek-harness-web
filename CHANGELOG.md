@@ -2,6 +2,16 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.21] — 2026-11-03
+
+### 变更
+
+- **兼容 dsh 0.2.1-rc.5**：优化对话里"思考块"的展示
+
+- 新增**语音输入（实验）**：输入区麦克风按钮
+
+- 修复卡片显示问题
+
 ## [0.1.20] — 2026-10-27
 
 ### 变更
