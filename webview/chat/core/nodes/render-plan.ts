@@ -29,6 +29,12 @@ export type RenderChainItem =
      * （`CommandRow` / `commandFactsOf`），区别只在"长在片里"还是"长在顶层"。
      */
     | { kind: 'command'; key: string; name: string | null; outcome?: { kind: string; text?: string } }
+    /**
+     * **模型重试链**（`model-retry` 节点）：上游把它算在**过程折叠里**（`groupTree:'process'`），
+     * 不在消息之间单独占一行。插件的过程折叠长在 assistant 行的链上，所以这里把重试作为**链项**
+     * 渲染、位置按呈现序插进链 —— 真机：「已重试模型请求（1/5）」跑到过程区外面。
+     */
+    | { kind: 'retry'; key: string; retryId: string; retry: number; turn?: number; step?: number; provider?: string; mode?: string; maxRetries?: number; delayMs?: number; failure?: { message?: string; code?: string }; started?: number; cancelled?: boolean }
 
 /** 一片过程分组（最终形态：直接按节点模型的成员表分组，不用步区间近似）。 */
 /**
@@ -246,7 +252,53 @@ function turnPositionFacts(model: ChatNodeModel, turn: number): { openingInputAn
     if (node.kind === 'command' || node.kind === 'manual-compaction') {
         return { kind: 'command', key: node.key, ...commandFactsOf(node) }
     }
+    // 模型重试链：既是「过程折叠里的成员」，也可以在**没有 assistant 行可挂**时回落成顶层行
+    // （旧窗口/无回答步）。两条路共用 `retryFactsOf`，字段一份。
+    if (node.kind === 'model-retry') {
+        return { kind: 'retry', key: node.key, ...retryFactsOf(node) }
+    }
     return undefined
+}
+
+/**
+ * **重试节点 → 行/链项共用的整份事实**（末次尝试）。
+ *
+ * 上游把 `llm/retry` 的 `data` 整体展开成节点，插件这里
+ * 逐项透传：`mode`/`maxRetries`/`delayMs`/`failure` 少搬一项，页面就会显示「(1/∞)」
+ * 「重试延迟：0毫秒」（真机）。
+ *
+ * @param node - `model-retry` 节点。
+ * @returns 行与链项共用的字段集。
+ */
+function retryFactsOf(node: ChatNode): { retryId: string; retry: number; turn?: number; step?: number; provider?: string; mode?: string; maxRetries?: number; delayMs?: number; failure?: { message?: string; code?: string }; started?: number; cancelled?: boolean } {
+    const current = node.data['current'] as Record<string, unknown> | undefined
+    const pick = <T>(key: string, guard: (v: unknown) => v is T): T | undefined => {
+        const fromCurrent = current?.[key]
+        if (guard(fromCurrent)) return fromCurrent
+        const fromNode = node.data[key]
+        return guard(fromNode) ? fromNode : undefined
+    }
+    const isStr = (v: unknown): v is string => typeof v === 'string'
+    const isNum = (v: unknown): v is number => typeof v === 'number'
+    const mode = pick('mode', isStr)
+    const maxRetries = pick('maxRetries', isNum)
+    const delayMs = pick('delayMs', isNum)
+    const provider = pick('provider', isStr)
+    const failureRaw = current?.['failure'] ?? node.data['failure']
+    const failure = failureRaw !== null && typeof failureRaw === 'object' ? failureRaw as { message?: string; code?: string } : undefined
+    return {
+        retryId: String(node.data['retryId'] ?? node.key),
+        retry: typeof current?.['retry'] === 'number' ? current['retry'] as number : 0,
+        ...(node.data['turn'] === undefined ? {} : { turn: node.data['turn'] as number }),
+        ...(node.data['step'] === undefined ? {} : { step: node.data['step'] as number }),
+        ...(provider === undefined ? {} : { provider }),
+        ...(mode === undefined ? {} : { mode }),
+        ...(maxRetries === undefined ? {} : { maxRetries }),
+        ...(delayMs === undefined ? {} : { delayMs }),
+        ...(failure === undefined ? {} : { failure }),
+        ...(current?.['retryState'] === 'started' && typeof current['retry'] === 'number' ? { started: current['retry'] as number } : {}),
+        ...(current?.['retryState'] === 'cancelled' ? { cancelled: true } : {}),
+    }
 }
 
 /**
@@ -260,7 +312,7 @@ function turnPositionFacts(model: ChatNodeModel, turn: number): { openingInputAn
  * @param model - 节点模型（`turn-process` 那支要读整回合的节点与分组）。
  * @returns 该节点产出的行；不产出任何行时（如 `turn-tail`）为空数组。
  */
-function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel): RenderRow[] {
+function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel, assistantRows?: ReadonlyMap<number, RenderRow[]>): RenderRow[] {
     const rows: RenderRow[] = []
     switch (node.kind) {
         case 'user':
@@ -310,22 +362,9 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel): RenderR
             // 把 `mode`/`maxRetries`/`delayMs`/`failure` 丢了 —— 行的类型里明明有这几项
             // （`RetryRow` 读的正是它们）。上游是把 `llm/retry` 的 `data` **整体**展开成节点
             // （`conversation-nodes/retry.ts:30` 的 `...match.event.data`），这里照同一口径透传。
-            const current = node.data['current'] as Record<string, unknown> | undefined
-            const pick = <T>(key: string, guard: (v: unknown) => v is T): T | undefined => {
-                const fromCurrent = current?.[key]
-                if (guard(fromCurrent)) return fromCurrent
-                const fromNode = node.data[key]
-                return guard(fromNode) ? fromNode : undefined
-            }
-            const isStr = (v: unknown): v is string => typeof v === 'string'
-            const isNum = (v: unknown): v is number => typeof v === 'number'
-            const mode = pick('mode', isStr)
-            const maxRetries = pick('maxRetries', isNum)
-            const delayMs = pick('delayMs', isNum)
-            const provider = pick('provider', isStr)
-            const failureRaw = current?.['failure'] ?? node.data['failure']
-            const failure = failureRaw !== null && typeof failureRaw === 'object' ? failureRaw as { message?: string; code?: string } : undefined
-            rows.push({ kind: 'retry', key: node.key, retryId: String(node.data['retryId'] ?? node.key), retry: typeof current?.['retry'] === 'number' ? current['retry'] as number : 0, turn: node.data['turn'] as number | undefined, step: node.data['step'] as number | undefined, ...(provider === undefined ? {} : { provider }), ...(mode === undefined ? {} : { mode }), ...(maxRetries === undefined ? {} : { maxRetries }), ...(delayMs === undefined ? {} : { delayMs }), ...(failure === undefined ? {} : { failure }), ...(current?.['retryState'] === 'started' && typeof current['retry'] === 'number' ? { started: current['retry'] as number } : {}), ...(current?.['retryState'] === 'cancelled' ? { cancelled: true } : {}) })
+            // 片内那条路（`toChainItem`）复用同一份事实：两边字段必须一模一样，否则
+            // 「在过程里」和「在顶层」两种形态的文案会漂开。
+            rows.push({ kind: 'retry', key: node.key, ...retryFactsOf(node) })
             break
         }
         case 'turn-error':
@@ -346,7 +385,8 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel): RenderR
             // 使问答顺序按 entries 交错（用户行/回答行不再分两遍、不会把所有回答堆到末尾）。
             // **一个回合可以折出多行**：插话（user/steering/turn-trigger）把过程切成若干片，
             // 每片一行、各自带自己的过程链与正文 —— 上游也是「每片一个分组 seat + 独立回答节点」。
-            rows.push(...buildAssistantRows(model, turn))
+            // 缓存命中就不重折（`nodesToRows` 为了先算出"哪些重试已进链"，会预折一次）。
+            rows.push(...(assistantRows?.get(turn) ?? buildAssistantRows(model, turn)))
             break
         case 'turn-tail':
             // 尾部动作条并入 assistant 行
@@ -379,9 +419,39 @@ export interface RenderSeat {
 }
 
 /** 节点的行列表（`turn-process` 一支会展开成多条）。 */
-function rowsOfSeat(model: ChatNodeModel, key: string): RenderRow[] {
+function rowsOfSeat(model: ChatNodeModel, key: string, assistantRows?: ReadonlyMap<number, RenderRow[]>): RenderRow[] {
     const node = model.nodes.get(key)
-    return node === undefined ? [] : rowsOfNode(node, node.location.turn, model)
+    return node === undefined ? [] : rowsOfNode(node, node.location.turn, model, assistantRows)
+}
+
+/**
+ * 先折出**各回合的 assistant 行**，并据此算出"已经进了过程链的模型重试项"。
+ *
+ * 两处消费者都要它：
+ *   · `nodesToRows`：重试项已进链 → 不再单发顶层行；
+ *   · `nodesToSeatPlan`：同一批重试项也不再占一个 seat（否则"行集合与 nodesToRows 同源"会多一行）。
+ *
+ * 判据不能去节点表里找 `assistant-step`：回答步是 `turn-process` 节点**折出来**的
+ * （真机夹具里节点表只有 `turn-process` + `model-retry`）。
+ *
+ * @param model - 节点模型。
+ * @returns 各回合的 assistant 行缓存 + 已进链的重试项 key 集合。
+ */
+function assistantPlanRows(model: ChatNodeModel): { assistantRows: Map<number, RenderRow[]>; chainRetryKeys: Set<string> } {
+    const assistantRows = new Map<number, RenderRow[]>()
+    for (const n of model.nodes.values()) {
+        if (n.kind !== 'turn-process') continue
+        if (n.location.kind !== 'turn' && n.location.kind !== 'step') continue
+        assistantRows.set(n.location.turn, buildAssistantRows(model, n.location.turn))
+    }
+    const chainRetryKeys = new Set<string>()
+    for (const turnRows of assistantRows.values()) {
+        for (const row of turnRows) {
+            if (row.kind !== 'assistant') continue
+            for (const item of row.chain) if (item.kind === 'retry') chainRetryKeys.add(item.key)
+        }
+    }
+    return { assistantRows, chainRetryKeys }
 }
 
 /**
@@ -395,6 +465,8 @@ function rowsOfSeat(model: ChatNodeModel, key: string): RenderRow[] {
  */
 export function nodesToSeatPlan(model: ChatNodeModel): RenderSeat[] {
     const seats: RenderSeat[] = []
+    // 重试项若已进 assistant 过程链，就不再占 seat —— 与 `nodesToRows` 同一份判据（否则行数对不上）。
+    const { assistantRows, chainRetryKeys } = assistantPlanRows(model)
     for (const entry of model.entries) {
         if (entry.kind === 'group') {
             const group = model.groups.find((g) => g.key === entry.key)
@@ -410,12 +482,13 @@ export function nodesToSeatPlan(model: ChatNodeModel): RenderSeat[] {
         }
         const node = model.nodes.get(entry.key)
         if (node === undefined) continue
+        if (node.kind === 'model-retry' && chainRetryKeys.has(node.key)) continue
         seats.push({
             key: node.key,
             kind: 'node',
             nodeKind: node.kind,
             turn: node.location.turn,
-            rows: rowsOfSeat(model, node.key),
+            rows: rowsOfSeat(model, node.key, assistantRows),
         })
     }
     return seats
@@ -472,6 +545,13 @@ export function nodesToRows(model: ChatNodeModel): RenderRow[] {
     const rows: RenderRow[] = []
     // 过程成员节点已进 assistant 行的链，独立行/回答步在这里出现一次。
     const consumed = new Set<string>()
+    /**
+     * 模型重试项：已进 assistant 行的过程链（上游把它算在过程折叠里）→ **不再单发一行**。
+     *
+     * 只有在"该回合真会有 assistant 行"（存在带正文/运行中的回答步）时才吃；否则保留顶层行兜底
+     * （旧窗口 / 会话级重试）—— 和上游"过程折叠不存在时重试仍可见"同义。
+     */
+    const { assistantRows: assistantRowsByTurn, chainRetryKeys } = assistantPlanRows(model)
     const groupByKey = new Map(model.groups.map((g) => [g.key, g]))
     for (const entry of model.entries) {
         if (entry.kind === 'group') {
@@ -482,7 +562,8 @@ export function nodesToRows(model: ChatNodeModel): RenderRow[] {
         }
         const node = model.nodes.get(entry.key)
         if (node === undefined) continue
-        rows.push(...rowsOfNode(node, node.location.turn, model))
+        if (chainRetryKeys.has(node.key)) continue
+        rows.push(...rowsOfNode(node, node.location.turn, model, assistantRowsByTurn))
     }
     /**
      * 排序：**逐字对齐上游 `orderedVisibleChatNodes` 的比较器**：
@@ -724,16 +805,21 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
             continue
         }
         /**
-         * ⚠️ **独立成行的节点也切段**（2026-10-10）：那七种独立节点一律"组在此断开 + 自己一条顶层 entry"。
-         * 插件原先只把它们塞进本段（它们自带渲染行，所以看不出丢了东西），于是**它两侧的片被并进同一条
-         * assistant 行**：行内序成了「片1 片2 … 正文」，而上游是「片1 → 重试行 → 片2 → 正文」。
-         * 这里只**切**不**收**（节点自己那条行由 node-entries 那条路发，本函数只管 assistant 行）。
+         * ⚠️ **独立成行的节点也切段**：终局通知 / 输出上限这两种一律"组在此断开 +
+         * 自己一条顶层 entry"。插件原先只把它们塞进本段（它们自带渲染行，所以看不出丢了东西），
+         * 于是**它两侧的片被并进同一条 assistant 行**：行内序成了「片1 片2 … 正文」，
+         * 而上游是「片1 → 终局通知 → 片2 → 正文」。这里只**切**不**收**（节点自己那条行由
+         * node-entries 那条路发，本函数只管 assistant 行）。
          *
-         * ⚠️ **命令行 / 手动压缩不在这张表里**（2026-10-10 改正）：它们是**片的成员**，按分组归属走 ——
+         * ⚠️ **模型重试不在这张表里**（改正，对齐上游 `groupTree:'process'`）：
+         * 它属于**过程折叠内部**的成员，既不自己占顶层行，也不切段 —— 由本函数末尾那段
+         * "重试项按呈现序插进链"处理（真机：「已重试模型请求（1/5）」跑到过程区外面）。
+         *
+         * ⚠️ **命令行 / 手动压缩也不在这张表里**（改正）：它们是**片的成员**，按分组归属走 ——
          * **属于某一片** → 记下那张片（链里由 `toChainItem` 出**命令行**，与工具行同一个座位）；
          * **不属于任何片**（会话级 `/plan`、`/compact`，位置是 `SESSION_BUCKET`）→ 自己一条顶层行，与切段同形。
          */
-        if (n.kind === 'model-retry' || n.kind === 'turn-error' || n.kind === 'turn-max-tokens') {
+        if (n.kind === 'turn-error' || n.kind === 'turn-max-tokens') {
             flushOnBoundary()
             cur = { nodes: [], groupKeys: [], boundary: undefined, generation, hasReplyStep: false }
             continue
@@ -864,6 +950,19 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
                 itemKeys.push(item.key)
             }
             groups.push({ key: g.key, itemKeys, facts: renderGroupFacts(g, model, spec, presentation) })
+        }
+        // 模型重试项：上游把 `model-retry` 算在**过程折叠里**（不是消息间一行）。
+        // 按呈现序插进链 —— 片内成员已按呈现位次排好，重试按自己的位次插到第一个位次更大的项之前。
+        for (const n of ordered) {
+            if (n.kind !== 'model-retry') continue
+            if (!segment.nodes.includes(n)) continue
+            const item = toChainItem(n, undefined, model.todoBaselines)
+            if (item === undefined || claimedItems.has(item.key)) continue
+            claimedItems.add(item.key)
+            const at = presentationIndex.get(item.key) ?? Number.POSITIVE_INFINITY
+            const insertAt = chain.findIndex((c) => (presentationIndex.get(c.key) ?? Number.POSITIVE_INFINITY) > at)
+            if (insertAt === -1) chain.push(item)
+            else chain.splice(insertAt, 0, item)
         }
         const segmentAnswer = segment.nodes.filter((n) => n.kind === 'assistant-step' && hasReply(n)).at(-1)
         /**

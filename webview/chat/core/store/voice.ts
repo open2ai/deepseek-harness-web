@@ -18,7 +18,7 @@ export type VoiceState = 'idle' | 'preparing' | 'recording' | 'transcribing'
 export interface VoiceSlice {
   store: Pick<
     ChatStore,
-    'voiceAvailable' | 'voiceState' | 'voiceMaxDurationMs' | 'voiceHint' | 'startVoice' | 'stopVoice' | 'cancelVoice'
+    'voiceAvailable' | 'voiceState' | 'voiceMaxDurationMs' | 'voiceHint' | 'startVoice' | 'stopVoice' | 'cancelVoice' | 'dismissVoiceHint'
   >
   /**
    * 宿主 `voiceAvailability` 帧：dsh 实例有没有挂载语音插件（`voice-input-bundle`）。
@@ -47,12 +47,37 @@ export function createVoice(host: ChatHost, insert: (text: string) => void): Voi
   const voiceMaxDurationMs = signal(0)
   /** 语音失败的行内提示（输入区下方；空串/undefined = 不显示）。 */
   const voiceHint = signal<string | undefined>(undefined)
+  /** 行内提示的自动消失定时器（新提示覆盖旧定时器；清空时一并取消）。 */
+  let hintTimer: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * 设置/清空行内提示。**提示是瞬时的**：默认 6 秒后自动消失。
+   *
+   * 为什么必须自动消失（真机）：语音插件关着时点一下话筒，会先出
+   * 「语音插件未启用，已隐藏语音入口」——若一直挂着，输入区下方永远有一条红字，
+   * 而话筒已经被隐藏、用户再也没有操作能把它清掉。
+   *
+   * @param message - 新提示；`undefined` = 立即清空。
+   */
+  function showHint(message: string | undefined): void {
+    if (hintTimer !== undefined) {
+      clearTimeout(hintTimer)
+      hintTimer = undefined
+    }
+    voiceHint.value = message
+    if (message !== undefined) {
+      hintTimer = setTimeout(() => {
+        hintTimer = undefined
+        voiceHint.value = undefined
+      }, 6_000)
+    }
+  }
 
   function startVoice(): void {
     if (!voiceAvailable.value || voiceState.value !== 'idle') {
       return
     }
-    voiceHint.value = undefined
+    showHint(undefined)
     host.post({ type: 'voiceStart' })
   }
 
@@ -67,8 +92,13 @@ export function createVoice(host: ChatHost, insert: (text: string) => void): Voi
     if (voiceState.value === 'idle') {
       return
     }
-    voiceHint.value = undefined
+    showHint(undefined)
     host.post({ type: 'voiceCancel' })
+  }
+
+  /** 手动关掉行内提示（提示条右侧那个 ✕）。 */
+  function dismissVoiceHint(): void {
+    showHint(undefined)
   }
 
   function applyAvailability(available: boolean): void {
@@ -77,7 +107,10 @@ export function createVoice(host: ChatHost, insert: (text: string) => void): Voi
       // 插件被关掉：入口隐藏，任何进行中的状态/提示一起收掉
       voiceState.value = 'idle'
       voiceMaxDurationMs.value = 0
-      voiceHint.value = undefined
+      showHint(undefined)
+    } else {
+      // 插件又启用了：旧的"未启用"提示立刻作废（不用等 6 秒）
+      showHint(undefined)
     }
   }
 
@@ -95,20 +128,20 @@ export function createVoice(host: ChatHost, insert: (text: string) => void): Voi
     if (trimmed === '') {
       return
     }
-    voiceHint.value = undefined
+    showHint(undefined)
     insert(trimmed)
   }
 
   function applyError(message: string): void {
     voiceState.value = 'idle'
-    // 失败只在输入区下方给一行行内提示，**不进会话区**
-    voiceHint.value = message
+    // 失败只在输入区下方给一行行内提示（6 秒后自动消失），**不进会话区**
+    showHint(message)
   }
 
   function reset(): void {
     voiceState.value = 'idle'
     voiceMaxDurationMs.value = 0
-    voiceHint.value = undefined
+    showHint(undefined)
   }
 
   return {
@@ -120,6 +153,7 @@ export function createVoice(host: ChatHost, insert: (text: string) => void): Voi
       startVoice,
       stopVoice,
       cancelVoice,
+      dismissVoiceHint,
     },
     applyAvailability,
     applyState,

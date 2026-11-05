@@ -53,6 +53,45 @@ function eventStep(event: SessionEvent): number | undefined {
     return typeof frameStep === 'number' ? frameStep : undefined
 }
 
+/**
+ * 丢掉**被后续事件推翻的 interrupted 收尾**，返回清理后的事件序列。
+ *
+ * 服务端冷读会给"没关的尾回合"合成一条 `turn/end(reason=interrupted)`；上游客户端每次整体重读
+ * 快照（replace），所以合成收尾一旦被真实事件推翻就自然消失。本插件的窗口是**增量累积**的：
+ * 先吃到带合成收尾的快照、之后同一回合的真实内容/真实收尾再追加进来，于是同一回合会同时带着
+ * "合成 interrupted"与"真实完成" → 页面显示「已停止 + 任务已停止」而网页端是「已完成，用时 X」
+ *
+ * 这里在**建节点之前**把这类已被推翻的合成收尾删掉，效果等价于上游的"整份替换"：
+ * 节点层（`turn-error`/状态）仍然只按"一条收尾"的常规语义处理，不需要自造"后写胜"。
+ *
+ * 判据：某条 interrupted 收尾之后，同一回合还有**任何**事件（按窗口先后次序，不比 seq ——
+ * 合成收尾不落盘、后续真实写入可能复用同一 seq），它就已被推翻。真正的 interrupted
+ *（之后该回合再无事件）不会被删。
+ *
+ * @param events - 当前窗口事件。
+ * @returns 清理后的事件（没有可删项时原样返回同一个数组）。
+ */
+function dropStaleInterruptedEnds(events: readonly SessionEvent[]): readonly SessionEvent[] {
+    const lastIndexByTurn = new Map<number, number>()
+    for (let i = 0; i < events.length; i += 1) {
+        const turn = eventTurn(events[i] as SessionEvent)
+        if (turn !== undefined) lastIndexByTurn.set(turn, i)
+    }
+    const stale = new Set<number>()
+    for (let i = 0; i < events.length; i += 1) {
+        const event = events[i] as SessionEvent
+        if (event.type !== 'turn/end') continue
+        const reasonKind = (event.data['reason'] as Record<string, unknown> | undefined)?.['kind']
+        if (reasonKind !== 'interrupted') continue
+        const turn = eventTurn(event)
+        if (turn === undefined) continue
+        const last = lastIndexByTurn.get(turn)
+        if (last !== undefined && last > i) stale.add(event.seq)
+    }
+    if (stale.size === 0) return events
+    return events.filter((event) => !(event.type === 'turn/end' && stale.has(event.seq)))
+}
+
 /** 边界事件（turn/step 开合）重建时间线。 */
 function buildTimeline(events: readonly SessionEvent[]): Timeline {
     const turns = new Map<number, TurnTimeline>()
@@ -683,6 +722,13 @@ function failureFrom(event: SessionEvent): { message: string; code?: string } | 
         const inner = (reason["reason"] ?? {}) as Record<string, unknown>
         if (inner["kind"] === "hook" && inner["reason"] === "deepseek-account/signed-out") return { message: "Stopped because you signed out of DeepSeek.", code: "ACCOUNT_SIGNED_OUT" }
     }
+    // 宿主中途退出：服务端冷读会把没关的尾回合**合成**一条 `turn/end`（reason=interrupted），
+    // 网页端据此渲染「任务已停止 + DSH 进程在本轮完成前退出…」。缺这一支时页面对这条合成事件
+    // 不建 turn-error 节点 → 那一格**空白**（真机截图）。
+    // 文案照上游英文原文给（中文由展示层按 code 决议）。
+    if (reasonKind === "interrupted") {
+        return displayFailure({ message: "The DSH process exited before this turn finished.", code: "INTERRUPTED" })
+    }
     return undefined
 }
 
@@ -909,6 +955,9 @@ export function readInboxClaims(
  *   认领只有它知道，重扫尾巴推不出来）；全量路径省略 = 从零开始读整窗。
  */
 export function buildChatNodes(events: readonly SessionEvent[], inboxState?: InboxClaimState, capture?: { at: number; state?: InboxClaimState }, todoSeed: DshTodoItem[] | null = null): ChatNodeModel {
+    // 先做**窗口级归一化**（等价上游每次整体重读快照）：删掉已被后续事件推翻的合成 interrupted
+    // 收尾。这样下面时间线/节点层仍然只处理"一条收尾"，保持上游 `turn-error` 的常规语义。
+    events = dropStaleInterruptedEnds(events)
     const timeline = buildTimeline(events)
     /**
      * **任务清单写入 × 上一次清单**的配对（一次线性扫，与其它索引同一趟里做）。
@@ -928,6 +977,8 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
         turnTimes.set(turn, { ...(t.start === undefined ? {} : { startMs: t.start.time, startSeq: t.start.seq }), ...(t.end === undefined ? {} : { endMs: t.end.time, closed: t.status === 'closed' }) })
     }
     // 收官原因（turn/end.reason.kind，非 completed 才记：对齐宿主 status 字段）。
+    // 重复收尾已在窗口级归一化时删掉被推翻的合成 interrupted（见 `dropStaleInterruptedEnds`），
+    // 所以这里保持上游"一条收尾"的语义即可，不自造后写胜。
     for (const ev of events) {
         if (ev.type !== 'turn/end') continue
         const turn = eventTurn(ev)
@@ -1177,6 +1228,9 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
     // 3.5 turn-error / turn-max-tokens / turn-tail（镜像 turn-error.js / turn-max-tokens.js / turn-tail.js）。
     for (const [turn, timelineTurn] of timeline.turns) {
         const lastStep = [...timelineTurn.steps.values()].at(-1)?.step ?? 0
+        // 失败事实：镜像上游 `turn-error.update`（后到的收尾若没有失败、不清除已有事实）。
+        // 同一回合的"重复收尾"已在窗口级归一化（`dropStaleInterruptedEnds`）里删掉被推翻的合成
+        // interrupted，所以这里与上游一样只会看到一条有效收尾，不需要后写胜的特殊处理。
         let failure: { message: string; code?: string } | undefined
         for (const event of events) {
             if (eventTurn(event) !== turn) continue

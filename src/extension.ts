@@ -11,6 +11,7 @@ import { DshService, DshNoWorkspaceError, SPEECH_TRANSCRIBE_TIMEOUT_MS } from '.
 import type { DshSpeechCatalog } from './api/dshService';
 import { ChatInputService } from './chatInputService';
 import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
+import { dshEvents } from './dsh/events';
 import { DshPanel } from './dshPanel';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
 import type { DshPendingAttachment } from './dsh/submissions';
@@ -643,7 +644,7 @@ const SPEECH_PREPARE_TIMEOUT_MS = 3_600_000;
  * 语音插件（dsh `voice-input-bundle`）可用性探测：`speech/catalog` 通 = 已挂载。
  *
  * 插件被关掉时这条 RPC 会报 `typert gateway: speech/catalog: its strict definition was
- * withdrawn and SRC fallback is forbidden`（真机 2026-11-03）。这种状态下**麦克风入口本身
+ * withdrawn and SRC fallback is forbidden`（真机验证）。这种状态下**麦克风入口本身
  * 就不该出现** —— 页面收到 `voiceAvailability{available:false}` 后不渲染话筒。
  */
 let voiceProbeTimer: ReturnType<typeof setInterval> | undefined;
@@ -665,8 +666,13 @@ async function refreshVoiceAvailability(): Promise<boolean> {
 }
 
 /**
- * 页面就绪时探测一次，并挂一个**低频**轮询：dsh 的 profile 补丁支持热生效，
- * 语音插件可能在页面打开期间被启用/关闭，入口要跟着出现/消失（60s 一次，代价可忽略）。
+ * 页面就绪时探测一次，并挂两条跟随：
+ *
+ * · **事件**（主路）：订上游的 `plugin-manager/changed`（装/卸/开关 Bundle 的广播）—— 用户在
+ *   web 的插件管理里关掉语音插件后，这里**立刻**复核并让页面隐藏话筒（真机要求：最多 10~20 秒内消失，
+ *   事件到达是毫秒级）。
+ * · **低频轮询**（兜底）：dsh 的 profile 补丁也支持热生效，某些改动不一定发那条事件；15s 一次复核，
+ *   代价只是本机一条只读 RPC。
  */
 function ensureVoiceAvailabilityWatch(): void {
     if (voiceProbeTimer !== undefined) {
@@ -675,9 +681,22 @@ function ensureVoiceAvailabilityWatch(): void {
     void refreshVoiceAvailability();
     voiceProbeTimer = setInterval(() => {
         void refreshVoiceAvailability();
-    }, 60_000);
+    }, 15_000);
     // 不阻止扩展宿主退出（Node 定时器）
     voiceProbeTimer.unref?.();
+    // 插件集变化 → 立即复核（与权限目录订阅同一条上游广播，说明见控制流订阅处）。
+    // 订阅常驻扩展宿主生命周期，无需取消（`subscribeStream` 支持多个订阅者，各自独立）。
+    dshEvents.subscribeStream({
+        onEmit: (event) => {
+            if (event === 'plugin-manager/changed') {
+                void refreshVoiceAvailability();
+            }
+        },
+        // 断线期间错过的 emit 不补发：重连成功就重读一次对齐。
+        onReady: () => {
+            void refreshVoiceAvailability();
+        },
+    });
 }
 
 /**
@@ -1092,7 +1111,7 @@ function setupChatWebview(
         }
         const text = (result.text ?? '').trim();
         post({ type: 'voiceState', state: 'idle' });
-        // **没识别到就什么都不显示**（真机 2026-11-03：不说话点停止，会话区冒出「没有听清」；
+        // **没识别到就什么都不显示**（真机反馈：不说话点停止，会话区冒出「没有听清」；
         // 语音的中间态/失败一律留在输入区）。空结果连行内提示都不给。
         if (text === '') {
             return;
@@ -1454,6 +1473,9 @@ function setupChatWebview(
                     await dsh.updateQueue(msg.itemId, action);
                 } catch (e) {
                     const code = e instanceof DshRpcError ? e.code : undefined;
+                    // 诊断行：真机"编辑失败"之争要靠它定死 —— itemId/动作/错误码。
+                    // 用户看不懂这行，但下次复现时输出面板里能直接看出是"条目已被取走"还是别的失败。
+                    console.warn(`[dsh-queue] 动作失败 itemId=${msg.itemId} op=${op} code=${code ?? '(无)'}`);
                     // **编辑 / 删除失败一律提示**（对齐上游队列卡：这两类失败上游照常抛错 → 卡片弹
                     // 「…这条消息可能已经开始发送」）。原先静默刷新会让用户以为点勾把消息发出去了
                     //（2026-10-29 真机：编辑后点勾，消息"自己发送"了，界面却没有任何解释）。
@@ -1466,6 +1488,10 @@ function setupChatWebview(
                     const steerRace =
                         op === 'steer'
                         && (code === 'session/steer-unavailable' || code === 'session/queue-item-not-found');
+                    // **编辑 / 删除**（含"条目已被取走"）照常提示：与上游逐字对齐，维护者定案
+                    // 定案"最好是对齐" —— 宁可让用户看到一句解释，也不静默吞掉。
+                    // 提示的**呈现位置**是插件差异：输入区错误条（上游是 toast；插件没有 toast 层），
+                    // 只显示、不写对话流、8 秒自动消失。
                     if (!steerRace) {
                         post({ type: 'queueActionFailed', op, code });
                     }

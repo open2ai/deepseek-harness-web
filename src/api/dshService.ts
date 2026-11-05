@@ -310,7 +310,7 @@ export class DshNoWorkspaceError extends Error {
  * dsh **实验性语音识别**（`speech` Remote，由 voice-input-bundle 提供）的目录。
  *
  * 只取插件用得到的字段：provider 就绪状态、默认选择、录音上限。字段与上游
- * `SpeechCatalog` 同形（见 `api-speech-to-text/src/types.ts`）。
+ * `SpeechCatalog` 同形。
  */
 export interface DshSpeechCatalog {
     providers?: Array<{
@@ -2169,10 +2169,28 @@ export class DshService {
 
     /** 入列（不发）：按 `seq` 去重、给实时帧合成序号、必要时排序。发不发由调用方定（见 emitRows）。 */
     private appendEvents(incoming: readonly DshStreamEvent[]): void {
-        const fresh: DshStreamEvent[] = [];
+        const fresh: DshStreamEvent[] = []
+        /**
+         * 被**后到的真实收尾**替换掉的合成收尾（冷读 `turn/end(interrupted)`）。
+         *
+         * 合成收尾**不落盘**、序号取"读取时日志尾巴的下一个 seq"；如果之后真实写入的事件刚好
+         * 拿到同一个 seq（真机：turn 43 的合成收尾与真实 `turn/end` 都是 8514），
+         * 原先按 seq 去重会**丢掉真实收尾、留下合成 interrupted** —— 页面于是永远显示「已停止」，
+         * 而网页端是「已完成，用时 X」。这里改成"同一 seq 的 turn/end：后到的真实收尾替换合成收尾"。
+         */
+        const replacedEnds: DshStreamEvent[] = []
+        const endKindOf = (e: DshStreamEvent): unknown => (e.data?.['reason'] as { kind?: unknown } | undefined)?.kind
         for (const e of incoming) {
             if (e.seq !== undefined) {
                 if (this.seenSeqs.has(e.seq)) {
+                    if (e.type === 'turn/end') {
+                        const at = this.streamEvents.findIndex((x) => x.seq === e.seq)
+                        const previous = at >= 0 ? this.streamEvents[at] : undefined
+                        if (previous?.type === 'turn/end' && endKindOf(previous) === 'interrupted' && endKindOf(e) !== 'interrupted') {
+                            this.streamEvents = [...this.streamEvents.slice(0, at), e, ...this.streamEvents.slice(at + 1)]
+                            replacedEnds.push(e)
+                        }
+                    }
                     continue;
                 }
                 this.seenSeqs.add(e.seq);
@@ -2192,7 +2210,17 @@ export class DshService {
             // 其余无序号的事件（如 `snapshot` 帧）原样收：不认识的类型不自作主张（见 design/08 §9.4）
             fresh.push(e);
         }
+        if (replacedEnds.length > 0) {
+            // 替换发生在既有窗口里 → 用整份替换让页面丢掉归一化缓存/断点，按新窗口重建。
+            this.applyWindowChange(this.window.replace(this.streamEvents as unknown as readonly DshStreamEvent[], this.window.hasMore()))
+        }
         if (fresh.length === 0) {
+            for (const e of replacedEnds) {
+                this.noteTurnEnd(e);
+            }
+            if (replacedEnds.some((e) => e.type === 'turn/end')) {
+                this.settlePending = true;
+            }
             return;
         }
         // 实时事件按 seq 递增到达 —— 只在"插进来的不在末尾"时才需要排序（快照合并那种情形）。
@@ -3363,7 +3391,7 @@ export class DshService {
      * @param providerId - 要准备的 provider（来自 catalog）
      */
     async speechPrepare(providerId: string): Promise<void> {
-        // 远端签名是 `prepare(providerId, options?)`：两个**命名形参**，必须平铺（见 auth.ts 的 FLAT_ARGS_METHODS）
+        // 远端签名是 `prepare(providerId, options?)`：两个**命名形参**，必须平铺（见 `FLAT_ARGS_METHODS`）
         await this.call('speech/prepare', { providerId });
     }
 

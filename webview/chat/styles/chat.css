@@ -748,7 +748,18 @@
   .composer-error .codicon { flex: none; margin-top: 2px; font-size: 12px; }
   .composer-error-text { min-width: 0; }
   /* 语音失败的行内提示（复用错误条外观，只贴着输入框；识别为空时整行不渲染） */
-  #voice-hint { margin-bottom: 4px; }
+  #voice-hint { margin-bottom: 4px; align-items: center; }
+  /* 提示条的关闭钮：贴着右端，不抢文案宽度（.composer-error 是 flex，文字块 min-width:0 可收缩） */
+  #voice-hint-close {
+    width: 18px; height: 18px; margin-left: auto; flex: none; border: none; background: none;
+    padding: 0; border-radius: 4px; cursor: pointer; line-height: 0;
+    color: var(--vscode-errorForeground, #f14c4c);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  #voice-hint-close svg { display: block; }
+  #voice-hint-close:hover { background: rgba(128, 128, 128, 0.28); }
+  #voice-hint-close:focus { outline: none; }
+  #voice-hint-close:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(128, 128, 128, 0.7); }
   #inputbox:focus-within { border-color: var(--vscode-focusBorder, #4daafc); }
   /* @ 引用贴片：叠在 textarea 首行行首(absolute，不占高)；textarea 用 text-indent 只缩进首行 → 回车/换行回到最左
      （试过改成 padding-left 整块让位：光标确实不会跑到贴片左边，但正文整块右缩不好看，已回退。） */

@@ -170,6 +170,24 @@ function toChainItemFromNode(c: RenderChainItem): DshTurnProcessItem {
     if (c.kind === 'command') {
         return { kind: 'command', key: keyOf(c.key), name: c.name, ...(c.outcome === undefined ? {} : { outcome: c.outcome as { kind: 'success' | 'error'; text?: string } }) }
     }
+    // 模型重试链进过程链（上游 `groupTree:'process'`）：整份事实原样搬，渲染与顶层那条共用 `RetryRow`。
+    if (c.kind === 'retry') {
+        return {
+            kind: 'retry',
+            key: keyOf(c.key),
+            retryId: c.retryId,
+            retry: c.retry,
+            ...(c.turn === undefined ? {} : { turn: c.turn }),
+            ...(c.step === undefined ? {} : { step: c.step }),
+            ...(c.provider === undefined ? {} : { provider: c.provider }),
+            ...(c.mode === undefined ? {} : { mode: c.mode }),
+            ...(c.maxRetries === undefined ? {} : { maxRetries: c.maxRetries }),
+            ...(c.delayMs === undefined ? {} : { delayMs: c.delayMs }),
+            ...(c.failure === undefined ? {} : { failure: c.failure }),
+            ...(c.started === undefined ? {} : { started: c.started }),
+            ...(c.cancelled === true ? { cancelled: true } : {}),
+        }
+    }
     return {
         kind: 'tool',
         key: keyOf(c.key),

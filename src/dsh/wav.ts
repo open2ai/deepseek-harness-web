@@ -179,7 +179,7 @@ export function toCanonicalWave(bytes: Uint8Array): { wav: Uint8Array; seconds: 
 /**
  * 给**裸 PCM16 字节**补一个规范 WAV 头（16 kHz / 单声道 / 16-bit）。
  *
- * macOS/Linux 的录音工具按裸 `s16le` 落盘（见 `voice.ts`）：进程被停掉时已经写出的字节就是
+ * macOS/Linux 的录音工具按裸 `s16le` 落盘（见宿主录音实现）：进程被停掉时已经写出的字节就是
  * 有效音频，只是没有 RIFF 头 —— 这里补头比"等工具自己收尾"可靠得多（SIGKILL 后工具不会再写头）。
  *
  * @param pcm - 裸 PCM16 little-endian 字节（长度应为偶数；奇数尾字节由调用方丢掉）。

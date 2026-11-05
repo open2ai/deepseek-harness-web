@@ -24,7 +24,8 @@ const FAILURE_TEXT: Record<string, string> = {
   QUOTA: '当前请求的额度已用尽',
   ACCOUNT_QUOTA: '当前请求的额度已用尽',
   // 宿主在回合中途退出（进程被杀 / 窗口关闭）：与"用户按停止"分开说，否则用户会以为是自己停的。
-  INTERRUPTED: 'DSH 进程在本轮结束前退出了。',
+  // 逐字取自上游 locale（`message.failure.interrupted`）。
+  INTERRUPTED: 'DSH 进程在本轮完成前退出（例如被强制结束、崩溃或关闭超时），重新启动后本轮已中止。未完成的工具调用结果未知。',
 }
 
 /** 有固定文案的 code 集合（供守卫与调用方核对，勿与上游 `failureMessage()` 漂移）。 */

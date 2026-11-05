@@ -109,6 +109,28 @@ export type DshTurnProcessItem =
       name: string | null
       outcome?: { kind: 'success' | 'error'; text?: string }
     }
+  /**
+   * **过程链上的模型重试链**（上游 `model-retry` 节点；`groupTree:'process'` → 过程折叠里的成员）。
+   *
+   * 与顶层那条独立行（`ChatRow` 的 `kind: 'retry'`）**共用同一个组件**（`RetryRow`）与同一份
+   * 文案决议；区别只在装在哪里：有 assistant 行可挂 → 这里是链项，
+   * 跟着过程一起折叠；没有回答步的回合（旧窗口 / 请求期失败）→ 退回顶层行。
+   */
+  | {
+      kind: 'retry'
+      key: number
+      retryId: string
+      retry: number
+      turn?: number
+      step?: number
+      provider?: string
+      mode?: string
+      maxRetries?: number
+      delayMs?: number
+      failure?: { message?: string; code?: string }
+      started?: number
+      cancelled?: boolean
+    }
 
 /** 过程折叠计数（三个计数：toolCallCount=非 subagent 工具调用数；
  *  messageCount=最终答复前带文本的中间 assistant 消息数；subagentCount=subagent 委派数） */
@@ -833,6 +855,8 @@ export interface ChatStore {
   stopVoice(): void
   /** 放弃本次录音（不转写、不落任何文字）。 */
   cancelVoice(): void
+  /** 手动关掉语音的行内提示（提示条右侧的 ✕）。 */
+  dismissVoiceHint(): void
   togglePopup(w: 'perm' | 'model' | 'mode'): void
   /** 打开「仅模型列表的可搜索弹窗」（/model 斜杠入口用；与按钮的完整模型弹窗区分） */
   openModelSearch(): void

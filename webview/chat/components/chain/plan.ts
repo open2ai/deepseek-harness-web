@@ -11,6 +11,7 @@ import { renderMd } from '../../core/markdown'
 import type { ScrollEdges } from '../../core/scroll-edges'
 import { ContextInjectionRow } from '../message/ContextInjectionRow'
 import { CommandRow } from '../message/CommandRow'
+import { RetryRow } from '../message/RetryRow'
 import { ReasoningRow } from './ReasoningRow'
 import { ToolRow } from './ToolRow'
 
@@ -125,6 +126,11 @@ export function chainItemNode(
     // 组件声明的是 `Extract<ChatRow, { kind: 'command' }>`（比链项多一个 `commandId`）：
     // 它这一支**不读 `commandId`**（标题/摘要/可展开全走 `name` 与 `outcome`），故按形状等价断言传进去。
     return html`<${CommandRow} key=${item.key} row=${item as unknown as Extract<ChatRow, { kind: 'command' }>} />`
+  }
+  if (item.kind === 'retry') {
+    // 模型重试链（上游 `model-retry`，过程折叠里的成员）：与顶层那条独立行**同一个组件**。
+    // 组件声明的是 `Extract<ChatRow, { kind: 'retry' }>`（比链项多一个 `retryId` 而已，形状等价）。
+    return html`<${RetryRow} key=${item.key} row=${item as unknown as Extract<ChatRow, { kind: 'retry' }>} />`
   }
   return html`<${ToolRow} key=${item.key} item=${item} store=${ctx.store} />`
 }

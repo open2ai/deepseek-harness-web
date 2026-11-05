@@ -59,11 +59,27 @@ export function createQueue(
   notify: (text: string) => void,
   pendingSubmissions: () => readonly PendingSubmission[]
 ): QueueSlice {
-  const queueItems = signal<QueueItemView[]>([])
+  /** 宿主队列帧的**原表**（整表替换）；对外读 `queueItems`（已按"日志里已落账"去重）。 */
+  const rawQueueItems = signal<QueueItemView[]>([])
+  /** 对话区已落账（日志里已有对应用户行）的提交标识：挡 pending 气泡/队列项的重复显示。 */
+  const durableRpcIds = signal<ReadonlySet<string>>(new Set<string>())
+  /**
+   * 队列卡要显示的行：原表去掉"对话区已经落账"的条目。
+   *
+   * 为什么要按 `rpcId` 去重（真机）：条目被回合取用、对话区已经出现同一条用户消息时，
+   * 队列帧可能还慢一帧（甚至丢一帧）—— 那一拍队列卡会与对话区**显示同一条消息两遍**，
+   * 用户还能对着已经不存在的条目点编辑，服务端回「这条消息可能已经开始发送」。
+   * 上游队列卡靠服务端收件箱即时移除；插件这边多一道按日志行的去重，等价于"已入档的条目不再是队列"。
+   */
+  const queueItems = computed<QueueItemView[]>(() => {
+    const durable = durableRpcIds.value
+    if (durable.size === 0) {
+      return rawQueueItems.value
+    }
+    return rawQueueItems.value.filter((i) => i.rpcId === undefined || !durable.has(i.rpcId))
+  })
   const queueEditing = signal<QueueEditing | null>(null)
   const queueBusy = signal<string | null>(null)
-  /** 对话区已落账（日志里已有对应用户行）的提交标识：挡 pending 气泡重复显示用（见 noteDurable）。 */
-  const durableRpcIds = signal<ReadonlySet<string>>(new Set<string>())
   /**
    * 对话区末尾的 pending 插话气泡：还没进日志的那条插话。
    *
@@ -125,7 +141,7 @@ export function createQueue(
       }
       queueSessionId = sessionId
     }
-    queueItems.value = [...items]
+    rawQueueItems.value = [...items]
     // 编辑态收敛：条目已经不在队列里（被取走 / 被删），或文本已经与编辑内容一致 → 结束编辑
     const editing = queueEditing.value
     if (editing !== null) {
@@ -187,7 +203,7 @@ export function createQueue(
   }
 
   function reset(): void {
-    queueItems.value = []
+    rawQueueItems.value = []
     queueEditing.value = null
     queueBusy.value = null
     durableRpcIds.value = new Set<string>()

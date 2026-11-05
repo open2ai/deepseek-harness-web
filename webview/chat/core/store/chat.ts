@@ -45,8 +45,15 @@ export function createChatStore(host: ChatHost): ChatStore {
   const selectors = createSelectors(host)
   const question = createQuestion(host)
   const attachments = createAttachments(host)
-  // 队列卡：它不是行（见 store/queue 文件头）。失败提示借用消息切片的通知行（与 selectors 同一注入方式）
-  const queue = createQueue(host, (text) => messages.store.showNotice(text), () => messages.store.pendingSubmissions.value)
+  // 队列卡：它不是行（见 store/queue 文件头）。动作失败走**输入区错误条**（上游 notify toast 同格，
+  // 8 秒自动消失）；不进对话流 —— 真机：编辑失败的提示曾以「通知行」赖在会话区。
+  const queue = createQueue(
+    host,
+    (text) => {
+      messages.store.promptError.value = { message: text }
+    },
+    () => messages.store.pendingSubmissions.value
+  )
   // 显示偏好：全局量，故不参与下面的 reset（见 store/prefs 文件头）
   const prefs = createPrefs()
 
@@ -160,6 +167,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     startVoice: voice.store.startVoice,
     stopVoice: voice.store.stopVoice,
     cancelVoice: voice.store.cancelVoice,
+    dismissVoiceHint: voice.store.dismissVoiceHint,
     // 目录切片
     slashCatalog: catalogs.store.slashCatalog,
     atCatalog: catalogs.store.atCatalog,

@@ -10,6 +10,8 @@
 //
 // 易错点：`liveProcessDetail`（实时细节的门）与**思考行预览**不是一回事 —— 后者的门是
 // `running || settledReasoningPreview`，写在 `Chain.ts` 里。两处曾接反过一次。
+import { reasoningText } from './reasoning-text'
+
 /** 上游 `ProcessActivity` 的全部取值（tools 是兜底类）。 */
 export type ProcessActivity =
   | 'thinking'
@@ -330,7 +332,8 @@ export function liveProcessDetailOf(chain: readonly ActivityItemLike[]): string 
     // ⚠️ **只有还在跑的那一步**才算实时细节（上游 要求 `status === 'running'`）。
     // 少了这道门，已定稿/已中断的步也会被当成「正在发生的事」贴到片头后面。
     if (item.status !== 'running') continue
-    const paragraphs = item.text.split(/\r?\n[\t ]*\r?\n/)
+    // 显示前先剥签名段（对齐上游 rc.5 的实时思考细节口径）
+    const paragraphs = reasoningText(item.text).split(/\r?\n[\t ]*\r?\n/)
     for (let p = paragraphs.length - 1; p >= 0; p--) {
       const detail = normalizeLiveDetail(String(paragraphs[p] ?? '').replaceAll('**', ''))
       if (detail !== '') return detail
@@ -370,7 +373,8 @@ function liveReasoningDetailOfNodes(nodes: readonly ActivityNodeLike[]): string 
         for (let b = blocks.length - 1; b >= 0; b--) {
             const block = blocks[b] as { kind?: unknown; text?: unknown } | null | undefined
             if (block?.kind !== 'reasoning' || typeof block.text !== 'string') continue
-            const paragraphs = block.text.split(/\r?\n[\t ]*\r?\n/)
+            // 显示前先剥签名段（上游 rc.5 `liveReasoningDetail` 同口径；数据层 block.text 保持原始）
+            const paragraphs = reasoningText(block.text).split(/\r?\n[\t ]*\r?\n/)
             for (let p = paragraphs.length - 1; p >= 0; p--) {
                 const detail = normalizeLiveDetail(String(paragraphs[p] ?? '').replaceAll('**', ''))
                 if (detail !== '') return detail

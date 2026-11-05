@@ -563,10 +563,16 @@ export function Composer({ store }: { store: ChatStore }) {
           ${busy === 'switching' ? '正在切换…' : '正在加载会话…'}
         </div>`
       : null}
-    ${/* 语音失败的**行内提示**：与会话区无关，只挨着输入框显示（识别为空时连这行都没有）。 */ ''}
+    ${/* 语音失败的**行内提示**：与会话区无关，只挨着输入框显示（识别为空时连这行都没有）。
+         右侧给一个**真的 ✕**：提示会 6 秒自动消失，但用户想立刻关掉时不能点了没反应。 */ ''}
     ${store.voiceHint.value !== undefined
       ? html`<div class="composer-error voice-hint" role="status" id="voice-hint">
           <span class="codicon codicon-error"></span><span class="composer-error-text">${store.voiceHint.value}</span>
+          <button id="voice-hint-close" type="button" aria-label="关闭提示" title="关闭"
+            onClick=${() => store.dismissVoiceHint()}>
+            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          </button>
         </div>`
       : null}
     <${AttachmentBar} store=${store} />
