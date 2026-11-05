@@ -12,6 +12,7 @@ import {
     type ProcessGroupSnapshot,
     type ProcessPresentation,
     type ProcessSpec,
+    type QuestionReplyData,
     type SessionEvent,
 } from './types'
 import { isAtOrOutside, positionOfKind } from './group-tree'
@@ -598,6 +599,45 @@ function textOfBlocks(content: unknown): string {
     return content.map((b) => (b !== null && typeof b === "object" && (b as { type?: unknown }).type === "text" ? String((b as { text?: unknown }).text ?? "") : "")).join("")
 }
 
+/**
+ * 迟到回答（`user/message` 的 `source.kind === 'user-question-reply'`）：不是普通用户气泡，
+ * 而是右对齐的「问题与回答」。问答对从正文 JSON 解析；解析不出时保留原文（上游同）。
+ */
+function questionReplyOf(source: Record<string, unknown>, text: string): QuestionReplyData | undefined {
+    if (source['kind'] !== 'user-question-reply' || source['outcome'] !== 'answered' || typeof source['callId'] !== 'string') {
+        return undefined
+    }
+    const fallback: QuestionReplyData = { callId: source['callId'], questions: [], answers: [], text }
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(text)
+    } catch {
+        return fallback
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback
+    const record = parsed as Record<string, unknown>
+    if (!Array.isArray(record['questions'])) return fallback
+    const questions: QuestionReplyData['questions'] = []
+    for (const item of record['questions']) {
+        if (item === null || typeof item !== 'object') continue
+        const q = item as Record<string, unknown>
+        if (typeof q['id'] !== 'string' || typeof q['question'] !== 'string') continue
+        questions.push({ id: q['id'], question: q['question'], ...(typeof q['header'] === 'string' ? { header: q['header'] } : {}) })
+    }
+    const answers: QuestionReplyData['answers'] = []
+    for (const item of Array.isArray(record['answers']) ? record['answers'] : []) {
+        if (item === null || typeof item !== 'object') continue
+        const a = item as Record<string, unknown>
+        if (typeof a['id'] !== 'string' || !Array.isArray(a['selected'])) continue
+        answers.push({
+            id: a['id'],
+            selected: a['selected'].filter((v): v is string => typeof v === 'string'),
+            ...(typeof a['custom'] === 'string' ? { custom: a['custom'] } : {}),
+        })
+    }
+    return { callId: source['callId'], questions, answers, text }
+}
+
 /** 压缩检查点（user/message 的替换型 + 源带 compactionId）。 */
 function compactionCheckpoint(event: SessionEvent): { compactionId: string; sourceCommandId?: string } | undefined {
     if (event.type !== "user/message" || isAppend(event)) return undefined
@@ -1132,7 +1172,13 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
             // 插话/唤醒都只能从收件箱 splice 史判（镜像上游 message.js）：事件形状上区分不出。
             const steering = messageId !== '' && inboxClaims.steering.has(messageId)
             const key = `user:${event.seq}`
-            if (isUser) {
+            const questionReply = questionReplyOf(src, text)
+            if (questionReply !== undefined) {
+                // 迟到补答：走 user 行但带 `questionReply` 数据，渲染层换成右对齐的「问题与回答」气泡
+                mkNode(key, 'user', String(event.seq), event.seq, loc as ChatLocation, 'visible', {
+                    text, content: event.data['content'], source, questionReply,
+                })
+            } else if (isUser) {
                 // data 必须带上 `source`：页面靠 `source.rpcId` 认领本地乐观行（丢了就闪）。
                 // ⚠️ **`content` 也必须带上**（2026-10-11 修）：用户消息里的**图片/文件附件**只存在于
                 // `data.content` 的块里，原先这里只留 `text` → 附件引用在**节点侧就丢了**，

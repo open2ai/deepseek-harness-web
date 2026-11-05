@@ -743,7 +743,7 @@ export interface DshImageAttachment {
 }
 
 /**
- * 往前翻**一页**历史（适配上游 0.1.7-rc.2 的 `session.page`，见 `SessionPageRequest`）。
+ * 往前翻**一页**历史（0.2.2 的 `session/events`，见 `SessionEventsRequest`）。
  *
  * 上游客户端 `ISession.loadOlder()` 走的就是这条路：`events.prepend({ beforeSeq, maxMessages })`
  * —— 以**当前窗口的第一条事件序号**为 `beforeSeq`，取它之前的一页；返回的 `hasMore` 说明再往前还有没有。
@@ -762,8 +762,12 @@ export async function pageSessionEvents(
     maxMessages: number = HISTORY_PAGE.maxMessages,
     /** 目标序号（含）：`-1` = 不设下界（只按 `beforeSeq` 取一页）。导轨"翻到某个回合"用它。 */
     throughSeq = -1
-): Promise<{ events: RawEvent[]; hasMore: boolean }> {
-    const value = await rpcCall<{ records?: unknown[]; hasMore?: boolean }>('session.page', {
+): Promise<{ events: RawEvent[]; hasMore: boolean; cursor?: number }> {
+    /**
+     * 一页历史：只走 `session/events`（0.2.2 的新名字；`session/page` 已只是它的兼容别名）。
+     * 返回多一个 `cursor`：本次实际使用的切点。
+     */
+    const value = await rpcCall<{ records?: unknown[]; hasMore?: boolean; cursor?: number }>('session/events', {
         address: { kind: 'session', sessionId },
         throughSeq: Math.floor(throughSeq),
         beforeSeq: Math.floor(beforeSeq),
@@ -777,39 +781,38 @@ export async function pageSessionEvents(
     return {
         events: snapshotRecordsToEvents(Array.isArray(value?.records) ? value.records : []),
         hasMore: value?.hasMore === true,
+        ...(typeof value?.cursor === 'number' ? { cursor: value.cursor } : {}),
     };
 }
 
 /**
- * 读取会话里**被引用过**的图片附件字节（上游端点 `session/attachment`）。
+ * 一张已存档图片的完整引用（`ImageAttachmentRef`）。
  *
- * 上游会遍历会话事件校验该附件确被本会话引用，未被引用/找不到时返回 `session/attachment-invalid`
- * （附带 `reason`）——错误原样上抛，不吞、不猜。
- * @param sessionId - 会话 id。
- * @param attachmentId - 结果 image 块里 `attachment.attachmentId` 的原值（不透明，不要解析）。
+ * 新主机的 `session/attachment` 要求**整条引用**（id + 媒体类型 + 尺寸/名字），不再只收 id，
+ * 也**不再校验"该会话历史里引用过它"**（权限只看 gateway 作用域）。尺寸/名字可缺，id 与
+ * `mediaType` 必需（服务端会按存储校验）。
+ */
+export interface DshImageAttachmentRef {
+    attachmentId: string;
+    mediaType?: string;
+    width?: number;
+    height?: number;
+    name?: string;
+}
+
+/**
+ * 读取一张已存档图片的字节（上游端点 `session/attachment`）。
+ *
+ * 只走 0.2.2 的形状：`{sessionId, attachment: 完整引用}`；尺寸/名字可缺，id 与 `mediaType` 必需。
+ * @param sessionId - 会话 id（仅用作 gateway 权限作用域）。
+ * @param attachment - 图片引用。
  * @returns 媒体类型与 base64 字节。
  */
-export async function readSessionAttachment(sessionId: string, attachmentId: string): Promise<DshImageAttachment> {
-    /**
-     * ⚠️ **方法名与参数形状都不能照搬邻居**：
-     *
-     *   ① **方法名是 `session/attachment`（斜杠）**，不是本文件其它函数的 `session.xxx` 点号形态。
-     *      网关会校验信封里的 `method` 与 `/api/<端点>` 是否一致，点号名会被直接挡掉：
-     *      `gateway/bad-request: method "session.attachment" does not match endpoint "session/attachment"`。
-     *      （点号名那条路连路由都没有：`POST /api/session.attachment` → 404 not found。）
-     *   ② **参数要包一层 `request`**：这个端点的描述符要 `{ request: { sessionId, attachmentId } }`，
-     *      摊平写会被 `gateway/arguments-invalid` 挡掉：
-     *      `missing "request"; unexpected "sessionId", "attachmentId"`。
-     *
-     * 两个都改对之后实测：99,697 字节的 JPEG 原样取回，文件头 `ffd8ff…` 对得上
-     *（取证脚本 `tmp/_attach.fetch.probe.mjs`）。
-     */
-    const value = await rpcCall<{ attachment?: { mediaType?: unknown }; data?: unknown }>('session/attachment', {
-        request: {
-            sessionId,
-            attachmentId,
-        },
-    });
+export async function readSessionAttachment(sessionId: string, attachment: DshImageAttachmentRef): Promise<DshImageAttachment> {
+    const value = await rpcCall<{ attachment?: { mediaType?: unknown }; data?: unknown }>(
+        'session/attachment',
+        { request: { sessionId, attachment } }
+    );
     const mediaType = typeof value?.attachment?.mediaType === 'string' ? value.attachment.mediaType : '';
     const data = typeof value?.data === 'string' ? value.data : '';
     if (mediaType === '' || data === '') {
@@ -944,6 +947,8 @@ export async function modelCatalog(): Promise<{
             name: string;
             description?: string;
             reasoning?: { efforts?: Array<{ id: string; name: string }>; defaultEffort?: string };
+            /** provider 广告的徽标（本地化文本/语气；原样透传，展示侧按中文优先解析） */
+            badge?: unknown;
         }>;
     }>;
     /** 上游对加载失败 provider/组的提示，形状以 0.1.5-rc.2 返回为准（仅透传、UI 只显示组数） */

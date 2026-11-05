@@ -47,7 +47,7 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
              * 又没有附件字段 —— 两处一起把用户消息里的图片/文件丢干净（真机现象：会话区不显示、
              * 也点不开）。`imageRefs` 走附件层按 `attachmentId` 向宿主取字节（与图片卡同一条路）。
              */
-            return { kind: 'user', key: keyOf(r.key), text: r.text, images: [], time: r.timeMs !== undefined ? formatMsgClock(r.timeMs) : '', ...(r.rpcId !== undefined ? { rpcId: r.rpcId } : {}), ...(r.steering === true ? { steering: true } : {}), ...(r.imageRefs !== undefined ? { imageRefs: r.imageRefs as never } : {}), ...(r.files !== undefined ? { files: r.files } : {}) }
+            return { kind: 'user', key: keyOf(r.key), text: r.text, images: [], time: r.timeMs !== undefined ? formatMsgClock(r.timeMs) : '', ...(r.rpcId !== undefined ? { rpcId: r.rpcId } : {}), ...(r.steering === true ? { steering: true } : {}), ...(r.imageRefs !== undefined ? { imageRefs: r.imageRefs as never } : {}), ...(r.files !== undefined ? { files: r.files } : {}), ...(r.questionReply !== undefined ? { questionReply: r.questionReply } : {}) }
         case 'sysprompt':
             return { kind: 'sysprompt', key: keyOf(r.key), text: r.text }
         case 'command':

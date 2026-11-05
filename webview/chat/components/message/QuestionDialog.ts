@@ -33,6 +33,17 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
   const [index, setIndex] = useState(0)
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [minimized, setMinimized] = useState(false)
+  /** 长问题标题的「展开 / 收起」（0.2.2 的 `text.expand` / `text.collapse`）。 */
+  const [expandedQuestion, setExpandedQuestion] = useState(false)
+  /** 长选项描述的「展开 / 收起」（键 = 题 id + 选项序号；上游同样对描述夹取两行）。 */
+  const [expandedDesc, setExpandedDesc] = useState<Set<string>>(() => new Set())
+  const toggleDesc = (key: string): void => {
+    setExpandedDesc((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(key)) next.add(key)
+      return next
+    })
+  }
   const [feedback, setFeedback] = useState('')
   if (q === null && late === null) return null
 
@@ -131,7 +142,11 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
     <div class="q-dialog-head">
       <div class="q-dialog-eyebrow">
         ${current.header ? html`<span class="q-dialog-header">${current.header}</span>` : null}
-        <span class="q-dialog-q">${current.question}</span>
+        <span class="q-dialog-q" data-expanded=${expandedQuestion ? 'true' : undefined}>${current.question}</span>
+        ${current.question.length > 120
+          ? html`<button type="button" class="q-dialog-copy-toggle"
+              onClick=${() => setExpandedQuestion((v) => !v)}>${expandedQuestion ? '收起' : '展开'}</button>`
+          : null}
       </div>
       <button type="button" class="q-dialog-icon" aria-expanded=${!minimized}
         title=${minimized ? '展开问题卡片' : '收起问题卡片'}
@@ -139,7 +154,7 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
         onClick=${() => setMinimized((v) => !v)}>
         <span class=${'codicon ' + (minimized ? 'codicon-chevron-up' : 'codicon-chevron-down')}></span>
       </button>
-      <button type="button" class="q-dialog-icon" title=${late === null ? '放弃整组问题' : '收起（提问仍可回答）'}
+      <button type="button" class="q-dialog-icon" title=${late === null ? '放弃整组问题' : '收起问题面板，可从工具调用重新打开'}
         aria-label=${late === null ? '放弃整组问题' : '收起'} onClick=${close}>
         <span class="codicon codicon-close"></span>
       </button>
@@ -153,16 +168,25 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
                 ${options.map((o, oi) => {
                   const rec = splitRecommended(o.label)
                   const selected = draft.selected.includes(o.label)
-                  return html`<button type="button" key=${o.label}
-                    class=${'q-dialog-opt' + (selected ? ' selected' : '')}
-                    role=${current.multiSelect ? 'checkbox' : 'radio'} aria-checked=${selected}
-                    onClick=${() => selectOption(current, o.label)}>
-                    <span class="q-opt-index">${oi + 1}</span>
-                    <span class="q-opt-body">
-                      <span class="q-opt-label">${rec.text}${rec.recommended ? html`<span class="q-opt-rec">推荐</span>` : null}</span>
-                      ${o.description ? html`<span class="q-opt-desc">${o.description}</span>` : null}
-                    </span>
-                  </button>`
+                  const descKey = `${current.id}:${oi}`
+                  const descOpen = expandedDesc.has(descKey)
+                  const longDesc = (o.description ?? '').length > 80
+                  return html`<div class="q-dialog-opt-row" key=${o.label}>
+                    <button type="button"
+                      class=${'q-dialog-opt' + (selected ? ' selected' : '')}
+                      role=${current.multiSelect ? 'checkbox' : 'radio'} aria-checked=${selected}
+                      onClick=${() => selectOption(current, o.label)}>
+                      <span class="q-opt-index">${oi + 1}</span>
+                      <span class="q-opt-body">
+                        <span class="q-opt-label">${rec.text}${rec.recommended ? html`<span class="q-opt-rec">推荐</span>` : null}</span>
+                        ${o.description ? html`<span class="q-opt-desc" data-expanded=${descOpen ? 'true' : undefined}>${o.description}</span>` : null}
+                      </span>
+                    </button>
+                    ${longDesc
+                      ? html`<button type="button" class="q-opt-desc-toggle"
+                          onClick=${() => toggleDesc(descKey)}>${descOpen ? '收起' : '展开'}</button>`
+                      : null}
+                  </div>`
                 })}
               </div>
               <textarea class="q-dialog-input q-dialog-custom" rows="1" value=${draft.custom}

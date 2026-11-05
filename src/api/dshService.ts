@@ -53,6 +53,7 @@ import {
     rpcCall,
     runSessionCommand,
     readSessionAttachment,
+    type DshImageAttachmentRef,
     modelCatalog,
     workspaceList,
     dshEvents,
@@ -102,7 +103,9 @@ import { stopTargetOf, type DshSubagentAddress } from '../dsh/stop-target';
 import { liveChunkSeq } from '../dsh/official/live-chunk-seq';
 import { expandAssistantStream } from '../dsh/official/assistant-stream';
 
-const NODE_REQUIREMENT = '^22.19.0 || >=24.0.0';
+// dsh 0.2.2 起的运行要求（其 package.json 的 engines.node = ">=24.9.0"）。插件只跟这一代：
+// 不再兼容 0.2.1-rc.5 及更早的 Node 22 运行环境。
+const NODE_REQUIREMENT = '>=24.9.0';
 /**
  * 「上次自起的那个实例」在 globalState 里的落盘键：`{ port, pid?, authUrl? }`。
  *
@@ -340,6 +343,32 @@ export interface DshTranscript {
     inferenceSeconds?: number;
 }
 
+/**
+ * 解析模型目录里的 provider 徽标：文本可能是单串或按语言分组的映射，插件 UI 用中文，
+ * 取 `zh` → `en` 兜底；语气原样透传（`neutral`/`info`/`success`/`warning`）。
+ */
+function modelBadgeOf(raw: unknown): { text: string; tone: string } | undefined {
+    if (raw === null || typeof raw !== 'object') {
+        return undefined;
+    }
+    const badge = raw as { text?: unknown; tone?: unknown };
+    const textRaw = badge.text;
+    let text = '';
+    if (typeof textRaw === 'string') {
+        text = textRaw;
+    } else if (textRaw !== null && typeof textRaw === 'object') {
+        const byLocale = textRaw as Record<string, unknown>;
+        text = typeof byLocale['zh'] === 'string'
+            ? byLocale['zh']
+            : typeof byLocale['en'] === 'string'
+                ? byLocale['en']
+                : '';
+    }
+    if (text === '') {
+        return undefined;
+    }
+    return { text, tone: typeof badge.tone === 'string' ? badge.tone : 'neutral' };
+}
 
 export class DshService {
     /**
@@ -663,10 +692,11 @@ export class DshService {
 
     private isNodeCompatible(version: string): boolean {
         const [major, minor] = version.split('.').map((s) => parseInt(s, 10));
-        if (major === 22) {
-            return minor >= 19;
+        if (!Number.isFinite(major) || !Number.isFinite(minor)) {
+            return false;
         }
-        return major >= 24;
+        // dsh 0.2.2 起要求 Node >= 24.9.0（24.9 之前不保证其能力探测可用）。
+        return major > 24 || (major === 24 && minor >= 9);
     }
 
     private checkSystemNode(): Promise<{ ok: boolean; version?: string }> {
@@ -1091,6 +1121,23 @@ export class DshService {
     onSubmissionsAdmitted: ((sessionId: string | undefined) => void) | undefined;
 
     /**
+     * **Host 接受了一次提示词**（prompt RPC 成功）的回调：参数是本次提交标识。
+     *
+     * 上游客户端的本地回显在"接受后"才进 `pendingSubmissions`（prompt 回执或带 rpcId 的
+     * 收件箱行先到者）。插件同样在**接受之后**才把"发送中…"行发布给页面 —— 拒绝/挂起期间
+     * 不该先冒出一行。收件箱那条证据由台账自己认（`observeInbox`），这里只补回执这条。
+     */
+    onPromptAccepted: ((requestId: string | undefined) => void) | undefined;
+
+    /**
+     * **当前能否观察会话**（`session/follow` 流是否活着）的回调：false = 断线/重连中。
+     *
+     * 运行状态行据此**冻结计时**（上游 `RunningStatus.paused`）：断线期间显示的时刻停在断开那一刻，
+     * 不继续涨也不清零；重新拿到快照后再恢复。
+     */
+    onSessionObserved: ((observing: boolean) => void) | undefined;
+
+    /**
      * 任务清单变更回调（输入框上方的常驻条；`null` = 没有清单）。
      *
      * 与行**同源**：都从 `streamEvents` 派生，因此只在 `emitRows` 那一处算 —— 两条通路各算一遍，
@@ -1196,6 +1243,10 @@ export class DshService {
             this.followHandle = followSession(sessionId, {
                 onSnapshot: (win) => {
                     this.replaceWindow(win);
+                },
+                // 能否观察会话（运行状态 paused 的事实来源；断线期间冻结计时）
+                onObservation: (observing) => {
+                    this.onSessionObserved?.(observing);
                 },
                 // 打开历史失败（上游 `openState === 'error'` 那条横幅）：拿到过快照就不再报（见 follow.ts）
                 onOpenError: (error) => {
@@ -1808,6 +1859,7 @@ export class DshService {
         this.ownPendingTurns += 1;
         try {
             await sendPrompt(sid, content, opts.requestId, opts.mode);
+            this.onPromptAccepted?.(opts.requestId);
         } catch (e) {
             // 没排上队：撤销登记，否则下一次（别人的）turn/end 会被当成这一轮的结算
             this.ownPendingTurns = Math.max(0, this.ownPendingTurns - 1);
@@ -3439,7 +3491,17 @@ export class DshService {
     /** 列出可用模型 + 当前选择 + 推理等级（rc1：目录=session/modelCatalog，当前=modelSelection 投影） */
     async listModels(): Promise<{
         current?: { provider?: string; model?: string; reasoningEffort?: string };
-        groups?: Array<{ id: string; name: string; models: Array<{ id: string; name: string; reasoning?: { efforts?: Array<{ id: string; name: string }>; defaultEffort?: string } }> }>;
+        groups?: Array<{
+            id: string;
+            name: string;
+            models: Array<{
+                id: string;
+                name: string;
+                reasoning?: { efforts?: Array<{ id: string; name: string }>; defaultEffort?: string };
+                /** 上游 provider 广告的徽标（本地化文本已按中文优先解析；纯显示数据） */
+                badge?: { text: string; tone: string };
+            }>;
+        }>;
         /** 上游对加载失败 provider/组的提示（原样透传；UI 只显示组数） */
         failures?: unknown[];
     }> {
@@ -3461,7 +3523,19 @@ export class DshService {
         }
         return {
             current: current ?? catalog.default,
-            groups: catalog.groups,
+            groups: (catalog.groups ?? []).map((group) => ({
+                id: group.id,
+                name: group.name,
+                models: group.models.map((model) => {
+                    const badge = modelBadgeOf(model.badge);
+                    return {
+                        id: model.id,
+                        name: model.name,
+                        ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
+                        ...(badge === undefined ? {} : { badge }),
+                    };
+                }),
+            })),
             failures: catalog.failures,
         };
     }
@@ -3523,13 +3597,13 @@ export class DshService {
     }
 
     /**
-     * 读取图片附件字节（会话内**被引用过**的附件；供聊天页图片卡按需取，见 webview 的附件大类）。
-     * @param attachmentId - 结果 image 块里的 `attachment.attachmentId` 原值（不透明，不解析）。
+     * 读取一张已存档图片的字节（见 `readSessionAttachment` 的形状兼容说明）。
+     * @param attachment - 图片引用（0.2.2 要求整条引用：id + mediaType，尺寸/名字可缺）。
      * @returns 媒体类型 + 裸 base64。
      */
-    async readImageAttachment(attachmentId: string): Promise<{ mediaType: string; data: string }> {
+    async readImageAttachment(attachment: DshImageAttachmentRef): Promise<{ mediaType: string; data: string }> {
         const sid = await this.getSession();
-        return readSessionAttachment(sid, attachmentId);
+        return readSessionAttachment(sid, attachment);
     }
 
     /**
@@ -3592,6 +3666,7 @@ export class DshService {
         const watch = this.watchTurnEnd(sid, this.durableSeq, opts.isCancelled);
         try {
             await sendPrompt(sid, content, opts.requestId);
+            this.onPromptAccepted?.(opts.requestId);
         } catch (e) {
             // 没发出去：撤销登记，否则下一次 turn/end 会被认成这一轮
             watch.cancel();

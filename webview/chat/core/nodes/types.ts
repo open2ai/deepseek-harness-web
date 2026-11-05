@@ -35,8 +35,21 @@ export interface ChatLocation {
 }
 
 /** 视图节点（上游 `chatNode()`：key/kind/id/target/anchorSeq/location/visibility/data）。 */
-export interface ChatNode {
-    key: string
+/**
+ * **迟到回答**的数据（`user/message` 的 `source.kind === 'user-question-reply'`）：
+ * 超时后补答的用户消息在对话里不是普通气泡，而是右对齐的「问题与回答」气泡
+ *（上游 `QuestionReplyView`）；问答对从消息正文的 JSON 里解析，解析不出时退回原文。
+ */
+export interface QuestionReplyData {
+    /** 那次提问的调用标识（上游 data.callId）。 */
+    callId: string
+    questions: Array<{ id: string; question: string; header?: string }>
+    answers: Array<{ id: string; selected: string[]; custom?: string }>
+    /** 模型面向原文（问答对解析不出时原样展示）。 */
+    text: string
+}
+
+export interface ChatNode {    key: string
     kind: string
     id: string
     target: 'chat'

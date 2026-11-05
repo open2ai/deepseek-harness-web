@@ -22,7 +22,7 @@ export interface OutboxSlice {
 
 export function createOutbox(deps: OutboxDeps): OutboxSlice {
   const { host, composer, catalogs, messages } = deps
-  const { text, attachments, images, refs, runSlash } = composer.store
+  const { text, attachments, images, refs, quote, runSlash } = composer.store
   const { slashCatalog, requestSlashList } = catalogs.store
   const { processing } = messages.store
 
@@ -71,8 +71,12 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     }
     const files = attach.map((a) => ({ receiptId: a.receiptId as string, name: a.name, path: a.path, ...(a.bytes === undefined ? {} : { bytes: a.bytes }) }))
     const refTokens = refs.value.map((r) => r.token)
-    const prompt = [...refTokens, msg].filter(Boolean).join('\n\n') // 发给宿主：含引用 token
-    const display = msg
+    // 选中文本引用（0.2.2 quote）：贴片挂在输入区上方，**发送时才**拼成 Markdown 引用块，
+    // 所以输入框里始终是用户自己写的字、贴片可一键清除（上游原子 chip 的等价文本形态）。
+    const quoteText = quote.value
+    const quoteBlock = quoteText === undefined ? '' : quoteText.split(/\r?\n/u).map((line) => `> ${line}`).join('\n')
+    const prompt = [quoteBlock, ...refTokens, msg].filter(Boolean).join('\n\n') // 发给宿主：含引用 token/引用块
+    const display = [quoteBlock, msg].filter(Boolean).join('\n\n')
     const refSnap = refs.value.map((r) => ({ kind: r.kind, label: r.label, token: r.token }))
     // 提交标识：由本面板 mint，一路带到 session/prompt 的 requestId；
     // 服务端回显 user/message 时会带回同一个值，据它认领本地这一行（避免出现两行）
@@ -91,6 +95,7 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
       attachments.value = []
       images.value = []
       refs.value = []
+      composer.clearQuote()
       text.value = ''
       host.post({ type: 'chatSend', text: prompt, images: imgs, ...(files.length > 0 ? { files } : {}), rpcId, mode })
       return
@@ -104,9 +109,12 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     attachments.value = []
     images.value = []
     refs.value = []
+    composer.clearQuote()
     text.value = ''
     // 不再建本地占位回答行（那正是「发送后闪一下」的来源）：回答只由宿主事件到达时出现；
     // 「深度求索中」由 processing 信号 + 提交台账 + turnActive 三条腿驱动（整表替换时一并重算）。
+    // 「正在发送消息」相位：消息已发出、等 Host 接受；台账出现同 rpcId 或失败即结束（默认 10 秒兜底）。
+    messages.markSending(rpcId)
     processing.value = true
     host.post({ type: 'chatSend', text: prompt, images: imgs, ...(files.length > 0 ? { files } : {}), rpcId })
   }

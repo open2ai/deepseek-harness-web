@@ -8,6 +8,10 @@
 // 回合开始时刻，所以面板中途打开/切回本会话不会从 0 重算；锚点由宿主下发（行上的 `turnStartMs`
 // → store 的 `runAnchorMs`）。锚点未知时按上游只写「深度求索中」、不起算。
 //
+// 0.2.2 的两个新档位（`RunningStatus.paused` / `holding`，判据在看 `core/run-status` 的 `runStatusPhase`）：
+// - paused：宿主连不上/订阅重连中 → 时长冻结在断开那一刻，不涨也不清零；
+// - holding：回合没正式关闭就停了 → 保留这一格的占位，但**不显示文字、也不播报**，等终局行接手。
+//
 // 文案与时长格式集中在 `core/run-status.ts`（纯函数、有守卫）；掠光走 `ShimmerText`（真实文字始终可见）。
 //
 // **图标用转圈**；文字与掠光的颜色仍按上游
@@ -15,23 +19,34 @@
 import { html } from 'htm/preact'
 import { useEffect, useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
-import { runStatusText } from '../../core/run-status'
+import { runStatusPhase, runStatusText } from '../../core/run-status'
 import { ShimmerText } from '../chain/ShimmerText'
 
 export function TurnStatus({ store }: { store: ChatStore }) {
   // 时钟锚点来自宿主（回合开始时刻）。它换成**另一个值**（下一回合）时计时要跟着换锚 ——
   // 但同一回合内整轮只有一个值，故不会出现「中途归零」。
   const anchor = store.runAnchorMs.value
+  const paused = store.sessionObserved?.value === false
+  // holding：页面认为还在跑（processing），但宿主说这一轮已不在运行（回合没关闭就停了）
+  const holding = store.processing.value && store.turnRunning?.value === false
   const [now, setNow] = useState(() => Date.now())
+  // 暂停开始时记住那一刻：整段暂停里显示的时长都以它为准（恢复后清掉）
+  const [frozenAt, setFrozenAt] = useState<number | undefined>(undefined)
   useEffect(() => {
     setNow(Date.now())
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [anchor])
-  // 上游 `Math.max(1000, now - startTime)`：不足 1s 也按 1s 起（避免闪一下「0秒」）
-  const elapsedMs = anchor === undefined ? undefined : Math.max(1000, now - anchor)
-  return html`<div class="turn-status" role="status" aria-live="polite">
+  useEffect(() => {
+    setFrozenAt(paused ? Date.now() : undefined)
+  }, [paused])
+  const phase = runStatusPhase({ paused, holding, ...(anchor === undefined ? {} : { anchorMs: anchor }), nowMs: now, ...(frozenAt === undefined ? {} : { frozenAtMs: frozenAt }) })
+  if (phase.phase === 'holding') {
+    // 保留状态行那格的高度，但不显示/不播报（上游 holding 同义）
+    return html`<div class="turn-status is-holding" aria-hidden="true"></div>`
+  }
+  return html`<div class="turn-status" role="status" aria-live="polite" data-paused=${phase.phase === 'paused' ? 'true' : undefined}>
     <span class="turn-status-ico codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></span>
-    <${ShimmerText} text=${runStatusText(elapsedMs)} className="turn-status-text" active=${true} />
+    <${ShimmerText} text=${runStatusText(phase.elapsedMs)} className="turn-status-text" active=${phase.phase !== 'paused'} />
   </div>`
 }

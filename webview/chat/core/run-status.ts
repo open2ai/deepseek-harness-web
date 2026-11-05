@@ -65,8 +65,7 @@ export function runStatusText(elapsedMs: number | undefined): string {
  * @param wallMs - 本回合总用时（毫秒）；`undefined` = 没拿到。
  * @returns 文案；`null` = 不出这一行（只有"还没关闭"这一种）。
  */
-export function doneStatusText(done: boolean, status: string | undefined, wallMs: number | undefined): string | null {
-  if (!done) {
+export function doneStatusText(done: boolean, status: string | undefined, wallMs: number | undefined): string | null {  if (!done) {
     return null
   }
   if (status === 'error') {
@@ -78,4 +77,33 @@ export function doneStatusText(done: boolean, status: string | undefined, wallMs
     return '已停止'
   }
   return wallMs === undefined ? '已完成' : `已完成，用时 ${formatRunDuration(wallMs)}`
+}
+
+/**
+ * 运行状态行的两档新状态（上游 0.2.2 的 `RunningStatus.paused` / `holding`）。
+ *
+ * - `paused`：客户端暂时**观察不到**这个会话（订阅断线/重连中）——状态行照常显示，但时长**冻结**
+ *   在断开那一刻（不继续涨、也不清零）；锚点未知时仍只写「深度求索中」；
+ * - `holding`：会话在回合正式关闭前就停了（没有 `turn/end` 可等）——**保留状态行占位但不显示文字**，
+ *   等回合尾部的终局行接手，避免整行突然消失造成内容跳动。
+ *
+ * @param input - 暂停/占位事实、时钟锚点、当前时刻、冻结时刻
+ * @returns 渲染档位与该档应显示的已运行毫秒
+ */
+export function runStatusPhase(input: {
+  paused: boolean
+  holding: boolean
+  anchorMs?: number
+  nowMs: number
+  frozenAtMs?: number
+}): { phase: 'running' | 'paused' | 'holding'; elapsedMs?: number } {
+  if (input.holding && !input.paused) {
+    return { phase: 'holding' }
+  }
+  const elapsedOf = (atMs: number): number | undefined =>
+    input.anchorMs === undefined ? undefined : Math.max(1000, atMs - input.anchorMs)
+  if (input.paused) {
+    return { phase: 'paused', elapsedMs: elapsedOf(input.frozenAtMs ?? input.nowMs) }
+  }
+  return { phase: 'running', elapsedMs: elapsedOf(input.nowMs) }
 }

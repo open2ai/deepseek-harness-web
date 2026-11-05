@@ -9,6 +9,12 @@
 //（`watch:esbuild` = `node esbuild.js --watch`，只盯 `src/`），页面侧**没有任何监听** ——
 // 改了 `webview/chat/**` 而只跑 `tsc` 的话，`dist/chat/chat.js` 还是旧的，
 // 于是"改了没效果"（当天为此白折腾几轮：产物里 grep 不到刚加的判据）。
+//
+// ⚠️ **下面三句日志是 `.vscode/tasks.json`（npm: watch:chat）的任务契约**：
+//   · `[chat] watching webview/chat/** …` = 进入监听、任务就绪（endsPattern）；
+//   · `[chat] rebuilt → dist/chat`        = 每次重建成功的留痕（**不是错误**，Problems 面板不报它）；
+//   · `[chat] 构建失败（产物未更新）`      = 唯一的失败行（problemMatcher 只匹配这句）。
+// 改文案要同步改那边。
 import { build, context } from 'esbuild'
 import { cpSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'

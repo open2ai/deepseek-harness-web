@@ -150,6 +150,9 @@ export function ModelPicker({ store }: { store: ChatStore }) {
                           close()
                         }}>
                         <span class="mp-opt-name">${g.id === sel.curProvider && m.id === sel.curModel ? '✓ ' : ''}${m.name || m.id}</span>
+                        ${m.badge === undefined
+                          ? null
+                          : html`<span class="mp-badge" data-tone=${m.badge.tone}>${m.badge.text}</span>`}
                       </button>`
                     )}
                   </div>`

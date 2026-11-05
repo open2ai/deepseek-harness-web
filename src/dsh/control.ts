@@ -358,17 +358,33 @@ export function reduceControlFrame(
     }
     if (type === 'projection') {
         const sessionId = f['sessionId'];
-        const key = f['key'];
-        if (typeof sessionId !== 'string' || typeof key !== 'string') {
+        if (typeof sessionId !== 'string') {
             return;
         }
         const seq = typeof f['seq'] === 'number' ? (f['seq'] as number) : undefined;
-        // 队列在 0.1.7+ 走的就是这条投影，**不进**投影整表（见上面 withoutInbox 的理由）。
-        if (key === 'inbox') {
-            applyQueue(sessionId, inboxItems(f['value']), seq);
+        /**
+         * 投影帧只有**一种**形状：一帧列出本次提交事件影响的**多个键**
+         * （`changes: [{ key, val }]`，一次事件触发多个投影时合并成一帧）。
+         * 不带 `changes` 的帧一律忽略（不再兼容旧版的单键 `key`/`value`）。
+         */
+        const changes = f['changes'];
+        if (!Array.isArray(changes)) {
             return;
         }
-        applyProjection(sessionId, key, f['value'], seq);
+        for (const entry of changes) {
+            const change = asRecord(entry);
+            const key = change?.['key'];
+            if (typeof key !== 'string') {
+                continue;
+            }
+            const value = change?.['val'];
+            // 队列在投影里（`inbox`），**不进**投影整表（见上面 withoutInbox 的理由）。
+            if (key === 'inbox') {
+                applyQueue(sessionId, inboxItems(value), seq);
+                continue;
+            }
+            applyProjection(sessionId, key, value, seq);
+        }
         return;
     }
     // 旧代（`dsh-0.1.5-rc.x` 那一代）的队列帧：上游已删该帧，本插件也不再读 —— 只报告（同上）。

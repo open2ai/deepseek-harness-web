@@ -30,6 +30,15 @@ export type DshStepGrouping = 'collapsed' | 'history' | 'none';
  */
 export type DshCollapseTiming = 'completion' | 'next-input';
 
+/**
+ * 收起后显示的回复（聊天设置里的 `foldedReplies`）：已完成回合收起过程时，助手**回复行**保留哪些。
+ *
+ * - `all`：每一段助手回复都留在外面（默认）；
+ * - `final`：只留最终回答那一段。
+ * 推理（思考）行不在这条偏好里 —— 两种取值下它们都留在折叠区内。
+ */
+export type DshFoldedReplies = 'all' | 'final';
+
 /** 性能与用量详略：`compact` 时不显示会话统计与每轮用量。 */
 export type DshPerformanceUsage = 'compact' | 'detailed';
 
@@ -56,6 +65,8 @@ export interface DshChatPrefs {
     readonly stepGrouping: DshStepGrouping;
     /** 收起时机（见 `DshCollapseTiming`；读不到时按上游默认 `completion`） */
     readonly collapseTiming: DshCollapseTiming;
+    /** 收起后显示的回复（见 `DshFoldedReplies`；读不到时按上游默认 `all`） */
+    readonly foldedReplies: DshFoldedReplies;
 }
 
 /** 读不到设置时的生效值 = 上游默认（0.2.0：非 Desktop Web 的客户端默认 = `detailed`）。 */
@@ -70,6 +81,8 @@ export const DEFAULT_CHAT_PREFS: DshChatPrefs = {
     stepGrouping: 'collapsed',
     // 上游默认「完成时收起」：没保存过该偏好的 profile 不写默认值，行为就是定稿即收
     collapseTiming: 'completion',
+    // 上游默认「收起后显示全部回复」
+    foldedReplies: 'all',
 };
 
 /** `settings/describe` 里一个命名空间（只取本模块关心的两段）。 */
@@ -139,6 +152,11 @@ export function stepGroupingOf(raw: unknown): DshStepGrouping {
  */
 export function collapseTimingOf(raw: unknown): DshCollapseTiming {
     return raw === 'next-input' ? 'next-input' : 'completion';
+}
+
+/** 收起后显示的回复：只有精确 `final` 才只留最终回答，其余（缺失/非法）一律上游默认 `all`。 */
+export function foldedRepliesOf(raw: unknown): DshFoldedReplies {
+    return raw === 'final' ? 'final' : 'all';
 }
 
 /** 性能与用量：只有精确 `compact` 才是简洁，其余（缺失/非法）一律上游默认 `detailed`。 */
@@ -219,6 +237,7 @@ export function chatPrefsOf(namespaces: readonly DshSettingsNamespace[]): DshCha
         ...policyOf(transcriptRaw),
         stepGrouping: stepGroupingOf(transcriptRaw),
         collapseTiming: collapseTimingOf(chat === null ? undefined : chat['collapseTiming']),
+        foldedReplies: foldedRepliesOf(chat === null ? undefined : chat['foldedReplies']),
     };
 }
 
@@ -231,5 +250,6 @@ export function sameChatPrefs(a: DshChatPrefs, b: DshChatPrefs): boolean {
         && a.settledReasoningPreview === b.settledReasoningPreview
         && a.liveProcessDetail === b.liveProcessDetail
         && a.stepGrouping === b.stepGrouping
-        && a.collapseTiming === b.collapseTiming;
+        && a.collapseTiming === b.collapseTiming
+        && a.foldedReplies === b.foldedReplies;
 }

@@ -421,7 +421,7 @@ function scheduleItem(value: unknown): DetailItem | null {
 }
 
 function scheduleDetails(name: string, value: unknown): DetailsModel | null {
-  if (name === 'schedule_create' || name === 'schedule_update') {
+  if (name === 'schedule_create' || name === 'schedule_update' || name === 'schedule_view' || name === 'schedule_edit') {
     const item = scheduleItem(value)
     return item === null ? null : { items: [item] }
   }
@@ -433,7 +433,7 @@ function scheduleDetails(name: string, value: unknown): DetailsModel | null {
       if (item === null) return null
       items.push(item)
     }
-    return { items, summary: `${items.length} 个定时任务`, empty: '没有定时任务' }
+    return { items, summary: `${items.length} 个自动化任务`, empty: '没有自动化任务' }
   }
   if (name === 'schedule_delete') {
     if (!detailRecord(value) || !nonempty(value.id) || value.deleted !== true) return null
@@ -874,7 +874,7 @@ function inspectionDetails(name: string, args: Record<string, unknown>, text: st
 /** 详情卡覆盖的工具名 = 上游 `details-row` 注册的全部 key（少一个就少一种卡）。 */
 const DETAILS_TOOL_NAMES: ReadonlySet<string> = new Set([
   'create_goal', 'get_goal', 'update_goal',
-  'schedule_create', 'schedule_list', 'schedule_delete', 'schedule_update',
+  'schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit', 'schedule_delete', 'schedule_update',
   'cordis_inspect_list', 'cordis_inspect_query', 'cordis_inspect_self',
   'workflow', 'ralph',
   'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace',
@@ -918,6 +918,8 @@ export function detailsCardModel(
     case 'update_goal': return goalDetail(value)
     case 'schedule_create':
     case 'schedule_update':
+    case 'schedule_view':
+    case 'schedule_edit':
     case 'schedule_list':
     case 'schedule_delete': return scheduleDetails(name, value)
     default: return null

@@ -382,6 +382,10 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
       case 'busy':
         status.store.busy.value = m.kind ?? null
         break
+      case 'sessionObservation':
+        // 订阅流活着 = 能观察；断线/重连中 = 不能（运行状态据此冻结计时，见 run-status 的 runStatusPhase）
+        messages.store.sessionObserved.value = m.observing !== false
+        break
       case 'slashCatalog':
         catalogs.receiveSlashCatalog(m.commands, m.skills)
         // 目录到达后：裁决目录未到时挂起的「/」行(命令→执行，其余→普通消息)

@@ -2,6 +2,14 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.22] — 2026-11-06
+
+### 破坏性变更
+
+- **适配 dsh 0.2.2-rc.1（旧版不兼容）**
+
+- **Node.js >= 24.9.0**
+
 ## [0.1.21] — 2026-11-03
 
 ### 变更

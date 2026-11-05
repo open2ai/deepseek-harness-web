@@ -267,6 +267,55 @@ function Popup({ store }: { store: ChatStore }) {
 export function Composer({ store }: { store: ChatStore }) {
   const text = store.text.value
   const processing = store.processing.value
+  /** 选中文本引用（0.2.2 quote）：贴片挂在输入区上方，发送时才拼成引用块，可一键清除。 */
+  const quoteValue = store.quote.value
+  const quotePreview = quoteValue === undefined
+    ? ''
+    : quoteValue.length > 80 ? `${quoteValue.slice(0, 80)}…` : quoteValue
+  // 悬停引用贴片时用**自绘 tooltip**（原生 title 在浅/深色主题下都跟 VSCode 不搭）。
+  // 只有鼠标在**贴片文字上**才出；移到行尾「清除引用」按钮上不出（否则挡住点击）。
+  // 位置按贴片在视口里的位置**固定定位 + 上下翻转 + 视口夹取**；内容超过可用高度时纵向滚动。
+  const [quoteTip, setQuoteTip] = useState<
+    { left: number; width: number; maxHeight: number; top?: number; bottom?: number } | null
+  >(null)
+  /** 贴片→tooltip 之间有一小段空隙，用短延迟兜住；移进 tooltip 就取消，方便滚动。 */
+  const quoteTipTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const cancelQuoteTipTimer = (): void => {
+    if (quoteTipTimer.current !== undefined) {
+      clearTimeout(quoteTipTimer.current)
+      quoteTipTimer.current = undefined
+    }
+  }
+  const scheduleHideQuoteTip = (): void => {
+    cancelQuoteTipTimer()
+    quoteTipTimer.current = setTimeout(() => {
+      quoteTipTimer.current = undefined
+      setQuoteTip(null)
+    }, 200)
+  }
+  useEffect(() => cancelQuoteTipTimer, [])
+  const showQuoteTip = (e: MouseEvent): void => {
+    cancelQuoteTipTimer()
+    const chip = e.currentTarget as unknown as HTMLElement
+    let rect: DOMRect = { left: 0, top: 0, bottom: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
+    try {
+      rect = chip.getBoundingClientRect()
+    } catch {
+      // 非浏览器环境（脚本级 DOM 守卫）没有布局信息：退回 0 坐标，只验证结构
+    }
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const width = Math.min(560, Math.max(240, vw - 24))
+    const left = Math.min(Math.max(rect.left, 12), Math.max(12, vw - width - 12))
+    const spaceAbove = rect.top - 12
+    const spaceBelow = vh - rect.bottom - 12
+    // 上方够就向上弹（贴近输入区的引用贴片通常在底部，向上空间更大）；否则向下
+    const above = spaceAbove >= 160 || spaceAbove >= spaceBelow
+    const maxHeight = Math.max(96, Math.min(vh * 0.6, above ? spaceAbove : spaceBelow))
+    setQuoteTip(above
+      ? { left, width, maxHeight, bottom: vh - rect.top + 6 }
+      : { left, width, maxHeight, top: rect.bottom + 6 })
+  }
   // 「空」= 草稿 + 附件 + 图片 + 引用**全都空**（与上游同一判据）
   const empty =
     text.trim() === '' &&
@@ -582,6 +631,27 @@ export function Composer({ store }: { store: ChatStore }) {
          flex 列容器，塞进去会掉到「输入框内底部」并把边框撑高。 */ ''}
     <${GoalBar} store=${store} />
     <div id="inputbox">
+      ${quoteValue === undefined
+        ? null
+        : html`<div id="quoteRow">
+            <span class="quote-chip" onMouseOver=${showQuoteTip} onMouseOut=${scheduleHideQuoteTip}>
+              <button type="button" class="x" aria-label="清除引用"
+                onClick=${() => { cancelQuoteTipTimer(); store.clearQuote(); setQuoteTip(null) }}>
+                <span class="ico-quote codicon codicon-quote" aria-hidden="true"></span>
+                <span class="ico-clear codicon codicon-close" aria-hidden="true"></span>
+              </button>
+              <span class="qtext">${quotePreview}</span>
+            </span>
+            <button type="button" class="quote-clear"
+              onClick=${() => { cancelQuoteTipTimer(); store.clearQuote(); setQuoteTip(null) }}>清除引用</button>
+            ${quoteTip === null
+              ? null
+              : html`<div class="quote-tip" role="tooltip"
+                  onMouseOver=${cancelQuoteTipTimer}
+                  onMouseOut=${scheduleHideQuoteTip}
+                  style=${`left:${String(quoteTip.left)}px;width:${String(quoteTip.width)}px;max-height:${String(quoteTip.maxHeight)}px;` +
+                    (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoteValue}</div>`}
+          </div>`}
       ${store.refs.value.length > 0
         ? html`<div id="refRow" ref=${refRowRef}>${store.refs.value.map(
             (r) => html`<span class="ref-chip" key=${r.key} title=${r.token || r.detail || ''}>

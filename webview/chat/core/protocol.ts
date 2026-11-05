@@ -61,6 +61,8 @@ export interface ChatModelGroup {
     name: string
     description?: string
     reasoning?: { efforts?: Array<{ id: string; name: string }>; defaultEffort?: string }
+    /** provider 广告的徽标（纯显示数据；文本已按中文优先解析，tone 为语气档） */
+    badge?: { text: string; tone: string }
   }>
 }
 
@@ -252,6 +254,8 @@ export type HostToViewMessage =
       stepGrouping?: 'collapsed' | 'history' | 'none'
       /** 收起时机：`completion` 定稿即收（默认）/ `next-input` 最新交互段先不收，等下一次普通输入 */
       collapseTiming?: 'completion' | 'next-input'
+      /** 收起后显示的回复：`all` 全部回复（默认）/ `final` 仅最终回答 */
+      foldedReplies?: 'all' | 'final'
     }
   // 保结构事件帧（节点模型的**唯一输入**）：宿主把窗口原文下发，页面据此建节点模型。
   | {
@@ -302,6 +306,8 @@ export type HostToViewMessage =
   | { type: 'draft'; text?: string }
   | { type: 'clear' }
   | { type: 'busy'; kind?: 'loading' | 'switching' | null }
+  /** 当前能否观察会话（`session/follow` 流活着 = true；断线/重连中 = false）。运行状态据此冻结计时。 */
+  | { type: 'sessionObservation'; observing?: boolean }
   // 自绘标题栏专属(selfDrawn 模式才出现;原生模式宿主不发)
   | { type: 'panelState'; panelOpen?: boolean; viewMode?: 'internal' | 'browser' }
   | { type: 'selfInfo'; workspaceName?: string; panelOpen?: boolean; viewMode?: 'internal' | 'browser' }
@@ -372,7 +378,18 @@ export type ViewToHostMessage =
   // 查看某个会话模式声明的子插件组合（宿主 agentPresets/read → 打开只读 YAML）【v0.1.15 · dsh 0.1.7】
   | { type: 'chatModeConfig'; agentPreset: string }
   | { type: 'pickFile' }
-  | { type: 'attachmentReq'; attachmentId: string }
+  /**
+   * 一张已存档图片的完整引用（宿主 `session/attachment` 的新请求形状）。
+   * `attachmentId` + `mediaType` 必需；尺寸/名字可选（服务端按存储校验，显示字段原样保留）。
+   */
+  | {
+      type: 'attachmentReq'
+      attachmentId: string
+      mediaType?: string
+      width?: number
+      height?: number
+      name?: string
+    }
   /**
    * **按绝对路径取一张正文图片的字节**（markdown 本地路径图）。
    *
@@ -392,7 +409,14 @@ export type ViewToHostMessage =
    * 与上游同形：上游图片预览也是"点开看全尺寸"（`ImageLightbox`），
    * 插件把"打开"的落点放在**编辑器区**（在 VS Code 里更顺手，与行摘要那条同口径）。
    */
-  | { type: 'openAttachment'; attachmentId: string; name?: string }
+  | {
+      type: 'openAttachment'
+      attachmentId: string
+      name?: string
+      mediaType?: string
+      width?: number
+      height?: number
+    }
   /**
    * **把一段还没有附件 id 的字节在编辑区打开**（2026-10-12 新增）。
    *

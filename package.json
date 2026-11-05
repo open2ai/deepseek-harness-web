@@ -2,12 +2,12 @@
   "name": "deepseek-harness-web",
   "displayName": "DeepSeek Harness Web",
   "description": "DeepSeek Harness 插件",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "publisher": "csparksdev",
   "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.107.1",
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "categories": [
     "AI",

@@ -77,8 +77,13 @@ export function placementOf(turnActive: boolean, mode: 'queue' | 'steer'): DshSu
 export interface SubmitLedger {
     /** 换会话：旧会话未结算的全部按 failed 退休，再切到新会话。 */
     useSession(sessionId: string | undefined): void;
-    /** 提交那一刻登记（必须在提示词发出**之前**）。 */
+    /** 提交那一刻登记（必须在提示词发出**之前**）；**此时还不发布给页面**，等 Host 接受。 */
     begin(rpcId: string, placement: DshSubmitPlacement, text: string, attachments?: readonly DshPendingAttachment[]): void;
+    /**
+     * Host **接受了**这次提示词：回执（prompt RPC 成功）或带同一 `rpcId` 的收件箱行先到者。
+     * 只有接受之后，该条才进 `takeSnapshot().pending` 下发给页面（与上游"接受后发布回显"同口径）。
+     */
+    accept(rpcId: string): void;
     /** 日志里观察到这些 `rpcId`（durable 回显）→ 退休为 `admitted`。 */
     admitById(rpcIds: Iterable<string>): void;
     /**
@@ -101,8 +106,8 @@ const RETIRED_KEEP = 64;
 
 export function createSubmitLedger(): SubmitLedger {
     let sessionId: string | undefined;
-    /** 待结算：`rpcId` → 提交事实（保持提交次序）。 */
-    const pending = new Map<string, DshPendingSubmission>();
+    /** 待结算：`rpcId` → 提交事实（保持提交次序）；`accepted` 之前不对外发布。 */
+    const pending = new Map<string, DshPendingSubmission & { accepted: boolean }>();
     /** 曾经在收件箱里见过的 `rpcId`（用来判"被丢掉了"）。 */
     const seenInInbox = new Set<string>();
     /** 上一次取快照之后退休的（增量）。 */
@@ -137,8 +142,14 @@ export function createSubmitLedger(): SubmitLedger {
             seenInInbox.clear();
         },
         begin(rpcId: string, placement: DshSubmitPlacement, text: string, attachments: readonly DshPendingAttachment[] = []): void {
-            pending.set(rpcId, { rpcId, placement, time: Date.now(), text, attachments: [...attachments] });
+            pending.set(rpcId, { rpcId, placement, time: Date.now(), text, attachments: [...attachments], accepted: false });
             seenInInbox.delete(rpcId);
+        },
+        accept(rpcId: string): void {
+            const entry = pending.get(rpcId);
+            if (entry !== undefined && !entry.accepted) {
+                entry.accepted = true;
+            }
         },
         admitById(rpcIds: Iterable<string>): void {
             for (const rpcId of rpcIds) {
@@ -160,6 +171,11 @@ export function createSubmitLedger(): SubmitLedger {
                     continue;
                 }
                 live.add(item.rpcId);
+                // 收件箱行也是"Host 接受"的证据（prompt 回执没回来时先见它）：先发布回显，再按位置退休。
+                const entry = pending.get(item.rpcId);
+                if (entry !== undefined && !entry.accepted) {
+                    entry.accepted = true;
+                }
                 // 队列接下了它：**排队**的回显退休（交给队列卡）；插话的回显留到入档（上游同）
                 if (item.placement === 'queued') {
                     retire(item.rpcId, 'queued');
@@ -187,7 +203,10 @@ export function createSubmitLedger(): SubmitLedger {
         },
         takeSnapshot(): DshSubmitSnapshot {
             const snapshot: DshSubmitSnapshot = {
-                pending: [...pending.values()],
+                // 只有 Host 接受过的才下发（接受之前页面不该出现"发送中"行）。
+                pending: [...pending.values()]
+                    .filter((entry) => entry.accepted)
+                    .map(({ accepted: _accepted, ...echo }) => echo),
                 retired: retiredSince,
             };
             retiredSince = [];

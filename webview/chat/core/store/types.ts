@@ -182,7 +182,9 @@ export type ChatRow =
        * 贴片本身按正文里的 `token` 解析出来（见 core/ref-mentions）；这里只做覆盖 ——
        * 命中同一 token 时用它的 label/kind（与用户挑选时看到的短名一致）。历史行没有它。
        */
-      refs?: RefSnap[] }
+      refs?: RefSnap[];
+      /** 迟到补答（`source.kind === 'user-question-reply'`）：渲染成右对齐的「问题与回答」气泡。 */
+      questionReply?: import('../nodes/types').QuestionReplyData }
   /** 系统提示词行（上游 `system-prompt` 节点）：该回合实际发给模型的 system，可折叠；位置在该回合用户提问之前 */
   | { kind: 'sysprompt'; key: number; text: string }
   /**
@@ -579,6 +581,12 @@ export interface ChatStore {
    * 不做本地化替换（上游那句本地化提示会抹掉服务端带来的现场信息）。
    */
   promptError: Signal<{ message: string; code?: string } | undefined>
+  /** 已发出、等 Host 接受的那条消息（有值时状态行显示「正在发送消息」）。 */
+  sendingRpcId: Signal<string | undefined>
+  /** 标记/清除"等 Host 接受"的那条（10 秒兜底）。 */
+  markSending(rpcId: string | undefined): void
+  /** 当前能否观察会话（false = 订阅断线/重连中；运行状态据此冻结计时）。 */
+  sessionObserved: Signal<boolean>
   /**
    * 左下角「深度求索中，用时 X」的**时钟锚点**（epoch 毫秒）：= 正在跑的那一回合的 `turn/start` 时刻。
    *
@@ -604,6 +612,8 @@ export interface ChatStore {
   images: Signal<ImageAttachment[]>
   /** 「@」引用贴片（不进正文；发送时转为引用行） */
   refs: Signal<RefChip[]>
+  /** 选中文本引用（0.2.2 quote）：输入区上方的可一键清除贴片，发送时并入正文引用块 */
+  quote: Signal<string | undefined>
   focusTick: Signal<number>
   sel: Signal<SelectorState>
   openPopup: Signal<'perm' | 'model' | 'mode' | 'modelSearch' | null>
@@ -668,6 +678,10 @@ export interface ChatStore {
   /** 收起时机（上游 0.2.1 新增的 `collapseTiming` 偏好）：`completion`=定稿即收（默认）；`next-input`=最新交互段
    *  定稿后先保持展开，直到下一次普通输入。消费点在 `core/node-exchanges.ts` 与 `core/process-fold.ts`。 */
   collapseTiming: Signal<'completion' | 'next-input'>
+  /** 收起后显示的回复（聊天设置的 `foldedReplies`）：`all`=全部回复（默认）、`final`=仅最终回答。
+   *  消费点是外层折叠（`components/message/MessageList` 的 `rowOuterHidden`）：`all` 时更早世代的
+   *  回复行仍可见，只折它们的过程区。 */
+  foldedReplies: Signal<'all' | 'final'>
   /** 渲染源开关（宿主下发，见 docs/design/08 §11）：true = 页面只认宿主下发的「行」，
    *  忽略旧的渲染指令（两条通路二选一，不能同时改列表）。 */
   /** 上游 waterfall 提问弹窗（输入框上方）：pending 时让用户选择/提交/取消/关闭；null=无 */
@@ -812,11 +826,12 @@ export interface ChatStore {
   /** 重试一次失败的上传 */
   retryUpload(key: string): void
   /** 按 attachmentId 懒取附件字节（已就绪/在飞时不重复发；失败可重试） */
-  requestAttachment(attachmentId: string): void
+  /** 按附件引用懒取图片字节（0.2.2 要求完整引用：id + mediaType，尺寸/名字可缺） */
+  requestAttachment(ref: { attachmentId: string; mediaType?: string; width?: number; height?: number; name?: string }): void
   /** 在编辑器区打开文件（相对路径按 cwd 解析；line 为 1 起的行号） */
   openFile(path: string, line?: number, cwd?: string): void
   /** 按附件 id 在编辑区打开图片（用户消息/图片卡里的图只有 id，没有本地路径）。 */
-  openAttachment(attachmentId: string, name?: string): void
+  openAttachment(attachmentId: string, name?: string, ref?: { mediaType?: string; width?: number; height?: number }): void
   /** 把**还没有附件 id** 的字节在编辑区打开（本地乐观行里刚粘贴/拖进来的图；进日志后走 `openAttachment`）。 */
   openAttachmentBytes(data: string, mediaType?: string, name?: string): void
   removeAttachment(key: string): void
@@ -831,6 +846,10 @@ export interface ChatStore {
    * 正在写的这句话里"，并且**不覆盖**已有草稿。
    */
   insertText(insert: string): void
+  /** 记下选中文本的引用（0.2.2 quote；再选一次即替换，同一时刻只有一条）。 */
+  setQuote(text: string): void
+  /** 清掉引用贴片（一键清除；发送成功时也会清）。 */
+  clearQuote(): void
   /**
    * 语音输入（实验）：录音/转写在**宿主进程**做（webview 拿不到麦克风），
    * 页面只维护四态（待命 / 准备模型 / 录音中 / 转写中）并收转写文字；

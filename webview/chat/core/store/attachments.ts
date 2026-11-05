@@ -20,15 +20,25 @@ export function createAttachments(host: ChatHost): AttachmentsSlice {
   /** 已发出、还没回帧的 id：避免同一附件并发重复取。 */
   const inflight = new Set<string>()
 
-  function requestAttachment(attachmentId: string): void {
-    if (attachmentId === '') return
-    const known = attachmentCache.value[attachmentId]
+  /** 取件的引用字段（`attachmentId` + `mediaType` 必需；尺寸/名字可选，原样转给宿主）。 */
+  type AttachmentRef = { attachmentId: string; mediaType?: string; width?: number; height?: number; name?: string }
+
+  function requestAttachment(ref: AttachmentRef): void {
+    if (ref.attachmentId === '') return
+    const known = attachmentCache.value[ref.attachmentId]
     // 已就绪或正在取 → 不再发；只有「失败」允许重试
     if (known !== undefined && known.state !== 'error') return
-    if (inflight.has(attachmentId)) return
-    inflight.add(attachmentId)
-    attachmentCache.value = { ...attachmentCache.value, [attachmentId]: { state: 'loading' } }
-    host.post({ type: 'attachmentReq', attachmentId })
+    if (inflight.has(ref.attachmentId)) return
+    inflight.add(ref.attachmentId)
+    attachmentCache.value = { ...attachmentCache.value, [ref.attachmentId]: { state: 'loading' } }
+    host.post({
+      type: 'attachmentReq',
+      attachmentId: ref.attachmentId,
+      ...(ref.mediaType === undefined ? {} : { mediaType: ref.mediaType }),
+      ...(ref.width === undefined ? {} : { width: ref.width }),
+      ...(ref.height === undefined ? {} : { height: ref.height }),
+      ...(ref.name === undefined ? {} : { name: ref.name }),
+    })
   }
 
   function receiveAttachment(

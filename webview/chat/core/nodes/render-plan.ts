@@ -6,7 +6,7 @@
 //
 // 形状刻意只列渲染所需字段（不 import store/types.ts 的 ChatRow —— 那会带进 @preact/signals 依赖链，
 // 让本文件无法在无依赖环境下独立 type-check + 守卫）。接线层把 RenderRow 收窄成 ChatRow（同构、spread）。
-import type { ChatBlock, ChatNode, ChatNodeModel, ProcessGroupSnapshot, ProcessPresentation } from './types'
+import type { ChatBlock, ChatNode, ChatNodeModel, ProcessGroupSnapshot, ProcessPresentation, QuestionReplyData } from './types'
 import { isAtOrOutside } from './group-tree'
 import { hasAssistantReplyContent } from './event-projection'
 import { fileRefsOf, hasImageBlock, imageRefsOf, resultText } from '../../../../src/dsh/official/result-text'
@@ -108,7 +108,10 @@ export type RenderRow =
      * 文件附件：名字、字节数，以及**内容寻址 id**（`user/message` 的 `file` 块同样带
      * `attachment.attachmentId` —— 2026-10-12 更正"历史回放没有本地路径就打不开"的旧结论：
      * 有 id 就能照图片那条路取字节、落临时文件、在编辑区打开）。
-     */ files?: Array<{ name: string; bytes?: number; attachmentId?: string }> }
+     */ files?: Array<{ name: string; bytes?: number; attachmentId?: string }>; /**
+     * 迟到补答（`source.kind === 'user-question-reply'`）：渲染成右对齐的「问题与回答」气泡，
+     * 不按普通用户气泡展示正文 JSON。
+     */ questionReply?: QuestionReplyData }
     | { kind: 'sysprompt'; key: string; text: string }
     | { kind: 'command'; key: string; name: string | null; outcome?: { kind: string; text?: string } }
     | { kind: 'compaction'; key: string; summary?: string | null; shadowedItemCount?: number | null; shadowedTokenCount?: number | null }
@@ -335,6 +338,7 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel, assistan
                 ...(typeof src?.rpcId === 'string' ? { rpcId: src.rpcId } : {}),
                 ...(imageRefs.length > 0 ? { imageRefs } : {}),
                 ...(files.length > 0 ? { files } : {}),
+                ...(node.data['questionReply'] === undefined ? {} : { questionReply: node.data['questionReply'] as QuestionReplyData }),
             })
             break
         }

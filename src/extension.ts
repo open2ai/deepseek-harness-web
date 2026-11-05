@@ -207,6 +207,23 @@ dsh.onEvents = (events, sessionId, turnActive, replaced) => {
 dsh.onSubmissionsAdmitted = (sessionId) => {
     pushSubmissions(sessionId);
 };
+// Host 接受了提示词（prompt 回执）→ 台账发布这条回显（"发送中…"行此刻才出现，与上游同口径）。
+dsh.onPromptAccepted = (requestId) => {
+    if (requestId === undefined) {
+        return;
+    }
+    submitLedger.accept(requestId);
+    pushSubmissions(dsh.getSessionId());
+};
+// 能否观察会话（订阅断线/重连）：运行状态据此冻结计时；只在翻转时推，避免每帧刷屏。
+let observed: boolean | undefined;
+dsh.onSessionObserved = (observing) => {
+    if (observing === observed) {
+        return;
+    }
+    observed = observing;
+    postToChats({ type: 'sessionObservation', observing });
+};
 // 任务清单（输入框上方的常驻条）：与行同源、同一处派生，页面按整表替换；`null` = 没有清单。
 dsh.onTodos = (todos) => {
     postToChats({ type: 'todos', todos });
@@ -900,7 +917,7 @@ async function postChatPrefs(): Promise<void> {
     logRows(
         `偏好 → 工作步骤展示=${prefs.transcriptView}（分组头=${prefs.stepGrouping}） · 性能与用量=${prefs.performanceUsage}` +
             ` · 代码工作工具=${prefs.developerTools ? '开' : '关'} · 繁忙时的发送行为=${prefs.busyEnter}` +
-            ` · 收起时机=${prefs.collapseTiming}`
+            ` · 收起时机=${prefs.collapseTiming} · 收起后显示的回复=${prefs.foldedReplies}`
     );
     postToChats({
         type: 'chatPrefs',
@@ -912,6 +929,7 @@ async function postChatPrefs(): Promise<void> {
         liveProcessDetail: prefs.liveProcessDetail,
         stepGrouping: prefs.stepGrouping,
         collapseTiming: prefs.collapseTiming,
+        foldedReplies: prefs.foldedReplies,
     });
 }
 
@@ -1773,12 +1791,22 @@ function setupChatWebview(
                 let bytes: Buffer | undefined;
                 let mediaType = '';
                 let serverError = '';
-                try {
-                    const img = await dsh.readImageAttachment(id);
-                    bytes = Buffer.from(img.data, 'base64');
-                    mediaType = img.mediaType;
-                } catch (e) {
-                    serverError = e instanceof Error ? e.message : String(e);
+                const ref = {
+                    attachmentId: id,
+                    ...(typeof msg.mediaType === 'string' && msg.mediaType !== '' ? { mediaType: msg.mediaType } : {}),
+                    ...(typeof msg.width === 'number' ? { width: msg.width } : {}),
+                    ...(typeof msg.height === 'number' ? { height: msg.height } : {}),
+                    ...(safe === '' ? {} : { name: safe }),
+                };
+                // 新主机的 `session/attachment` 只收图片；文件只能走本地对象库（同一个内容寻址目录）。
+                if (typeof msg.mediaType === 'string' && msg.mediaType.startsWith('image/')) {
+                    try {
+                        const img = await dsh.readImageAttachment(ref);
+                        bytes = Buffer.from(img.data, 'base64');
+                        mediaType = img.mediaType;
+                    } catch (e) {
+                        serverError = e instanceof Error ? e.message : String(e);
+                    }
                 }
                 if (bytes === undefined && objectPath !== undefined) {
                     try {
@@ -1825,8 +1853,14 @@ function setupChatWebview(
              * 否则一次 RPC 失败就会让会话里所有图都停在「加载失败」。
              */
             void (async () => {
+                const ref = {
+                    attachmentId: String(msg.attachmentId ?? ''),
+                    ...(typeof msg.mediaType === 'string' && msg.mediaType !== '' ? { mediaType: msg.mediaType } : {}),
+                    ...(typeof msg.width === 'number' ? { width: msg.width } : {}),
+                    ...(typeof msg.height === 'number' ? { height: msg.height } : {}),
+                };
                 try {
-                    const img = await dsh.readImageAttachment(msg.attachmentId);
+                    const img = await dsh.readImageAttachment(ref);
                     post({ type: 'attachmentBytes', attachmentId: msg.attachmentId, mediaType: img.mediaType, data: img.data });
                 } catch (e) {
                     const local = await readLocalAttachmentObject(msg.attachmentId);
@@ -2034,6 +2068,11 @@ class DshLauncherProvider implements vscode.WebviewViewProvider {
         view.onDidDispose(() => {
             if (launcherView === view) {
                 launcherView = undefined;
+            }
+            // 与编辑器面板同一条边界：侧栏实例销毁后，"当前聊天目标"不能还指着它
+            // （否则右键 @代码 / 工作区恢复里那些走目标的检查会对着死对象判断）。
+            if (chatTarget === view.webview) {
+                chatTarget = chatPanel?.webview;
             }
         });
     }
@@ -2884,6 +2923,12 @@ export function activate(context: vscode.ExtensionContext) {
             panel.onDidDispose(() => {
                 if (chatPanel === panel) {
                     chatPanel = undefined;
+                }
+                // 关掉编辑器面板后，全局"当前聊天目标"不能还指着已销毁的 webview：
+                // 右键 @代码 / 新会话等命令会静默 postMessage 到死对象，看起来像"点了没反应"。
+                // 侧栏实例还在就立即指回它；侧栏实例若也重建，`setupChatWebview` 会再覆盖。
+                if (chatTarget === panel.webview) {
+                    chatTarget = launcherView?.webview;
                 }
             });
             // 编辑器区 = createWebviewPanel：既渲染不到原生 view/title，也不需要页内自绘标题栏

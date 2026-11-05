@@ -1,23 +1,20 @@
-// 契约验收：`session/control` 的帧形状能被正确归约（**只覆盖 0.1.7+**；旧代承载改为"明确报告"）。
+// 契约验收：`session/control` 的帧形状能被正确归约（**只覆盖 0.2.2-rc.1 这一代形状**；
+// 旧单键投影帧必须被忽略，0.1.5-rc.x 的旧代承载只做"明确报告"）。
 //
 // 为什么单独一个脚本而不是单测：这一层的失效方式是**静默**的（上游换形状 → 队列卡变空，不报错），
 // 所以必须能直接喂帧、直接断言。跑法：node scripts/verify-control-frames.mjs
 //
-// ⚠️ **下面那些 `0.1.7-alpha.2` 标签是"这套形状第一次核对的版本"，不是"只对那个版本有效"**：
-// 2026-10-18 对着**当前基线 `dsh-0.2.1-rc.2`** 逐条复核过（上一轮基线 `0.2.0-rc.2` 的结论继续成立），
-// 这套形状**一字未变**，所以断言继续有效：
-//   · `baseline.value` = `{ projections }`（**无** `queues`）——0.2.1 的 `SessionControlBaseline` 原文只有
-//     `readonly projections`（`api/session-controller/src/types.ts`）；
-//   · 帧联合只有两种：`{type:'baseline'}` / `{type:'projection'} & SessionProjectionUpdate`（同文件）；
-//   · 投影块 = `{asOfSeq, values}`（同文件 `SessionProjectionBaseline`；`session/projections` 的远程返回值
-//     另有 `kind` 判别，那是**另一个方法**的形状，见 `src/dsh/projections.ts` 与 `tmp/_projections.snapshot.test.mjs`）；
+// ⚠️ 基线 = **`dsh-0.2.2-rc.1`**（2026-11-05）。这一代的关键变化：投影更新帧从"一帧一个键"
+// 改成 **`{ sessionId, seq, changes: [{ key, val }] }`**（一次事件触发的多个投影合并成一帧）。
+// 当前钉住的形状：
+//   · `baseline.value` = `{ projections }`（**无** `queues`）；投影块 = `{asOfSeq, values}`；
+//   · 帧联合只有 `{type:'baseline'}` / `{type:'projection', changes:[…]}`；不带 `changes` 的
+//     旧单键帧**不产生任何回调**（见"旧形状被忽略"用例）；
 //   · inbox 投影 = `{'next-turn': 消息[], 'next-step': 消息[]}`，`next-step` 里 `source.kind === 'user'`
-//     是插话、其余（`recall` / 插件注入等）是上下文 —— 0.2.0 的宿主用例 `control-queue.host.spec.ts`
-//     就是 `inbox.append('next-step', steering)` + `append('next-step', context)` 这么喂的；
-//   · `permissions` 投影只带 `{currentValue}`、**目录在进程级** —— 0.2.0 的原文：
-//     "Session projection carries current value only"（`client/ui-permission-presets`）。
-// 旧代（0.1.5-rc.x）的 `queues` 整表 / `{type:'queue'}` 帧：自 v0.1.15 起不再读，
-// 但必须走 `onLegacyHost` 报告（见文末用例）。
+//     是插话、其余（`recall` / 插件注入等）是上下文；
+//   · `permissions` 投影只带 `{currentValue}`、**目录在进程级**。
+// 旧代（0.1.5-rc.x）的 `queues` 整表 / `{type:'queue'}` 帧：不再读，但必须走 `onLegacyHost` 报告
+//（见文末用例）。
 import { build } from 'esbuild';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -86,8 +83,10 @@ const contextMessage = (id) => ({
     source: { kind: 'recall', references: [] },
 });
 const inbox = (nextTurn, nextStep) => ({ 'next-turn': nextTurn, 'next-step': nextStep });
+/** 0.2.2-rc.1 的投影更新帧：一帧可带多个 `{ key, val }`。 */
+const projectionFrame = (changes, seq) => ({ type: 'projection', sessionId: SID, seq, changes });
 
-console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：baseline 里的 inbox 投影');
+console.log('0.2.2-rc.1：baseline 里的 inbox 投影');
 {
     const h = harness();
     const seq = new Map();
@@ -123,25 +122,25 @@ console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：baseline 里的 inbox �
     check('基线整表下发', h.baselines.length, 1);
 }
 
-console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：inbox 的 projection 帧');
+console.log('0.2.2-rc.1：inbox 的 projection 帧（changes[] 形状）');
 {
     const h = harness();
     const seq = new Map();
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'inbox', value: inbox([userMessage('m1', '排队')], []), seq: 10 }, h.handlers, seq);
+    reduceControlFrame(projectionFrame([{ key: 'inbox', val: inbox([userMessage('m1', '排队')], []) }], 10), h.handlers, seq);
     check('整值替换', h.lastQueue().map((i) => i.placement), ['queued']);
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'inbox', value: inbox([], []), seq: 11 }, h.handlers, seq);
+    reduceControlFrame(projectionFrame([{ key: 'inbox', val: inbox([], []) }], 11), h.handlers, seq);
     check('清空可见', h.lastQueue(), []);
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'inbox', value: inbox([userMessage('m1', '排队')], []), seq: 10 }, h.handlers, seq);
+    reduceControlFrame(projectionFrame([{ key: 'inbox', val: inbox([userMessage('m1', '排队')], []) }], 10), h.handlers, seq);
     check('旧 seq 的帧被丢弃（不复活已取走的条目）', h.lastQueue(), []);
     check('水位推进到最大 seq', seq.get(SID), 11);
 }
 
-console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：交错到达的水位');
+console.log('0.2.2-rc.1：交错到达的水位');
 {
     const h = harness();
     const seq = new Map();
     // 新帧先到
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'inbox', value: inbox([userMessage('new', '新')], []), seq: 20 }, h.handlers, seq);
+    reduceControlFrame(projectionFrame([{ key: 'inbox', val: inbox([userMessage('new', '新')], []) }], 20), h.handlers, seq);
     // 旧基线后到：不能把新值冲回旧值
     reduceControlFrame(
         { type: 'baseline', value: { projections: { [SID]: { asOfSeq: 5, values: { inbox: inbox([userMessage('old', '旧')], []) } } } } },
@@ -185,7 +184,7 @@ console.log('旧代（0.1.5-rc.x）承载：不再读，但必须报告');
     check('detail 不把承载归因到旧版本', /dsh-0\.1\.[0-6]/.test(h.legacyHost[0]), false);
 }
 
-console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：权限目录与投影拼接');
+console.log('0.2.2-rc.1：权限目录与投影拼接');
 {
     // 上游 0.1.7 的 permissions 投影只剩 currentValue；选项目录在进程级 remote。
     const catalog = [
@@ -197,7 +196,7 @@ console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：权限目录与投影拼
     const seq = new Map();
     const permissionValues = new Map();
     const onPerm = (sessionId, value) => permissionValues.set(sessionId, value);
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'permissions', value: { currentValue: 'read-only' }, seq: 5 }, h.handlers, seq, catalog, onPerm);
+    reduceControlFrame(projectionFrame([{ key: 'permissions', val: { currentValue: 'read-only' } }], 5), h.handlers, seq, catalog, onPerm);
     const perms = () => h.projections.filter((p) => p.key === 'permissions').at(-1).value;
     check('拼回旧形状的 options', perms().options.map((o) => o.value), ['read-only', 'workspace-write', 'danger-full-access']);
     check('currentValue 透传', perms().currentValue, 'read-only');
@@ -206,13 +205,13 @@ console.log('0.1.7-alpha.2 起、0.2.0-rc.2 复核同：权限目录与投影拼
     // 目录未到（读取失败 / 0.1.5）：原样透传，不能清空消费方已有的一份
     const h2 = harness();
     const seq2 = new Map();
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'permissions', value: { currentValue: 'x' }, seq: 5 }, h2.handlers, seq2, undefined, () => {});
+    reduceControlFrame(projectionFrame([{ key: 'permissions', val: { currentValue: 'x' } }], 5), h2.handlers, seq2, undefined, () => {});
     check('目录缺失时不塞 options 键', Object.hasOwn(h2.projections[0].value, 'options'), false);
 
     // 派生 custom：当前值不在目录里，上游会派生一条
     const h3 = harness();
     const seq3 = new Map();
-    reduceControlFrame({ type: 'projection', sessionId: SID, key: 'permissions', value: { currentValue: 'custom' }, seq: 6 }, h3.handlers, seq3, catalog, () => {});
+    reduceControlFrame(projectionFrame([{ key: 'permissions', val: { currentValue: 'custom' } }], 6), h3.handlers, seq3, catalog, () => {});
     check('custom 派生项被追加', h3.projections[0].value.options.map((o) => o.value), ['read-only', 'workspace-write', 'danger-full-access', 'custom']);
 
     // 基线里的 permissions 同样要拼
@@ -261,4 +260,4 @@ if (failures > 0) {
     console.log(`✘ ${failures} 项不符`);
     process.exit(1);
 }
-console.log('✔ 全部通过：0.1.7+ 帧形状正确归约（0.2.1-rc.2 复核同），旧代承载明确报告');
+console.log('✔ 全部通过：0.2.2-rc.1 的 `changes[]` 帧形状正确归约，旧单键形状被忽略，旧代承载明确报告');

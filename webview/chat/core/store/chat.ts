@@ -91,6 +91,9 @@ export function createChatStore(host: ChatHost): ChatStore {
     runAnchorMs: messages.store.runAnchorMs,
     // 提交失败的错误条（输入区上方那一格；**不进对话流**，下次提交即清）
     promptError: messages.store.promptError,
+    sendingRpcId: messages.store.sendingRpcId,
+    markSending: messages.store.markSending,
+    sessionObserved: messages.store.sessionObserved,
     turnRunning: messages.store.turnRunning,
     subagentFacts: messages.store.subagentFacts,
     scrollPend: messages.store.scrollPend,
@@ -144,6 +147,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     attachments: composer.store.attachments,
     images: composer.store.images,
     refs: composer.store.refs,
+    quote: composer.store.quote,
     focusTick: composer.store.focusTick,
     runSlash: composer.store.runSlash,
     pickFile: composer.store.pickFile,
@@ -159,6 +163,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     readImageFile: composer.store.readImageFile,
     // 光标处插入（语音转写落点；与 `draft` 帧的整条追加刻意分开）
     insertText: composer.store.insertText,
+    setQuote: composer.setQuote,
+    clearQuote: composer.clearQuote,
     // 语音输入（实验）：宿主侧录音；页面只读四态 + 可用性、发控制帧，结果插入光标处
     voiceAvailable: voice.store.voiceAvailable,
     voiceState: voice.store.voiceState,
@@ -235,6 +241,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     liveProcessDetail: prefs.store.liveProcessDetail,
     stepGrouping: prefs.store.stepGrouping,
     collapseTiming: prefs.store.collapseTiming,
+    foldedReplies: prefs.store.foldedReplies,
     // 渲染源开关（阶段 4：宿主下发，见 docs/design/08 §11）
   }
 }

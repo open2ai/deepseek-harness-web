@@ -30,6 +30,11 @@ export interface MessagesSlice {
     | 'processing'
     /** 提交失败的错误条（只给输入区那一格用，不进对话流；见 `promptError` 的注释） */
     | 'promptError'
+    /** 已发出、等 Host 接受的提交标识（有值时状态行显示「正在发送消息」） */
+    | 'sendingRpcId'
+    | 'markSending'
+    /** 当前能否观察会话（false = 订阅断线/重连中；运行状态据此冻结计时） */
+    | 'sessionObserved'
     | 'runAnchorMs'
     | 'turnRunning'
     | 'subagentFacts'
@@ -106,6 +111,8 @@ export interface MessagesSlice {
   /** 本次提交**失败**（宿主 `chatError`）：把该标识对应的本地乐观行标为「未提交成功」，
    *  并把仍挂着的本地占位回答行撤掉。错误原因写 `promptError`（**不进对话流**），不是在这里造行。 */
   failSubmission(rpcId: string | undefined, message: string, code?: string): void
+  /** 标记/清除"已发出、等 Host 接受"的那条（输入区 sending 相位；10 秒兜底）。 */
+  markSending(rpcId: string | undefined): void
   /** 回合级过程折叠的展开态（见 `core/process-fold`）。未记录 = 默认（进行中展开、定稿收起）。 */
   turnFoldOpen: Signal<ReadonlyMap<number, boolean>>
   /** 记下某个回合的折叠展开态（回合号是**会话内**编号，换会话时整表清掉）。 */
@@ -177,6 +184,13 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * 清空时机见 `outbox.send`：**每次提交开始时**清（对齐上游 `prompt()` 的 `promptError = null`）。
    */
   const promptError = signal<{ message: string; code?: string } | undefined>(undefined)
+  /**
+   * 已发出、还在等 Host 接受的那条消息（上游输入区 `sending` 相位）：仅用于状态行显示
+   * 「正在发送消息」。接受（台账帧出现同 rpcId）或失败即清除；10 秒兜底防残留。
+   */
+  const sendingRpcId = signal<string | undefined>(undefined)
+  /** 当前能否观察会话（上游 `RunningStatus.paused` 的事实来源）：默认 true，断线时宿主推 false。 */
+  const sessionObserved = signal<boolean>(true)
   /**
    * 「深度求索中，用时 X」的时钟锚点 = **正在跑的那一回合的开始时刻**（宿主下发 `turnStartMs`）。
    *
@@ -392,12 +406,23 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * 按**附件 id** 打开附件（用户消息 / 图片卡里的图与文件在会话里只有 id，没有本地路径）：
    * 交给宿主取字节 → 落临时文件 → 在**编辑区**打开（图片走 VS Code 图片预览、其它文件走编辑器）。
    *
-   * ⚠️ "取字节"这一条对**图片与文件是同一条路**（上游 `session/attachment` 只认 id + 会话归属），
-   * 所以文件卡也走它 —— 2026-10-12 扩到 `file` 块（事件里同样带 `attachmentId`）。
+   * ⚠️ **图片走服务端接口，文件只能走本地对象库**：新主机的 `session/attachment` 只收图片引用
+   *（完整 `ImageAttachmentRef`），文件字节由宿主的本地对象库兜底（同一个内容寻址目录）。
    */
-  function openAttachment(attachmentId: string, name?: string): void {
+  function openAttachment(
+    attachmentId: string,
+    name?: string,
+    ref?: { mediaType?: string; width?: number; height?: number }
+  ): void {
     if (!attachmentId) return
-    host.post({ type: 'openAttachment', attachmentId, ...(name === undefined || name === '' ? {} : { name }) })
+    host.post({
+      type: 'openAttachment',
+      attachmentId,
+      ...(name === undefined || name === '' ? {} : { name }),
+      ...(ref?.mediaType === undefined ? {} : { mediaType: ref.mediaType }),
+      ...(ref?.width === undefined ? {} : { width: ref.width }),
+      ...(ref?.height === undefined ? {} : { height: ref.height }),
+    })
   }
   /**
    * 把**还没有附件 id 的字节**在编辑区打开（本地乐观行里刚粘贴/拖进来的图）。
@@ -611,6 +636,11 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
   ): void {
     pendingSubmissions.value = pending
     retiredSubmissions.value = retired
+    // Host 接受了（或已退休）这条 → 结束「正在发送消息」相位。
+    if (sendingRpcId.value !== undefined
+      && (pending.some((p) => p.rpcId === sendingRpcId.value) || retired.some((r) => r.rpcId === sendingRpcId.value))) {
+      sendingRpcId.value = undefined
+    }
     if (retired.length > 0) {
       // **退休单点**（上游 `finishSubmission`，`session-client/src/sessions/session.ts:865-873`）：
       // 不论 `admitted` / `queued` / `failed`，**回显一律从快照里删掉** ——
@@ -631,6 +661,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
    * 所以事件流里不会有 turn/end，行的 `endMsg` 只能由这里写进去（与旧通路的 `chatDone(end=error)` 同口径）。
    */
   function failSubmission(rpcId: string | undefined, msgText: string, code?: string): void {
+    sendingRpcId.value = undefined
     messages.value = messages.value.map((r): ChatRow => {
       if (r.kind !== 'user' || r.failed === true) return r
       // **只标还没被服务端回显认领的行**：已经认领的说明消息确实送到了，它不该被标成「未提交成功」
@@ -709,6 +740,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     processing.value = false
     // 换会话/重连：上一条提交失败的错误条不属于这个会话，必须清（否则一直挂在输入区上方）
     promptError.value = undefined
+    sendingRpcId.value = undefined
+    sessionObserved.value = true
     runAnchorMs.value = undefined
     // 「已提交」闩随会话走：换会话 / 重连又该回到欢迎页
     submitted.value = false
@@ -728,12 +761,32 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     sessionOpenError.value = undefined
   }
 
+  /** 等 Host 接受那条消息的兜底计时器（10 秒内没收到台账/失败帧就自行消掉状态行）。 */
+  let sendingTimer: ReturnType<typeof setTimeout> | undefined
+  function markSending(rpcId: string | undefined): void {
+    if (sendingTimer !== undefined) {
+      clearTimeout(sendingTimer)
+      sendingTimer = undefined
+    }
+    sendingRpcId.value = rpcId
+    if (rpcId !== undefined) {
+      sendingTimer = setTimeout(() => {
+        sendingTimer = undefined
+        if (sendingRpcId.value === rpcId) {
+          sendingRpcId.value = undefined
+        }
+      }, 10_000)
+    }
+  }
+
   return {
-    store: {
-      messages,
+    store: {      messages,
       view,
       processing,
       promptError,
+      sendingRpcId,
+      markSending,
+      sessionObserved,
       runAnchorMs,
       turnRunning,
       subagentFacts,
@@ -760,6 +813,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     openAttachmentBytes,
     applyNodeRows,
     failSubmission,
+    markSending,
     applySubmissions,
     applyHistory,
     loadOlder,

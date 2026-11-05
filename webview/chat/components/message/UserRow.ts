@@ -5,6 +5,7 @@
 // 不会退化成裸文本，也不会出现「贴片 + @xxx」两份。
 // 只有本地乐观帧（正文里还没有引用行、但 `refs` 快照已在）才额外走独立贴片行那条老路。
 import { html } from 'htm/preact'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ChatRow, ChatStore } from '../../core/store/chat'
 import type { ImageAttachment } from '../../core/protocol'
 import { hasRefMention } from '../../core/ref-mentions'
@@ -14,7 +15,95 @@ import { AttachmentGallery } from '../attachment/AttachmentGallery'
 import { fileExt, fileSizeText } from '../../core/file-labels'
 import { SecretText } from './SecretText'
 
+/**
+ * 发送时引用贴片会被拼成正文开头的 Markdown 引用行（`> …`）：显示时把这几行从正文里剥出来，
+ * 渲染成独立的引用块（对应上游消息里的引用样式）；其余部分才是用户正文。
+ * @param text - 行上的完整正文（含可能的引用块）
+ * @returns 引用文字 + 剩余正文
+ */
+function splitLeadingQuote(text: string): { quoteText: string; rest: string } {
+  if (!text.startsWith('>')) return { quoteText: '', rest: text }
+  const lines = text.split(/\r?\n/u)
+  const quoted: string[] = []
+  let index = 0
+  while (index < lines.length && lines[index].startsWith('>')) {
+    quoted.push(lines[index].replace(/^>\s?/u, ''))
+    index += 1
+  }
+  if (quoted.every((line) => line.trim() === '')) return { quoteText: '', rest: text }
+  return { quoteText: quoted.join('\n'), rest: lines.slice(index).join('\n').replace(/^\n+/u, '') }
+}
+
 export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 'user' }>; store: ChatStore; latest?: boolean }) {
+  // 「问题与回答」气泡的展开态（迟到补答专用；普通用户消息不用）
+  const [qrOpen, setQrOpen] = useState(false)
+  /**
+   * 消息里被截断的引用：悬停看全文（上游 `QuotePreview` 的 clipped full-text popover）。
+   * 与输入区引用贴片同一套：固定定位、视口上下翻转/左右夹取、超高纵向滚动。
+   */
+  const [quoteTip, setQuoteTip] = useState<
+    { left: number; width: number; maxHeight: number; top?: number; bottom?: number } | null
+  >(null)
+  const quoteTipTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const cancelQuoteTipTimer = (): void => {
+    if (quoteTipTimer.current !== undefined) {
+      clearTimeout(quoteTipTimer.current)
+      quoteTipTimer.current = undefined
+    }
+  }
+  const scheduleHideQuoteTip = (): void => {
+    cancelQuoteTipTimer()
+    quoteTipTimer.current = setTimeout(() => {
+      quoteTipTimer.current = undefined
+      setQuoteTip(null)
+    }, 200)
+  }
+  useEffect(() => cancelQuoteTipTimer, [])
+  const qr = row.questionReply
+  if (qr !== undefined) {
+    /**
+     * **迟到补答**（`source.kind === 'user-question-reply'`）：上游把它渲染成右对齐的回答气泡，
+     * 标题「问题与回答」，一行摘要 + 可展开的逐题问答。它不是普通用户消息，正文 JSON 不该原样上屏。
+     */
+    const valuesOf = (id: string): string[] => {
+      const answer = qr.answers.find((a) => a.id === id)
+      const custom = answer?.custom?.trim() ?? ''
+      return [...(answer?.selected ?? []), ...(custom === '' ? [] : [custom])]
+    }
+    const summary = qr.questions.length === 0
+      ? qr.text
+      : qr.questions.map((q) => valuesOf(q.id).join('、')).filter((v) => v !== '').join('；')
+    const copyText = qr.questions.length === 0
+      ? qr.text
+      : qr.questions.map((q) => {
+          const head = q.header !== undefined && q.header !== q.question ? `${q.header} — ${q.question}` : q.question
+          const values = valuesOf(q.id)
+          return `${head}\n回答：${values.length === 0 ? '未回答' : values.join('、')}`
+        }).join('\n\n')
+    return html`<div class="msg user question-reply${latest ? ' latest' : ''}"><div class="col">
+      <div class="qr-bubble">
+        <div class="qr-label">问题与回答</div>
+        ${qrOpen && qr.questions.length > 0
+          ? html`<div class="qr-detail">${qr.questions.map((q) => {
+              const head = q.header !== undefined && q.header !== q.question ? `${q.header} — ${q.question}` : q.question
+              const values = valuesOf(q.id)
+              return html`<div class="qr-pair" key=${q.id}>
+                <div class="qr-q">${head}</div>
+                <div class="qr-a">${values.length === 0 ? '未回答' : values.join('、')}</div>
+              </div>`
+            })}</div>`
+          : html`<div class="qr-summary">${summary === '' ? '已提交回答' : summary}</div>`}
+        <div class="qr-actions">
+          ${qr.questions.length > 0
+            ? html`<button type="button" class="qr-toggle" aria-expanded=${qrOpen}
+                onClick=${() => setQrOpen((v) => !v)}>${qrOpen ? '收起' : '展开'}</button>`
+            : null}
+          <button type="button" class="qr-copy" onClick=${() => store.copy(copyText)}>复制</button>
+        </div>
+      </div>
+      ${RowMeta({ time: row.time, copyable: copyText !== '' })}
+    </div></div>`
+  }
   // 版式：**附件行（图片/文件）在气泡之外、且在正文之上**，
   // 然后才是正文气泡（内含 @引用贴片与文本）；引用摘要与动作在最后。
   //
@@ -35,7 +124,35 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
    * 引用贴片**不在气泡里**：上游把引用摘要放在气泡之外、气泡下方。
    */
   const showRefChips = !mentioned && localRefs !== undefined && localRefs.length > 0
-  const hasBubble = row.text.length > 0
+  // 引用块（发送时由贴片拼出）：上游把它渲染成**气泡内的一行内联引用**（引用标记 + 截断文字），
+  // 后面的正文紧跟着同一行流；消息里不出现字面的 `>`，也不拆成两个气泡。
+  const quoted = splitLeadingQuote(row.text)
+  const hasBubble = quoted.rest.length > 0 || quoted.quoteText !== ''
+  /** 悬停被截断的引用 → 显示全文浮层（短引用不弹）。 */
+  const showQuoteTip = (e: MouseEvent): void => {
+    cancelQuoteTipTimer()
+    const inline = e.currentTarget as unknown as HTMLElement
+    const src = inline.querySelector('.qsrc') as unknown as HTMLElement | null
+    // 有布局信息且确认没被截断 → 不弹（脚本级 DOM 环境拿不到布局，按"需要浮层"处理）
+    if (src !== null && (src.clientWidth > 0 || src.scrollWidth > 0) && src.scrollWidth <= src.clientWidth + 1) return
+    let rect: DOMRect = { left: 0, top: 0, bottom: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
+    try {
+      rect = inline.getBoundingClientRect()
+    } catch {
+      /* 非浏览器环境没有布局信息 */
+    }
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const width = Math.min(560, Math.max(240, vw - 24))
+    const left = Math.min(Math.max(rect.left, 12), Math.max(12, vw - width - 12))
+    const spaceAbove = rect.top - 12
+    const spaceBelow = vh - rect.bottom - 12
+    const above = spaceAbove >= 160 || spaceAbove >= spaceBelow
+    const maxHeight = Math.max(96, Math.min(vh * 0.6, above ? spaceAbove : spaceBelow))
+    setQuoteTip(above
+      ? { left, width, maxHeight, bottom: vh - rect.top + 6 }
+      : { left, width, maxHeight, top: rect.bottom + 6 })
+  }
   /**
    * **凭据遮挡**：已发送文本里认得出的凭据只留前 8 个字符，其余变 `*`。
    *
@@ -83,13 +200,29 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
           ${/* （附件层那条已挪到上面与本地字节同一个三元里：两条路只走一条。） */ ''}
         </div>`
       : null}
-    ${/* **没有正文就不画气泡**：只发图片/文件时，
-         气泡底色 + 内距会把图片下面多出一个空方块。 */ ''}
+    ${/* 引用与正文在**同一个气泡**里：引用是行内的（图标 + 截断文字），后接用户正文 */ ''}
     ${hasBubble
       ? html`<div class="body">
-          <div class="user-text"><${SecretText} text=${row.text} refs=${localRefs} /></div>
+          <div class="user-text">
+            ${quoted.quoteText === ''
+              ? null
+              : html`<span class="user-quote-inline"
+                  onMouseOver=${showQuoteTip}
+                  onMouseOut=${scheduleHideQuoteTip}>
+                  <span class="codicon codicon-quote" aria-hidden="true"></span>
+                  <span class="qsrc">${quoted.quoteText}</span>
+                </span>`}
+            ${quoted.rest === '' ? null : html`<${SecretText} text=${quoted.rest} refs=${localRefs} />`}
+          </div>
         </div>`
       : null}
+    ${quoteTip === null
+      ? null
+      : html`<div class="user-quote-tip" role="tooltip"
+          onMouseOver=${cancelQuoteTipTimer}
+          onMouseOut=${scheduleHideQuoteTip}
+          style=${`left:${String(quoteTip.left)}px;width:${String(quoteTip.width)}px;max-height:${String(quoteTip.maxHeight)}px;` +
+            (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoted.quoteText}</div>`}
     ${/* 引用贴片在**气泡之外**：
          本地回显还没把引用 token 写进正文时，靠这一行先把贴片画出来。 */ ''}
     ${showRefChips

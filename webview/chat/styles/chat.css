@@ -368,6 +368,53 @@
   }
   .msg.assistant .body { white-space: normal; word-break: break-word; }
   .msg.user .body .user-text { white-space: pre-wrap; }
+  /* 消息里的引用（上游 `QuotedUserText` → `QuotePreview`）：**气泡内联**的「引用标记 + 截断文字」，
+     后接用户正文；整段文字同色（引用用业务蓝），不另起块、不出现字面 `>`。 */
+  .msg.user .user-quote-inline {
+    display: inline-flex; align-items: baseline; gap: 4px; vertical-align: baseline;
+    max-width: min(80%, 300px); margin-right: 4px;
+    color: var(--vscode-textLink-foreground, #4daafc);
+  }
+  .msg.user .user-quote-inline .codicon { font-size: 12px; flex: none; }
+  .msg.user .user-quote-inline .qsrc {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 消息里被截断的引用：悬停看全文（与输入区 tooltip 同一套观感：固定定位 + 视口翻转/夹取 + 滚动条） */
+  .msg.user .user-quote-tip {
+    position: fixed; z-index: 60;
+    box-sizing: border-box; padding: 6px 9px; border-radius: 5px;
+    white-space: pre-wrap; word-break: break-word; overflow-y: auto; overscroll-behavior: contain;
+    font-size: 12px; line-height: 1.5;
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground, #ddd));
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, #252526));
+    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border, rgba(128,128,128,0.35)));
+    box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,0.36));
+    scrollbar-width: thin;
+    scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.4)) transparent;
+  }
+  .msg.user .user-quote-tip::-webkit-scrollbar { width: 10px; }
+  .msg.user .user-quote-tip::-webkit-scrollbar-thumb {
+    background: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.4));
+    border-radius: 5px; border: 2px solid transparent; background-clip: content-box;
+  }
+  /* 「问题与回答」气泡（迟到补答，上游 QuestionReplyView）：右对齐、标题一行、摘要 + 可展开逐题问答 */
+  .msg.user.question-reply .col { max-width: min(calc(var(--dsh-chat-content-width, 748px) * 0.702), 82%); }
+  .qr-bubble {
+    max-width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 10px;
+    background: var(--dsh-bubble); color: var(--vscode-foreground, #ddd);
+    white-space: normal; word-break: break-word;
+  }
+  .qr-label { font-size: 11px; font-weight: 600; opacity: 0.7; margin-bottom: 4px; }
+  .qr-summary { white-space: pre-wrap; }
+  .qr-detail { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 4px; }
+  .qr-pair { border-left: 2px solid var(--dsh-hairline); padding-left: 8px; }
+  .qr-q { font-size: 11px; opacity: 0.75; white-space: pre-wrap; }
+  .qr-a { white-space: pre-wrap; }
+  .qr-actions { display: flex; gap: 10px; margin-top: 6px; }
+  .qr-toggle, .qr-copy {
+    border: none; background: none; padding: 0; cursor: pointer;
+    color: var(--vscode-textLink-foreground, #4daafc); font-size: 11px; line-height: 16px;
+  }
   /* 凭据遮挡（上游 `ui-secret-mask` 的等价物）：文本与眼睛**同一行**，眼睛在末尾、不换行。
      图标用内联 SVG（不依赖 codicon 字体），也不用任何 tooltip —— 提示只走 `aria-label`。 */
   .secret-text { display: inline; }
@@ -774,6 +821,54 @@
   #refRow .ref-chip { height: 20px; font-size: 11px; padding: 0 7px; border-radius: 10px; max-width: 160px; flex: 0 0 auto; }
   #refRow .ref-chip .ficon { font-size: 12px; line-height: 1; }
   #refRow .ref-chip .x { font-size: 10px; margin-left: 1px; }
+  /* 选中文本引用（0.2.2 quote）：输入区上方的贴片。**不写进 textarea**（否则删起来像普通文本、
+     也做不出"一键清除"），发送时才拼成引用块；有它时把 @ 贴片那一行往下让，避免重叠。 */
+  #quoteRow { position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 8px 0; min-width: 0; }
+  #quoteRow .quote-chip {
+    display: inline-flex; align-items: center; gap: 5px; height: 20px; max-width: 76%;
+    font-size: 11px; padding: 0 8px 0 5px; border-radius: 10px;
+    background: var(--vscode-badge-background, rgba(128,128,128,0.25));
+    color: var(--vscode-foreground, #ddd);
+  }
+  /* 贴片左侧图标：**默认是引号**（与上游一致）；鼠标悬停这一行时换成 ✕，点击就清掉 */
+  #quoteRow .quote-chip .x {
+    flex: none; border: none; background: none; padding: 0; cursor: pointer;
+    width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
+    color: var(--vscode-foreground, #ddd); border-radius: 4px;
+  }
+  #quoteRow .quote-chip .x .codicon { font-size: 16px; line-height: 1; }
+  /* 行尾的「清除引用」文字按钮（与贴片上的 ✕ 两个入口都保留） */
+  #quoteRow .quote-clear {
+    flex: none; border: none; background: none; padding: 0; cursor: pointer;
+    color: var(--vscode-textLink-foreground, #4daafc); font-size: 10.5px; line-height: 16px;
+  }
+  #quoteRow .quote-clear:hover { text-decoration: underline; }
+  #quoteRow .quote-chip .x .ico-clear { display: none; }
+  #quoteRow .quote-chip:hover .x .ico-quote { display: none; }
+  #quoteRow .quote-chip:hover .x .ico-clear { display: inline-flex; }
+  #quoteRow .quote-chip:hover .x { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.25)); }
+  #quoteRow .quote-chip .qtext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 悬停自绘 tooltip：**固定定位**（不夹在输入区里被裁）、位置由组件按视口算（上/下翻转 + 左右夹取）；
+     内容超过可用高度时纵向滚动（滚动条用 VSCode 滑块色）。颜色用 VSCode 悬停组件变量，浅/深主题都跟系统一致。 */
+  #quoteRow .quote-tip {
+    position: fixed; z-index: 60;
+    box-sizing: border-box; padding: 6px 9px; border-radius: 5px;
+    white-space: pre-wrap; word-break: break-word; overflow-y: auto; overscroll-behavior: contain;
+    font-size: 12px; line-height: 1.5;
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground, #ddd));
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, #252526));
+    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border, rgba(128,128,128,0.35)));
+    box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,0.36));
+    scrollbar-width: thin;
+    scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.4)) transparent;
+  }
+  #quoteRow .quote-tip::-webkit-scrollbar { width: 10px; }
+  #quoteRow .quote-tip::-webkit-scrollbar-thumb {
+    background: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.4));
+    border-radius: 5px; border: 2px solid transparent; background-clip: content-box;
+  }
+  #quoteRow .quote-tip::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100,100,100,0.7)); background-clip: content-box; }
+  #quoteRow ~ #refRow { top: 34px; }
   #input {
     width: 100%; box-sizing: border-box; resize: none; border: none; outline: none;
     min-height: 68px; max-height: 150px; background: transparent;
@@ -1065,6 +1160,34 @@
     box-shadow: none;
   }
   .mp-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 选中文本后的「引用」浮钮：fixed 定位在选区上方；点击把选中文本作为 Markdown 引用块插进输入框 */
+.quote-pop {
+  position: fixed; z-index: 90; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px;
+  font-size: 11px; line-height: 18px; white-space: nowrap;
+  color: var(--vscode-button-foreground, #fff);
+  background: var(--vscode-button-background, #0e639c);
+  border: none; border-radius: 4px; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.quote-pop:hover { background: var(--vscode-button-hoverBackground, #1177bb); }
+.quote-pop .codicon { font-size: 12px; }
+/* 「正在发送消息」相位（上游输入区 sending）：消息已发出、等 Host 接受时的状态行 */
+.sending-status {
+  display: flex; align-items: center; gap: 6px; padding: 4px 0;
+  color: var(--vscode-descriptionForeground, #999); font-size: 12px;
+}
+.sending-status .codicon { font-size: 12px; }
+/* 模型徽标（上游 provider 广告的 badge）：名字右侧一枚小标签，语气由 data-tone 分档 */
+.mp-badge {
+  flex: none; margin-left: auto; padding: 0 5px; border-radius: 4px;
+  font-size: 10px; line-height: 16px; white-space: nowrap;
+  color: var(--vscode-descriptionForeground, #999);
+  background: rgba(128, 128, 128, 0.18);
+}
+.mp-badge[data-tone='info'] { color: var(--vscode-focusBorder, #4daafc); background: rgba(77, 170, 252, 0.16); }
+.mp-badge[data-tone='success'] { color: var(--vscode-testing-iconPassed, #73c991); background: rgba(115, 201, 145, 0.16); }
+.mp-badge[data-tone='warning'] { color: var(--vscode-editorWarning-foreground, #cca700); background: rgba(204, 167, 0, 0.16); }
   /* 输入触发器菜单("/" 命令、"@ " 引用等)：名称+描述两段式，略宽、描述超长省略 */
   #triggerPopup {
     width: min(340px, 92vw);
@@ -1927,6 +2050,10 @@
      只写在内层会让副本按父级字号排、两层错位。 */
   .turn-status-text { white-space: nowrap; font-size: 10px; }
   .turn-status-clock { font-size: 13px; font-weight: 400; color: var(--vscode-descriptionForeground, #999); font-variant-numeric: tabular-nums; }
+  /* 0.2.2 两档：holding 保留占位但不显示内容（等终局行接手）；paused 时转圈停住、文字变淡（时长已冻结） */
+  .turn-status.is-holding { visibility: hidden; }
+  .turn-status[data-paused='true'] .codicon-modifier-spin { animation: none; opacity: 0.6; }
+  .turn-status[data-paused='true'] .turn-status-text { opacity: 0.75; }
 
   /* ===== 命令行（上游 `command` 节点的 `GenericCommandCard`）：标题是裸命令名 ===== */
   .command-row { margin: 6px 0; font-size: 12px; }
@@ -1983,9 +2110,28 @@
     max-height: min(60vh, 520px);
   }
   .q-dialog-head { display: flex; align-items: flex-start; gap: 6px; }
-  .q-dialog-eyebrow { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .q-dialog-eyebrow { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; position: relative; }
   .q-dialog-header { font-size: 10.5px; color: var(--vscode-descriptionForeground, #888); }
   .q-dialog-q { font-size: 13px; font-weight: 600; color: var(--vscode-foreground, #ddd); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 0.2.2 的"长文案可展开"：默认夹三行（带渐隐遮罩），展开后全文；按钮文案用上游的「展开 / 收起」 */
+.q-dialog-q[data-expanded='true'] { display: block; }
+.q-dialog-q:not([data-expanded='true']) {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  padding-right: 30px;
+  mask-image: linear-gradient(180deg, #000 calc(100% - 1.2em), transparent);
+}
+.q-dialog-copy-toggle {
+  position: absolute; right: 0; bottom: 0; border: none; padding: 0 2px; cursor: pointer;
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-textLink-foreground, #4daafc); font-size: 11px; line-height: 16px;
+}
+.question .q-text:not([data-expanded='true']) {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.question .q-text-toggle {
+  border: none; background: none; padding: 0; cursor: pointer; margin: -2px 0 2px;
+  color: var(--vscode-textLink-foreground, #4daafc); font-size: 11px; line-height: 16px;
+}
   .q-dialog-icon {
     flex: none; border: none; background: none; cursor: pointer; padding: 2px;
     color: var(--vscode-descriptionForeground, #999); border-radius: 6px;
@@ -1997,10 +2143,12 @@
   .q-dialog-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
   .q-dialog-detail { font-size: 12px; color: var(--vscode-descriptionForeground, #999); white-space: pre-wrap; overflow-wrap: anywhere; }
   .q-dialog-options { display: flex; flex-direction: column; gap: 6px; }
+  .q-dialog-opt-row { position: relative; }
   .q-dialog-opt {
     display: flex; align-items: flex-start; gap: 8px; padding: 6px 10px; border-radius: 6px; text-align: left;
     border: 1px solid var(--dsh-hairline); background: transparent;
     color: var(--vscode-foreground, #ddd); cursor: pointer; font: inherit; font-size: 12px;
+    width: 100%; box-sizing: border-box;
   }
   .q-dialog-opt:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.22)); }
   .q-dialog-opt.selected { border-color: var(--vscode-focusBorder, #3794ff); background: var(--vscode-button-secondaryBackground, rgba(128,128,128,0.3)); }
@@ -2017,6 +2165,17 @@
     color: var(--vscode-foreground, #ddd); background: var(--vscode-badge-background, rgba(128,128,128,0.35));
   }
   .q-opt-desc { color: var(--vscode-descriptionForeground, #888); }
+  /* 长选项描述：默认夹两行，右下角「展开 / 收起」（上游同：描述可展开、按钮浮在行尾） */
+  .q-opt-desc:not([data-expanded='true']) {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    padding-right: 34px;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 40px), transparent);
+  }
+  .q-opt-desc-toggle {
+    position: absolute; right: 8px; bottom: 4px; border: none; padding: 0 2px; cursor: pointer;
+    background: var(--vscode-editor-background, #1e1e1e);
+    color: var(--vscode-textLink-foreground, #4daafc); font-size: 11px; line-height: 16px;
+  }
   .q-dialog-custom {
     width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 6px; resize: vertical;
     border: 1px solid var(--dsh-hairline); background: var(--vscode-input-background, rgba(0,0,0,0.2));

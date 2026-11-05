@@ -43,7 +43,7 @@ export function AttachmentGallery({ store, images }: { store: ChatStore; images:
   // 懒取：进到这里（卡展开）才向宿主请求字节；已就绪/在飞的不会重复发
   useEffect(() => {
     for (const img of images) {
-      store.requestAttachment(img.attachmentId)
+      store.requestAttachment(img)
     }
     // 依赖只取 id 串：引用数组每次渲染都是新对象，用 join 后的稳定值做键
   }, [ids, store])
@@ -87,7 +87,7 @@ export function AttachmentGallery({ store, images }: { store: ChatStore; images:
       }
       if (entry.state === 'error') {
         return html`<button type="button" class="att-item is-error" key=${img.attachmentId} title=${entry.error ?? ''}
-          onClick=${() => store.requestAttachment(img.attachmentId)}><span class="att-note">${labels.failed}</span></button>`
+          onClick=${() => store.requestAttachment(img)}><span class="att-note">${labels.failed}</span></button>`
       }
       const src = `data:${entry.mediaType ?? img.mediaType};base64,${entry.data ?? ''}`
       const box = single ? singleStyle(img) : `width:${TILE}px;height:${TILE}px;object-fit:cover;object-position:center`
@@ -99,7 +99,7 @@ export function AttachmentGallery({ store, images }: { store: ChatStore; images:
        * 图本身不用来开灯箱：上游那颗 `button` 的 `title` 就是"打开"，在编辑器里打开更贴近它的意图。
        */
       return html`<button type="button" class="att-item" key=${img.attachmentId}
-        onClick=${() => store.openAttachment?.(img.attachmentId, img.name)}>
+        onClick=${() => store.openAttachment?.(img.attachmentId, img.name, img)}>
         <img src=${src} alt=${img.name ?? ''} title=${img.name ?? ''} style=${box} />
       </button>`
     })}

@@ -4,7 +4,7 @@
 // **聊天区可见性**（对齐上游 0.1.7-alpha.1 起的口径）：系统提示词行与普通上下文注入行不进列表，
 // 只有含工具增删块的注入行保留 —— 判据在 `core/chat-visibility.ts`，**在构造渲染列表那一层**过滤。
 import { html } from 'htm/preact'
-import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import type { ChatRow, ChatStore } from '../../core/store/chat'
 import { ScrollFollow, type FollowHost } from '../../core/follow'
 import { clearRenderErrors, renderErrors } from '../../core/errors'
@@ -68,6 +68,51 @@ function hostOf(el: HTMLElement, col: HTMLElement | null): FollowHost {
 
 export function MessageList({ store }: { store: ChatStore }) {
   const ref = useRef<HTMLDivElement | null>(null)
+  /**
+   * 选中文本后的「引用」浮钮（对齐上游的"选中即引用"手势；本插件把引用做成 Markdown 引用块插入输入框）。
+   * `x/y` 是选区上方那一点的视口坐标（按钮用 fixed 定位）。
+   */
+  const [quoteAt, setQuoteAt] = useState<{ x: number; y: number; text: string } | null>(null)
+  useEffect(() => {
+    if (quoteAt === null) return
+    // 点别处/按 Esc 收起浮钮（按钮自己的 mousedown 已挡掉，不会误关）
+    const hide = (): void => setQuoteAt(null)
+    window.addEventListener('mousedown', hide)
+    window.addEventListener('keydown', hide)
+    return () => {
+      window.removeEventListener('mousedown', hide)
+      window.removeEventListener('keydown', hide)
+    }
+  }, [quoteAt])
+  /** 鼠标松开时若在会话区内选到了非空文本 → 在选区上方出「引用」浮钮。 */
+  const onMessagesMouseUp = (): void => {
+    const selection = window.getSelection()
+    const root = ref.current
+    if (selection === null || root === null || selection.isCollapsed || selection.rangeCount === 0) {
+      setQuoteAt(null)
+      return
+    }
+    const text = selection.toString().trim()
+    if (text === '' || !root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) {
+      setQuoteAt(null)
+      return
+    }
+    const rect = selection.getRangeAt(0).getBoundingClientRect()
+    setQuoteAt({
+      x: Math.min(Math.max(rect.left + rect.width / 2, 60), window.innerWidth - 60),
+      y: Math.max(rect.top - 36, 8),
+      text,
+    })
+  }
+  const quoteSelected = (): void => {
+    if (quoteAt === null) return
+    // 不再是"往 textarea 里塞一段 Markdown"（那样清起来麻烦、也不像上游的原子 chip）：
+    // 记成输入区上方的引用贴片，发送时再拼成引用块；贴片可一键清除。
+    store.setQuote(quoteAt.text)
+    store.focusTick.value += 1
+    setQuoteAt(null)
+    window.getSelection()?.removeAllRanges()
+  }
   // 内容列（`#messages` 里那一层）：跟随的观察对象，见 `followTargets`
   const colRef = useRef<HTMLDivElement | null>(null)
   // 跟随状态机：与容器的生命周期一致（判据全在 core/follow，这里只接 DOM 事件）
@@ -406,6 +451,9 @@ export function MessageList({ store }: { store: ChatStore }) {
   const rowOuterHidden = (row: Extract<ChatRow, { kind: 'assistant' }>): boolean => {
     if (store.transcriptView.value !== 'compact') return false
     if (store.stepGrouping?.value === 'none') return false
+    // 收起后显示的回复 = 全部回复（上游默认）：更早世代的**回复行**仍可见，只折它自己的过程区；
+    // 只有 "仅最终回答" 才把更早世代整段（含回复）折起。
+    if (store.foldedReplies?.value === 'all' && row.text.trim() !== '') return false
     if (row.turn === undefined || row.done !== true || row.process === undefined) return false
     if (row.interrupted === true || row.status === 'aborted' || row.status === 'error') return false
     if (row.process.hasInterleavedInput === true) return false
@@ -477,7 +525,7 @@ export function MessageList({ store }: { store: ChatStore }) {
   // 「加载更早」同一处（列表顶端），文案逐字取上游 `chat.loadError`。
   // ⚠️ 可缺省读取：部分守卫/旧桩的 store 里没有这个切片（它较新），缺了就按"没有失败"渲染
   const openError = store.sessionOpenError?.value
-  return html`<div id="messages" ref=${ref}>
+  return html`<div id="messages" ref=${ref} onMouseUp=${onMessagesMouseUp}>
     <div class="msg-col" ref=${colRef}>
       ${openError === undefined
         ? null
@@ -589,7 +637,11 @@ export function MessageList({ store }: { store: ChatStore }) {
            「刚发出去那条」跑到「深度求索中…」底下，与上游位置相反。
            它们还没进日志，没有锚点序号，所以只能落在这里，不能塞进 `messages`。 */ ''}
       <${PendingSteeringList} items=${store.pendingSteering.value} />
-      ${store.processing.value ? html`<${TurnStatus} store=${store} />` : null}
+      ${store.sendingRpcId?.value !== undefined
+        ? html`<div class="sending-status" role="status"><span class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></span>正在发送消息…</div>`
+        : store.processing.value
+          ? html`<${TurnStatus} store=${store} />`
+          : null}
       ${errorCount > 0
         ? html`<div class="render-error-bar">
             <span class="codicon codicon-warning" aria-hidden="true"></span>
@@ -598,6 +650,14 @@ export function MessageList({ store }: { store: ChatStore }) {
           </div>`
         : null}
     </div>
+    ${quoteAt === null
+      ? null
+      : html`<button type="button" class="quote-pop" style=${`left:${String(quoteAt.x)}px;top:${String(quoteAt.y)}px`}
+          title="引用选中文本" aria-label="引用选中文本"
+          onMouseDown=${(e: Event) => { e.preventDefault(); e.stopPropagation() }}
+          onClick=${quoteSelected}>
+          <span class="codicon codicon-quote" aria-hidden="true"></span>引用
+        </button>`}
 
   </div>`
 }

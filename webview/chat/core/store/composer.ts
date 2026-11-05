@@ -13,6 +13,8 @@ export interface ComposerSlice {
     | 'attachments'
     | 'images'
     | 'refs'
+    /** 选中文本的引用（0.2.2 quote）：输入区上方的可一键清除贴片，发送时并入正文引用块 */
+    | 'quote'
     | 'focusTick'
     | 'runSlash'
     | 'pickFile'
@@ -42,6 +44,10 @@ export interface ComposerSlice {
   /** 提交失败：把该次的内容放回输入区（输入框已被用户改写则不动）。 */
   restoreSentDraft(rpcId: string | undefined): void
   reset(): void
+  /** 记下选中文本的引用（同一时刻只有一条；再选一次即替换）。 */
+  setQuote(text: string): void
+  /** 清掉引用贴片（一键清除；发送成功时也会清）。 */
+  clearQuote(): void
 }
 
 export function createComposer(host: ChatHost): ComposerSlice {
@@ -49,6 +55,8 @@ export function createComposer(host: ChatHost): ComposerSlice {
   const attachments = signal<StagedFile[]>([])
   const images = signal<ImageAttachment[]>([])
   const refs = signal<RefChip[]>([])
+  /** 选中文本引用（0.2.2）：输入区上方的贴片；不直接往 textarea 里塞 Markdown，避免"清不掉"。 */
+  const quote = signal<string | undefined>(undefined)
   const focusTick = signal(0)
   let refKey = 1
 
@@ -221,8 +229,18 @@ export function createComposer(host: ChatHost): ComposerSlice {
     attachments.value = []
     images.value = []
     refs.value = []
+    quote.value = undefined
     text.value = ''
     sentDrafts.clear()
+  }
+
+  function setQuote(text: string): void {
+    const trimmed = text.trim()
+    quote.value = trimmed === '' ? undefined : trimmed
+  }
+
+  function clearQuote(): void {
+    quote.value = undefined
   }
 
   /** 已发出、尚未被确认的那几次提交的内容（键 = 提交标识）；失败时据此还原输入区。 */
@@ -257,6 +275,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
       attachments,
       images,
       refs,
+      quote,
       focusTick,
       runSlash,
       pickFile,
@@ -277,5 +296,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
     rememberSentDraft,
     restoreSentDraft,
     reset,
+    setQuote,
+    clearQuote,
   }
 }

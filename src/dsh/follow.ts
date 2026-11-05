@@ -44,6 +44,11 @@ export interface DshFollowHandlers {
      * @param error - 失败原因（消息 + code，`code` 取错误名，取不到就不带）。
      */
     onOpenError?: (error: { message: string; code?: string }) => void;
+    /**
+     * **能否观察会话**（运行状态 `paused` 的事实来源）：拿到快照/实时帧 = true；
+     * 流断开/出错/结束/重连等待 = false。取消订阅（切会话/停用）不触发。
+     */
+    onObservation?: (observing: boolean) => void;
 }
 
 /** 流的错误对象 → 可展示的 `{ message, code }`（code 取错误名，缺省不带）。 */
@@ -114,6 +119,8 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                     if (!isCurrent()) {
                         return;
                     }
+                    // 收到任何一帧 = 现在能观察到会话（运行状态暂停态解除）
+                    handlers.onObservation?.(true);
                     const v = (value as { value?: unknown } | undefined)?.value ?? value;
                     const frame = v as Record<string, unknown> | undefined;
                     if (frame?.['type'] === 'snapshot') {
@@ -147,13 +154,14 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                     if (!isCurrent()) {
                         return;
                     }
+                    handlers.onObservation?.(false);
                     handlers.onOpenError?.(streamErrorOf(err));
                     control = undefined;
                     retry();
                 },
-                onEnd: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
-                onClose: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
-                onFatal: () => { if (!isCurrent()) { return; } control = undefined; retry(); },
+                onEnd: () => { if (!isCurrent()) { return; } handlers.onObservation?.(false); control = undefined; retry(); },
+                onClose: () => { if (!isCurrent()) { return; } handlers.onObservation?.(false); control = undefined; retry(); },
+                onFatal: () => { if (!isCurrent()) { return; } handlers.onObservation?.(false); control = undefined; retry(); },
             },
             STREAM_TIMEOUT_MS
         )
@@ -169,7 +177,8 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                 if (!isCurrent()) {
                     return;
                 }
-                // 连流都没打开：同样算"打开历史失败"（上游 `doOpen` 的 catch 分支）
+                // 连流都没打开：同样算"打开历史失败"（上游 `doOpen` 的 catch 分支），也无法观察会话
+                handlers.onObservation?.(false);
                 handlers.onOpenError?.(streamErrorOf(e));
                 control = undefined;
                 retry();

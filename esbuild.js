@@ -1,4 +1,5 @@
 // 扩展宿主（Node 侧）构建：esbuild 打包 `src/extension.ts` → `dist/extension.js`（CJS）。
+// 运行要求 Node >=24.9（与 dsh 0.2.2 的 `engines.node` 一致）；`target: ['es2023']` 是语法下限，不是运行版本。
 //
 // 跑法：
 //   node esbuild.js              一次性构建（`pnpm compile` 用它；非生产档带 sourcemap）

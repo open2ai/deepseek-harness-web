@@ -14,6 +14,18 @@ export function QuestionRow({ row, store }: { row: Extract<ChatRow, { kind: 'que
   const init = (): AnswerEntry[] => row.questions.map((q) => ({ id: q.id, selected: [], custom: undefined }))
   const [answers, setAnswers] = useState<AnswerEntry[]>(init)
   const [free, setFree] = useState<Record<string, string>>({})
+  /** 长问题/长描述的「展开 / 收起」（0.2.2 的新文案：`text.expand` / `text.collapse`）。 */
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const EXPAND_LONG = 120
+  const toggleCopy = (key: string): void => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(key)) {
+        next.add(key)
+      }
+      return next
+    })
+  }
   const update = (id: string, fn: (e: AnswerEntry) => AnswerEntry): void => setAnswers((prev) => prev.map((e) => (e.id === id ? fn(e) : e)))
   const toggleOpt = (q: QuestionSpec, entry: AnswerEntry, label: string): void => {
     if (q.multiSelect) {
@@ -34,9 +46,14 @@ export function QuestionRow({ row, store }: { row: Extract<ChatRow, { kind: 'que
     ${row.questions.map((q, qi) => {
       const entry = answers[qi]
       const isSelected = (label: string): boolean => entry?.selected.includes(label) ?? false
+      const copyKey = `q:${q.id}`
+      const copyOpen = expanded.has(copyKey)
       return html`<div class="q-block" key=${q.id}>
         ${q.header ? html`<div class="q-header">${q.header}</div>` : null}
-        <div class="q-text">${q.question}</div>
+        <div class="q-text" data-expanded=${copyOpen ? 'true' : undefined}>${q.question}</div>
+        ${q.question.length > EXPAND_LONG
+          ? html`<button type="button" class="q-text-toggle" onClick=${() => toggleCopy(copyKey)}>${copyOpen ? '收起' : '展开'}</button>`
+          : null}
         ${q.detail ? html`<div class="q-detail">${q.detail}</div>` : null}
         ${q.options && q.options.length > 0
           ? html`<div class="q-options">${q.options.map((o) =>
