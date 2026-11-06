@@ -2,7 +2,7 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
-## [0.1.22] — 2026-11-06
+## [0.1.22-rc.1] — 2026-11-06
 
 ### 破坏性变更
 
