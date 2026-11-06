@@ -10,9 +10,10 @@ import { createHash } from 'crypto';
 import { DshService, DshNoWorkspaceError, SPEECH_TRANSCRIBE_TIMEOUT_MS } from './api/dshService';
 import type { DshSpeechCatalog } from './api/dshService';
 import { ChatInputService } from './chatInputService';
-import { type DshContentPart, type DshReplyStats, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
+import { type DshContentPart, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { dshEvents } from './dsh/events';
 import { DshPanel } from './dshPanel';
+import { openUsageReport, recordUsage } from './usage/report';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
 import type { DshPendingAttachment } from './dsh/submissions';
 import { VoiceRecorder } from './dsh/voice';
@@ -337,211 +338,6 @@ function getChatContent(): string {
         <p>找不到构建产物 <code>dist/chat/index.html</code>，或它已损坏。</p>
         <p>在扩展仓库里重新构建后重载窗口即可：<br><code>pnpm run compile</code></p>
     </div>
-</body>
-</html>`;
-}
-
-/** 单条消费记录：字段按 dsh 返回原样存（未返回则为空，不补 0） */
-interface UsageRecord {
-    time: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    cacheReadTokens?: number;
-    cacheWriteTokens?: number;
-    reasoningTokens?: number;
-    totalTokens?: number;
-}
-
-/** 记录一次对话的消费到持久化存储（time 取 dsh 对该回答的自带时间戳，缺省才用本地时刻） */
-async function recordUsage(state: vscode.Memento, stats: DshReplyStats | undefined, apiTime?: number): Promise<void> {
-    if (!stats) {
-        return;
-    }
-    const key = 'dsh.usage';
-    // epoch 秒/毫秒自适应，统一存毫秒；无 API 时刻才回退本地 Date.now()
-    const ts =
-        typeof apiTime === 'number' && Number.isFinite(apiTime) && apiTime > 0
-            ? (apiTime > 1e12 ? apiTime : apiTime * 1000)
-            : Date.now();
-    const record: UsageRecord = {
-        time: ts,
-        inputTokens: stats.inputTokens,
-        outputTokens: stats.outputTokens,
-        cacheReadTokens: stats.cacheReadTokens,
-        cacheWriteTokens: stats.cacheWriteTokens,
-        reasoningTokens: stats.reasoningTokens,
-        totalTokens: stats.totalTokens,
-    };
-    if (
-        record.inputTokens === undefined &&
-        record.outputTokens === undefined &&
-        record.cacheReadTokens === undefined &&
-        record.cacheWriteTokens === undefined &&
-        record.reasoningTokens === undefined &&
-        record.totalTokens === undefined
-    ) {
-        return; // 无任何已消耗用量（如停在首个 token 前），不写空行
-    }
-    const existing = state.get<UsageRecord[]>(key) ?? [];
-    const next = [...existing, record].slice(-500);
-    await state.update(key, next);
-}
-
-/** 打开消费记录报告面板：按自然周/月分组、可折叠（原样展示 dsh 字段，未返回显示 —） */
-async function openUsageReport(state: vscode.Memento): Promise<void> {
-    const records = state.get<UsageRecord[]>('dsh.usage') ?? [];
-    const panel = vscode.window.createWebviewPanel(
-        'dshUsage',
-        '消费记录',
-        vscode.ViewColumn.Beside,
-        { enableScripts: false }
-    );
-
-    // ---- 本地自然日/周/月分组 ----
-    const now = new Date();
-    const DAY = 86_400_000;
-    const dayStart = (d: Date): number => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-    const mondayStart = (d: Date): number => {
-        const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-        x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
-        return x.getTime();
-    };
-    const todayStart = dayStart(now);
-    const curWeekStart = mondayStart(now);
-    const prevWeekStart = curWeekStart - 7 * DAY;
-    const curMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-    const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
-    const bucketOf = (t: number): string => {
-        if (t >= todayStart) {
-            return '今天';
-        }
-        if (t >= todayStart - DAY) {
-            return '昨天';
-        }
-        if (t >= curWeekStart) {
-            return '本周';
-        }
-        if (t >= prevWeekStart) {
-            return '上周';
-        }
-        if (t >= prevMonthStart && t < curMonthStart) {
-            return '上个月';
-        }
-        return '更早';
-    };
-    const groups = new Map<string, UsageRecord[]>();
-    for (const r of records) {
-        const lb = bucketOf(r.time);
-        const arr = groups.get(lb) ?? [];
-        arr.push(r);
-        groups.set(lb, arr);
-    }
-    const ORDER = ['今天', '昨天', '本周', '上周', '上个月', '更早'];
-
-    const fmt = (v: number | undefined): string => (typeof v === 'number' ? String(v) : '—');
-    // 大数缩写（仅用于汇总行）：≥1e3 → 1.0K、≥1e6 → 1.2M，更大 → G/T；<1000 显示原值
-    const compact = (n: number): string => {
-        const abs = Math.abs(n);
-        if (abs < 1000) {
-            return String(n);
-        }
-        const table: Array<[number, string]> = [
-            [1e12, 'T'],
-            [1e9, 'G'],
-            [1e6, 'M'],
-            [1e3, 'K'],
-        ];
-        for (const [base, unit] of table) {
-            if (abs >= base) {
-                return (n / base).toFixed(1) + unit;
-            }
-        }
-        return String(n);
-    };
-    const sum = (k: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'reasoningTokens' | 'totalTokens'): number =>
-        records.reduce((a, r) => a + (typeof r[k] === 'number' ? (r[k] as number) : 0), 0);
-    const anyOf = (k: 'cacheWriteTokens' | 'totalTokens'): boolean => records.some((r) => typeof r[k] === 'number');
-    const hasCacheWrite = anyOf('cacheWriteTokens');
-    const hasTotal = anyOf('totalTokens');
-    const summary = [
-        `<strong>${records.length} 条对话</strong>`,
-        `总输入 ${compact(sum('inputTokens'))}`,
-        `总输出 ${compact(sum('outputTokens'))}`,
-        `缓存读 ${compact(sum('cacheReadTokens'))}`,
-        hasCacheWrite ? `缓存写 ${compact(sum('cacheWriteTokens'))}` : '',
-        `推理 ${compact(sum('reasoningTokens'))}`,
-        hasTotal ? `合计(totalTokens) ${compact(sum('totalTokens'))}` : '',
-    ]
-        .filter(Boolean)
-        .join(' · ');
-
-    const rowHtml = (r: UsageRecord): string =>
-        `<tr><td>${new Date(r.time).toLocaleString()}</td><td>${fmt(r.inputTokens)}</td><td>${fmt(r.outputTokens)}</td>` +
-        `<td>${fmt(r.cacheReadTokens)}</td><td>${hasCacheWrite ? fmt(r.cacheWriteTokens) : '—'}</td>` +
-        `<td>${fmt(r.reasoningTokens)}</td><td>${hasTotal ? fmt(r.totalTokens) : '—'}</td></tr>`;
-    const thead =
-        '<tr><th>时间</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>推理</th><th>合计(totalTokens)</th></tr>';
-
-    // 每组内的汇总（只统计该组里真实返回过的数字字段）
-    const grpSumOf = (items: UsageRecord[], k: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'reasoningTokens' | 'totalTokens'): number =>
-        items.reduce((a, r) => a + (typeof r[k] === 'number' ? (r[k] as number) : 0), 0);
-    const grpStats = (items: UsageRecord[]): string => {
-        const hasCW = items.some((r) => typeof r.cacheWriteTokens === 'number');
-        const hasTT = items.some((r) => typeof r.totalTokens === 'number');
-        return [
-            `总输入 ${compact(grpSumOf(items, 'inputTokens'))}`,
-            `总输出 ${compact(grpSumOf(items, 'outputTokens'))}`,
-            `缓存读 ${compact(grpSumOf(items, 'cacheReadTokens'))}`,
-            hasCW ? `缓存写 ${compact(grpSumOf(items, 'cacheWriteTokens'))}` : '',
-            `推理 ${compact(grpSumOf(items, 'reasoningTokens'))}`,
-            hasTT ? `合计(totalTokens) ${compact(grpSumOf(items, 'totalTokens'))}` : '',
-        ]
-            .filter(Boolean)
-            .join(' · ');
-    };
-
-    const sections = records.length === 0
-        ? '<div class="empty">暂无记录</div>'
-        : ORDER
-              .filter((lb) => groups.has(lb))
-              .map((lb, idx) => {
-                  const items = (groups.get(lb) ?? []).slice().reverse();
-                  return (
-                      `<details class="grp" ${idx === 0 ? 'open' : ''}>` +
-                      `<summary>${lb} · ${items.length} 条` +
-                      `<span class="grp-stat">${grpStats(items)} tok</span></summary>` +
-                      `<table>${thead}${items.map(rowHtml).join('')}</table>` +
-                      `</details>`
-                  );
-              })
-              .join('');
-
-    panel.webview.html = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-<style>
-    body { font-family: var(--vscode-font-family, sans-serif); padding: 12px; color: var(--vscode-foreground, #ddd); font-size: 13px; }
-    h1 { font-size: 15px; margin: 0 0 4px; }
-    .note { font-size: 11px; color: var(--vscode-descriptionForeground, #888); margin: 0 0 8px; }
-    .summary { margin: 8px 0; }
-    .empty { color: var(--vscode-descriptionForeground, #888); font-size: 12px; }
-    .grp { border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12)); border-radius: 8px; margin: 6px 0; overflow: hidden; }
-    .grp summary { cursor: pointer; padding: 6px 10px; font-weight: 600; user-select: none; background: rgba(255,255,255,0.04); }
-    .grp summary:hover { background: rgba(255,255,255,0.08); }
-    .grp-stat { font-weight: normal; font-size: 11px; color: var(--vscode-descriptionForeground, #888); margin-left: 12px; }
-    .grp table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border-top: 1px solid rgba(255,255,255,0.08); padding: 4px 8px; text-align: right; }
-    th:first-child, td:first-child { text-align: left; }
-    th { background: rgba(255,255,255,0.05); }
-</style>
-</head>
-<body>
-<h1>消费记录</h1>
-<div class="note">仅统计本插件发起的对话（侧边栏 / 右键处理）。在 dsh 网页 / 桌面里使用产生的用量不在其中，因此可能与你的总用量不一致。</div>
-<div class="summary">${summary} tok</div>
-${sections}
 </body>
 </html>`;
 }
@@ -1048,6 +844,7 @@ function setupChatWebview(
     webview: vscode.Webview,
     extensionUri: vscode.Uri,
     globalState: vscode.Memento,
+    globalStorageUri: vscode.Uri,
     titlebarMode: TitlebarMode,
     isSidebar: boolean
 ): void {
@@ -1200,7 +997,7 @@ function setupChatWebview(
     dsh.onTurnSettled = (info) => {
         // 回合已结算：待答交互（若有）随本轮作废
         clearPendingAsk();
-        void recordUsage(globalState, info.stats, info.timeMs);
+        void recordUsage({ globalStorageUri, globalState }, info.sessionId, info.stats, info.timeMs);
         for (const w of allChatWebviews()) {
             void postChatInfo(w);
         }
@@ -2058,13 +1855,14 @@ async function moveChatBackToSidebar(): Promise<void> {
 class DshLauncherProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
-        private readonly globalState: vscode.Memento
+        private readonly globalState: vscode.Memento,
+        private readonly globalStorageUri: vscode.Uri
     ) {}
 
     resolveWebviewView(view: vscode.WebviewView): void {
         launcherView = view;
         // 侧边栏/面板是「视图」，原生 view/title 能渲染到 → 直接按 TITLEBAR_MODE 走；isSidebar=true
-        setupChatWebview(view.webview, this.extensionUri, this.globalState, TITLEBAR_MODE, true);
+        setupChatWebview(view.webview, this.extensionUri, this.globalState, this.globalStorageUri, TITLEBAR_MODE, true);
         view.onDidDispose(() => {
             if (launcherView === view) {
                 launcherView = undefined;
@@ -2934,7 +2732,7 @@ export function activate(context: vscode.ExtensionContext) {
             // 编辑器区 = createWebviewPanel：既渲染不到原生 view/title，也不需要页内自绘标题栏
             //（保持纯聊天）→ 注入 data-titlebar-mode="nativeTitle"，index.html 用 CSS 隐藏 #titlebar、
             // 自绘模块读到非 selfDrawn 直接 return。
-            setupChatWebview(panel.webview, context.extensionUri, context.globalState, 'nativeTitle', false);
+            setupChatWebview(panel.webview, context.extensionUri, context.globalState, context.globalStorageUri, 'nativeTitle', false);
             panel.reveal(vscode.ViewColumn.One, true);
             // 隐藏侧边栏，看起来"挪过去"了
             vscode.commands.executeCommand('workbench.action.toggleSidebarVisibility');
@@ -2982,7 +2780,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 命令：查看消费记录（弹窗报告面板）
     context.subscriptions.push(
-        vscode.commands.registerCommand('dsh.usage', () => openUsageReport(context.globalState))
+        vscode.commands.registerCommand('dsh.usage', () => openUsageReport(context, () => dsh.listSessionTitles()))
     );
 
     // Activity Bar 对话视图
@@ -2990,7 +2788,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
             'dsh.launcher',
-            new DshLauncherProvider(context.extensionUri, context.globalState),
+            new DshLauncherProvider(context.extensionUri, context.globalState, context.globalStorageUri),
             { webviewOptions: { retainContextWhenHidden: retainChat } }
         )
     );

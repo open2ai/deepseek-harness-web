@@ -10,6 +10,8 @@ All notable changes to the "deepseek-harness-web" extension will be documented i
 
 - **Node.js >= 24.9.0**
 
+- 插件用量统计页修改，历史记录缺失信息统一显示为「未记录」
+
 ## [0.1.21] — 2026-11-03
 
 ### 变更

@@ -2981,6 +2981,42 @@ export class DshService {
     }
 
     /**
+     * 消费记录用的会话元数据：按 sessionId 取当前 durable title + cwd（项目维度）。
+     * 重命名后重新查询会拿到新名字；只读 session.list，不改任何会话状态；拿不到时回退 sessionId。
+     */
+    async listSessionTitles(): Promise<Array<{ sessionId: string; title: string; cwd?: string }>> {
+        const sessionList = await this.call<{
+            items?: Array<{
+                sessionId?: string;
+                blank?: boolean;
+                origin?: string;
+                cwd?: string;
+                title?: string;
+                projectionValues?: Record<string, unknown>;
+                projections?: { values?: Record<string, unknown> };
+            }>;
+        }>('session.list', {});
+        const out: Array<{ sessionId: string; title: string; cwd?: string }> = [];
+        for (const s of sessionList.items ?? []) {
+            if (!s.sessionId || s.origin === 'subagent') {
+                continue;
+            }
+            out.push({
+                sessionId: s.sessionId,
+                title: s.blank
+                    ? '新会话'
+                    : sessionDisplayTitle({
+                        title: durableTitleOf(s),
+                        cwd: s.cwd,
+                        sessionId: s.sessionId,
+                    }),
+                ...(s.cwd === undefined ? {} : { cwd: s.cwd }),
+            });
+        }
+        return out;
+    }
+
+    /**
      * 列出**不属于任何工作区**的会话（网页端的「未分组」那一组）。
      *
      * 判据与网页端**完全一致**：不属于**任何**工作区的成员表（`owningGroupKey` 的口径）就是未分组 ——
