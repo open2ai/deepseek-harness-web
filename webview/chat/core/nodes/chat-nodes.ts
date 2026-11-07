@@ -536,8 +536,17 @@ function rebuildTurnGroups(turn: number, keys: readonly string[], nodes: Map<str
             flush(true)
             entries.push({ kind: 'node', key })
         } else if (node.kind === 'assistant-step') {
+            /**
+             * 助手步：**推理进 pending；带回答的步再把 pending 收口 + 自己发射成 response**
+             *（逐字镜像上游 `process-groups.ts`，2026-10-10 对齐、`_nodes` 钉住）。**不要**为了
+             * 让片体行数变少而把回答步的 reasoning 排除出去 —— 那是上游的内容（真实回合里
+             * 它就是片体最后一行「思考」）；片体行序的修正靠"问答节点不切段"就够了。
+             */
             if (reasoning(node)) pending.push({ kind: 'node', key, turn, groupPart: 'reasoning' })
-            if (reply(node)) { flush(true); entries.push({ kind: 'node', key, groupPart: 'response' }) }
+            if (reply(node)) {
+                flush(true)
+                entries.push({ kind: 'node', key, groupPart: 'response' })
+            }
         } else {
             pending.push({ kind: 'node', key, turn })
         }
@@ -565,13 +574,11 @@ function derivePresentation(
     }
     let hasExternalProcess = false
     let hasInterleavedInput = false
-    let compactAnswer = true
     for (const key of turnKeys) {
         const node = nodes.get(key)
         if (node === undefined || !isVisibleChatNode(node) || node.kind === 'turn-process') continue
         if (isAtOrOutside(node, 'input') && (openingHumanAnchor === undefined || node.anchorSeq > openingHumanAnchor)) {
             hasInterleavedInput = true
-            if (spec.answerAnchorSeq === null || node.anchorSeq < spec.answerAnchorSeq) compactAnswer = false
         }
         if (isAtOrOutside(node, 'turn') || node.anchorSeq < spec.processStartSeq || (spec.answerAnchorSeq !== null && node.anchorSeq >= spec.answerAnchorSeq)) continue
         if (node.kind !== 'assistant-step' || spec.answerStep === null || (node.data['step'] as number) !== spec.answerStep) hasExternalProcess = true
@@ -583,7 +590,6 @@ function derivePresentation(
         turnClosed: turn.status === 'closed',
         hasExternalProcess,
         hasInterleavedInput,
-        compactAnswer,
     }
 }
 
@@ -636,6 +642,92 @@ function questionReplyOf(source: Record<string, unknown>, text: string): Questio
         })
     }
     return { callId: source['callId'], questions, answers, text }
+}
+
+/**
+ * 已回答提问：问题清单校验（逐字镜像上游 `callQuestions`）。
+ *
+ * 要求：`questions` 非空数组、每项 `id`/`question` 字符串、`id` 唯一、
+ * 且排除 `intent.kind === 'plan-review'`（那是计划审阅，走别的 UI）。
+ * @param value - `tool/call.arguments` 解析后的对象 / PTC 的 `arguments` 对象
+ * @returns 问题清单；形状不符时 null（与上游"问不出来就不合成节点"同）
+ */
+function askQuestionsOfValue(value: unknown): QuestionReplyData['questions'] | null {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+    const record = value as Record<string, unknown>
+    if (!Array.isArray(record['questions']) || record['questions'].length === 0) return null
+    const ids = new Set<string>()
+    const out: QuestionReplyData['questions'] = []
+    for (const item of record['questions']) {
+        if (item === null || typeof item !== 'object') return null
+        const q = item as Record<string, unknown>
+        if (typeof q['id'] !== 'string' || typeof q['question'] !== 'string' || ids.has(q['id'])) return null
+        const intent = q['intent']
+        if (intent !== null && typeof intent === 'object' && !Array.isArray(intent) && (intent as Record<string, unknown>)['kind'] === 'plan-review') return null
+        ids.add(q['id'])
+        out.push({
+            id: q['id'],
+            question: q['question'],
+            ...(typeof q['header'] === 'string' ? { header: q['header'] } : {}),
+        })
+    }
+    return out
+}
+
+/** `tool/call.arguments`（JSON 字符串）→ 问题清单。 */
+function askQuestionsOfArgs(raw: string | undefined): QuestionReplyData['questions'] | null {
+    if (raw === undefined) return null
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(raw)
+    } catch {
+        return null
+    }
+    return askQuestionsOfValue(parsed)
+}
+
+/**
+ * 已回答提问：作答校验（逐字镜像上游 `resultReply`）。
+ *
+ * 要求：非错误、content **恰好一个 text 块**、JSON 里 `pending !== true`、
+ * `answers.length === questions.length` 且每个 id 都能对上问题（不重复/不缺失）；
+ * 否则当作"没有回答"、不合成节点。
+ * @param content - `tool/result.message.content` 或 PTC `tool/ptc-dispatch.content`
+ * @param questions - 之前从参数里读到的问题清单
+ * @param isError - 结果是否错误
+ * @returns 作答清单；形状不符时 null
+ */
+function askAnswersOfContent(content: unknown, questions: QuestionReplyData['questions'], isError: boolean | undefined): QuestionReplyData['answers'] | null {
+    if (isError === true) return null
+    if (!Array.isArray(content) || content.length !== 1) return null
+    const block = content[0]
+    if (block === null || typeof block !== 'object' || (block as { type?: unknown }).type !== 'text') return null
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(String((block as { text?: unknown }).text ?? ''))
+    } catch {
+        return null
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    if (record['pending'] === true) return null
+    const answers = record['answers']
+    if (!Array.isArray(answers) || answers.length !== questions.length) return null
+    const ids = new Set(questions.map((question) => question.id))
+    const out: QuestionReplyData['answers'] = []
+    for (const item of answers) {
+        if (item === null || typeof item !== 'object') return null
+        const a = item as Record<string, unknown>
+        if (typeof a['id'] !== 'string' || !ids.delete(a['id'])) return null
+        if (!Array.isArray(a['selected']) || !a['selected'].every((v) => typeof v === 'string')) return null
+        if (a['custom'] !== undefined && typeof a['custom'] !== 'string') return null
+        out.push({
+            id: a['id'],
+            selected: a['selected'] as string[],
+            ...(typeof a['custom'] === 'string' ? { custom: a['custom'] } : {}),
+        })
+    }
+    return out
 }
 
 /** 压缩检查点（user/message 的替换型 + 源带 compactionId）。 */
@@ -1264,6 +1356,59 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
             if (parent !== undefined) toolStates.set(callId, { ...parent, subCalls: children.map(attach) } as ToolRoot)
         }
     }
+    /**
+     * 3.5 **已回答提问**节点（上游 `answered-user-question`，`kind: 'question-reply'`）。
+     *
+     * 两种来路都按上游 definition 配对：
+     *   · 根工具：`tool/call ask_user_question` → `tool/result`；
+     *   · PTC 子调用：`tool/ptc-dispatch-start`（name + arguments）→ `tool/ptc-dispatch`（content/isError）。
+     * 拿到 reply 后产出 `groupTree: 'turn'` 的节点：右对齐问答气泡、`anchorSeq = 结果 seq`，
+     * 由 `nodesToRows` 挂进 assistant 行、由 `Chain` 渲染在两个片之间。
+     * 结果没 answers（超时 `pending: true` / 出错 / 形状不符）不出节点；迟到补答按 callId 去重。
+     */
+    const lateAnswered = new Set<string>()
+    for (const node of nodes.values()) {
+        const qr = node.data['questionReply'] as QuestionReplyData | undefined
+        if (qr !== undefined) lateAnswered.add(qr.callId)
+    }
+    const answeredCallIds = new Set<string>()
+    const addQuestionReply = (
+        callId: string,
+        name: string | undefined,
+        argsRaw: string | undefined,
+        content: unknown,
+        isError: boolean | undefined,
+        seq: number,
+    ): void => {
+        if (callId === '' || answeredCallIds.has(callId) || lateAnswered.has(callId)) return
+        if (name !== 'ask_user_question' && name !== 'request_user_input') return
+        const questions = askQuestionsOfArgs(argsRaw)
+        if (questions === null) return
+        const answers = askAnswersOfContent(content, questions, isError)
+        if (answers === null) return
+        const at = locationBySeq.get(seq)
+        const turn = at?.turn ?? SESSION_BUCKET
+        answeredCallIds.add(callId)
+        mkNode(`question-reply:${callId}`, 'question-reply', callId, seq, { kind: 'turn', turn }, 'visible', {
+            callId, questions, answers, text: '',
+        })
+    }
+    /** 深度遍历 PTC 子调用（子块也可能再派生）。 */
+    const walkChildren = (children: readonly ToolChildRoot[] | undefined): void => {
+        if (children === undefined) return
+        for (const child of children) {
+            if (child.kind === 'tool-result') {
+                addQuestionReply(child.callId, child.call?.name, child.call?.argsRaw, child.content, child.isError, child.seq)
+            }
+            walkChildren(child.subCalls)
+        }
+    }
+    for (const [callId, root] of toolStates) {
+        if ('kind' in root && root.kind === 'tool-result') {
+            addQuestionReply(callId, root.call?.name, root.call?.argsRaw, root.content, root.isError, root.seq)
+        }
+        walkChildren((root as { subCalls?: ToolChildRoot[] }).subCalls)
+    }
     for (const [callId, root] of toolStates) {
         const turn = (root as { turn: number }).turn
         const step = (root as { step: number }).step
@@ -1393,7 +1538,12 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
         mkNode(`retry:${retryId}`, 'model-retry', retryId, anchor, loc, 'visible', { attempts, current: attempts.at(-1) })
     }
     // 4. 排序 + 分组 + 呈现。
-    const order = [...nodes.values()].filter(isVisibleChatNode).sort((a, b) => a.anchorSeq - b.anchorSeq).map((n) => n.key)
+    /**
+     * 同锚排序：**问答节点排在工具节点之后**（上游节点序 = tool/call 先、question-reply 后；
+     * 否则 ask 之前的片会被提前收口，分组变成「推理」+「提问+回答步推理」两片、行序也反）。
+     */
+    const tieRank = (n: ChatNode): number => (n.kind === 'question-reply' ? 1 : 0)
+    const order = [...nodes.values()].filter(isVisibleChatNode).sort((a, b) => a.anchorSeq - b.anchorSeq || tieRank(a) - tieRank(b)).map((n) => n.key)
     // 按 turn 收节点（保持全局 order 的位置序）。
     const turnNodeKeys = new Map<number, string[]>()
     for (const key of order) {

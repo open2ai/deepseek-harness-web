@@ -296,6 +296,12 @@ function formatScheduleDate(scheduledAt: string): string {
 export function scheduleFrequency(value: unknown): string | null {
   if (!detailRecord(value)) return null
   switch (value.kind) {
+    // 0.2.2 起 schedule_* 回写的是 rrule 任务记录；详情卡对任意 rrule 只给「自定义」（上游同）
+    case 'rrule': {
+      if (!nonempty(value.rrule)) return null
+      const rule = value.rrule.split('\n').find((line) => line.startsWith('RRULE:'))?.slice(6)
+      return nonempty(rule) ? '自定义' : null
+    }
     case 'at': return '单次'
     case 'after':
       if (!count(value.afterSeconds) || value.afterSeconds === 0) return null
@@ -347,6 +353,10 @@ function zoneLabel(zone: string): string {
 
 /** 卡片用重复文案（镜像上游 ui-schedule 的 `formatScheduleFrequency`）：周几不带「周」前缀、时区是本地化标签。 */
 function cardFrequency(value: Record<string, unknown>): string | null {
+  // 0.2.2 起 create 只接受 rrule，卡片上要把它读回成人话（上游同一条分支）
+  if (value.kind === 'rrule') {
+    return nonempty(value.rrule) ? rruleFrequency(value.rrule) : null
+  }
   switch (value.kind) {
     case 'at': return '单次'
     case 'after':
@@ -391,6 +401,88 @@ function weekdayTextShort(days: unknown): string | undefined {
   return labels.join('、')
 }
 
+/**
+ * RRULE 频次分类（镜像上游 ui-schedule 的 `hostFrequencyKind`）：只认它认得的子集，
+ * 其余一律 `custom`（上游卡片此时显示「自定义」）。
+ */
+type RRuleKind = 'once' | 'minutely' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'custom'
+
+/** 解析 `RRULE:` 行为字段表（上游 `ruleFields`）。 */
+function rruleFields(rrule: string): Map<string, string> {
+  const fields = new Map<string, string>()
+  const line = rrule.split('\n').find((entry) => entry.startsWith('RRULE:'))
+  if (line === undefined) return fields
+  for (const part of line.slice(6).split(';')) {
+    const eq = part.indexOf('=')
+    if (eq <= 0) continue
+    fields.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim())
+  }
+  return fields
+}
+
+function hostFrequencyKind(rrule: string): RRuleKind {
+  const anchor = /^DTSTART(?:;TZID=[^:]+)?:\d{8}T\d{4}(\d{2})Z?$/m.exec(rrule)
+  if (anchor === null) return 'custom'
+  const fields = rruleFields(rrule)
+  const freq = fields.get('FREQ')
+  if (fields.get('COUNT') === '1' && fields.size === 2 && freq === 'DAILY') return 'once'
+  if (fields.has('COUNT') || fields.has('UNTIL') || fields.has('BYSECOND')) return 'custom'
+  const keys = [...fields.keys()]
+  const allowed = (names: readonly string[]): boolean => keys.every((key) => names.includes(key))
+  if (freq === 'MINUTELY' && allowed(['FREQ', 'INTERVAL'])) return 'minutely'
+  if (freq === 'HOURLY' && allowed(['FREQ', 'INTERVAL'])) return 'hourly'
+  if (freq === 'DAILY' && anchor[1] === '00' && allowed(['FREQ', 'INTERVAL', 'BYHOUR', 'BYMINUTE', 'BYSETPOS'])
+    && ((!fields.has('BYHOUR') && !fields.has('BYMINUTE') && !fields.has('BYSETPOS'))
+      || (/^\d{1,2}$/.test(fields.get('BYHOUR') ?? '')
+        && /^\d{1,2}$/.test(fields.get('BYMINUTE') ?? '')
+        && (!fields.has('BYSETPOS') || fields.get('BYSETPOS') === '1')))) return 'daily'
+  if (freq === 'WEEKLY' && allowed(['FREQ', 'INTERVAL', 'BYDAY'])
+    && (fields.get('BYDAY') ?? '').split(',').every((day) => /^(MO|TU|WE|TH|FR|SA|SU)$/.test(day))) return 'weekly'
+  if (freq === 'MONTHLY' && allowed(['FREQ', 'INTERVAL', 'BYMONTHDAY', 'BYSETPOS'])
+    && fields.get('BYSETPOS') === '1' && /^\d{1,2},-1$/.test(fields.get('BYMONTHDAY') ?? '')) return 'monthly'
+  return 'custom'
+}
+
+/** DTSTART 的 TZID（rrule 记录只在这里存时区，镜像上游 `recordTimeZone`）。 */
+function rruleTimeZone(rrule: string): string | undefined {
+  return /^DTSTART;TZID=([^:]+):/m.exec(rrule)?.[1]
+}
+
+const RRULE_WEEKDAY_LABELS: Record<string, string> = { MO: '一', TU: '二', WE: '三', TH: '四', FR: '五', SA: '六', SU: '日' }
+
+/**
+ * rrule → 卡片文案（镜像上游 ui-schedule 的 `formatScheduleFrequency`）。
+ * 没有浏览器 zone 上下文（上游这里 zone 传 undefined），所以时区一律带本地化标签。
+ * 0.2.2 起 `schedule_create` 只产出 rrule 记录，这张卡要靠它才不会退成通用卡。
+ */
+function rruleFrequency(rrule: string): string | null {
+  const kind = hostFrequencyKind(rrule)
+  if (kind === 'custom') return '自定义'
+  const fields = rruleFields(rrule)
+  if (kind === 'once') return '仅一次'
+  if (kind === 'minutely' || kind === 'hourly') {
+    const every = Number(fields.get('INTERVAL') ?? '1')
+    return `每 ${String(every)} ${kind === 'minutely' ? '分钟' : '小时'}`
+  }
+  const clock = /T(\d{6})/.exec(rrule)
+  if (clock === null) return '自定义'
+  const hour = fields.get('BYHOUR') ?? clock[1].slice(0, 2)
+  const minute = fields.get('BYMINUTE') ?? clock[1].slice(2, 4)
+  const time = `${String(Number(hour)).padStart(2, '0')}:${String(Number(minute)).padStart(2, '0')}`
+  const zone = rruleTimeZone(rrule)
+  const suffix = zone === undefined ? '' : `（${zoneLabel(zone)}）`
+  if (kind === 'daily') return `每天 ${time}${suffix}`
+  if (kind === 'weekly') {
+    const days = (fields.get('BYDAY') ?? '').split(',')
+      .map((day) => RRULE_WEEKDAY_LABELS[day] ?? '')
+      .filter((label) => label !== '')
+      .join('、')
+    return `每周${days} ${time}${suffix}`
+  }
+  const monthDay = (fields.get('BYMONTHDAY') ?? '').split(',')[0]
+  return `每月 ${monthDay} 日 ${time}，不足该日则月末${suffix}`
+}
+
 export function scheduleCardOf(value: unknown): { id: string; title: string; frequency: string } | null {
   if (!detailRecord(value) || !nonempty(value.id) || !nonempty(value.prompt)) return null
   const frequency = cardFrequency(value)
@@ -402,43 +494,66 @@ export function scheduleCardOf(value: unknown): { id: string; title: string; fre
 }
 
 function scheduleItem(value: unknown): DetailItem | null {
-  if (!detailRecord(value) || !nonempty(value.id) || !nonempty(value.prompt)
-    || typeof value.scheduledAt !== 'string'
-    || (value.deliveryMode !== 'host' && value.deliveryMode !== 'session-local')
-    || (value.state !== 'scheduled' && value.state !== 'overdue')) return null
+  if (!detailRecord(value) || !nonempty(value.id) || typeof value.scheduledAt !== 'string') return null
+  const state = nonempty(value.status) ? value.status : value.state
+  if (value.status === undefined) {
+    // 0.2.1 及更早的记录：prompt + deliveryMode + state（保留：读旧会话里的历史结果仍按旧形状）
+    if (!nonempty(value.prompt)
+      || (value.deliveryMode !== 'host' && value.deliveryMode !== 'session-local')
+      || (state !== 'scheduled' && state !== 'overdue')) return null
+  } else if (!nonempty(value.title) || (state !== 'active' && state !== 'paused' && state !== 'ended')) {
+    // 0.2.2 起的任务记录：status 三档 + 必有 title（镜像上游 `scheduleItem` 的新分支）
+    return null
+  }
   const date = new Date(value.scheduledAt)
   if (!Number.isFinite(date.getTime()) || date.toISOString() !== value.scheduledAt) return null
   const frequency = scheduleFrequency(value)
   if (frequency === null) return null
+  const statusText = state === 'scheduled' ? '等待触发'
+    : state === 'overdue' ? '已到期，等待会话恢复'
+      : state === 'active' ? '已开启'
+        : state === 'paused' ? '已暂停'
+          : '已结束'
+  const title = nonempty(value.title) ? value.title : (typeof value.prompt === 'string' ? value.prompt : '')
   return {
-    title: nonempty(value.title) ? value.title : value.prompt,
+    title,
     fields: [
       { label: '计划时间', value: formatScheduleDate(value.scheduledAt) },
       { label: '重复', value: frequency },
-      { label: '状态', value: value.state === 'scheduled' ? '等待触发' : '已到期，等待会话恢复' },
+      { label: '状态', value: statusText },
     ],
   }
 }
 
+/** 已删除任务的回执（`schedule_delete` / `schedule_edit` 的 `{deleted:true}` 形状）。 */
+function scheduleDeletedItem(value: unknown): DetailsModel | null {
+  if (!detailRecord(value) || !nonempty(value.id) || value.deleted !== true) return null
+  return { items: [{ title: value.id, fields: [{ label: '状态', value: '已删除' }] }] }
+}
+
 function scheduleDetails(name: string, value: unknown): DetailsModel | null {
   if (name === 'schedule_create' || name === 'schedule_update' || name === 'schedule_view' || name === 'schedule_edit') {
+    // schedule_edit 删完回 `{deleted:true}`（上游 `deletedTask ?? scheduleItem`）
+    const deleted = scheduleDeletedItem(value)
+    if (deleted !== null) return deleted
     const item = scheduleItem(value)
     return item === null ? null : { items: [item] }
   }
   if (name === 'schedule_list') {
-    if (!Array.isArray(value)) return null
+    // 0.2.2 的 list 回 `{items,shown,total,limit,offset}`；旧回放里也可能是裸数组
+    const entries = Array.isArray(value)
+      ? value
+      : detailRecord(value) && Array.isArray(value.items) ? value.items : undefined
+    if (entries === undefined) return null
     const items: DetailItem[] = []
-    for (const entry of value) {
+    for (const entry of entries) {
       const item = scheduleItem(entry)
       if (item === null) return null
       items.push(item)
     }
     return { items, summary: `${items.length} 个自动化任务`, empty: '没有自动化任务' }
   }
-  if (name === 'schedule_delete') {
-    if (!detailRecord(value) || !nonempty(value.id) || value.deleted !== true) return null
-    return { items: [{ title: value.id, fields: [{ label: '状态', value: '已删除' }] }] }
-  }
+  if (name === 'schedule_delete') return scheduleDeletedItem(value)
   return null
 }
 

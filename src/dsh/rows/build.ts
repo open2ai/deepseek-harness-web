@@ -1534,7 +1534,7 @@ export function buildRowsIncremental(
             const imageRefs = imageRefsOf(d['content']);
             const files = fileRefsOf(d['content']);
             // 插话分类：这条消息是否属于本步从 next-step 收件箱取用的那一批（见 rows/inbox-claims）。
-            // 只影响行的种类与 compactAnswer 锚点判定，不影响正文/附件读法。
+            // 只影响行的种类与过程事实的锚点判定，不影响正文/附件读法。
             const messageId = typeof d['id'] === 'string' ? (d['id'] as string) : undefined;
             // **同一条消息只出一行**（上游同款：人类消息的节点键就含 `message.id`，节点按它 upsert，
             // 再投一次同一条不会多出一个节点）。这里挡的是"同一条消息的事件又来到本构建器一次"
@@ -1551,7 +1551,7 @@ export function buildRowsIncremental(
                 seenUserMessageIds.add(messageId);
             }
             const steering = messageId !== undefined && inboxFold.claimed(messageId);
-            // 人类锚点（提问 / 插话）进过程事实：`compactAnswer` 判「区间内有没有人插话」要用
+            // 人类锚点（提问 / 插话）进过程事实：`hasInterleavedInput` 判「区间内有没有人插话」要用
             if (typeof event.seq === 'number') {
                 processInput.entries.push({ kind: 'human', seq: event.seq });
             }

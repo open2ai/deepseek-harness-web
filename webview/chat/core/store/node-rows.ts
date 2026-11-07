@@ -7,9 +7,9 @@ import { contextForm, contextProducer } from '../nodes/event-projection'
 import { deriveToolSummary, formatMsgClock, toolTitle } from '../format'
 import { scheduleCardOf } from '../details-card'
 import { resultText } from '../../../../src/dsh/official/result-text'
-import type { RenderChainItem, RenderGroup, RenderRow, RenderSubCall } from '../nodes/render-plan'
+import type { RenderChainItem, RenderGroup, RenderQuestionReplyRow, RenderRow, RenderSubCall } from '../nodes/render-plan'
 import type { DshChangesSummary, DshTurnProcess } from '../../../../src/dsh/rows/types'
-import type { ChatRow, DshTurnProcessItem, ToolSubCall } from './types'
+import type { ChatRow, DshTurnProcessItem, QuestionReplyRow, ToolSubCall } from './types'
 
 let keySeq = 1
 const keyMap = new Map<string, number>()
@@ -50,6 +50,9 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
             return { kind: 'user', key: keyOf(r.key), text: r.text, images: [], time: r.timeMs !== undefined ? formatMsgClock(r.timeMs) : '', ...(r.rpcId !== undefined ? { rpcId: r.rpcId } : {}), ...(r.steering === true ? { steering: true } : {}), ...(r.imageRefs !== undefined ? { imageRefs: r.imageRefs as never } : {}), ...(r.files !== undefined ? { files: r.files } : {}), ...(r.questionReply !== undefined ? { questionReply: r.questionReply } : {}) }
         case 'sysprompt':
             return { kind: 'sysprompt', key: keyOf(r.key), text: r.text }
+        case 'questionReply':
+            // 已回答提问（上游 answered-user-question）：右对齐问答气泡，时间/复制由行自渲染。
+            return chatRowOfQuestionReply(r)
         case 'command':
             return { kind: 'command', key: keyOf(r.key), commandId: '', name: r.name, ...(r.outcome === undefined ? {} : { outcome: r.outcome as { kind: 'success' | 'error'; text?: string } }) }
         case 'compaction':
@@ -74,7 +77,6 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
                 turnStarted: r.turnStarted,
                 hasExternalProcess: r.hasExternalProcess,
                 hasInterleavedInput: r.hasInterleavedInput,
-                compactAnswer: r.compactAnswer,
             }
             return {
                 kind: 'assistant',
@@ -106,9 +108,15 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
                 ...(r.interrupted === true ? { interrupted: true } : {}),
                 ...(r.seq === undefined ? {} : { seq: r.seq }),
                 ...(r.messageId === undefined ? {} : { messageId: r.messageId }),
+                ...(r.questionReplies === undefined ? {} : { questionReplies: r.questionReplies.map(chatRowOfQuestionReply) }),
             }
         }
     }
+}
+
+/** 已回答提问行（独立兜底与 assistant 内嵌两条路共用）。 */
+function chatRowOfQuestionReply(r: RenderQuestionReplyRow): QuestionReplyRow {
+    return { kind: 'questionReply', key: keyOf(r.key), time: r.timeMs !== undefined ? formatMsgClock(r.timeMs) : '', ...(r.afterGroupKey === undefined ? {} : { afterGroupKey: keyOf(r.afterGroupKey) }), question: r.question }
 }
 
 /** 本回合已创建的定时任务卡（镜像上游 `ui-schedule`：标题 + 重复规则）。 */

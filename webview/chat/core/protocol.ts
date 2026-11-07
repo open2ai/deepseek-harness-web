@@ -32,6 +32,8 @@ export interface ImageAttachment {
 export interface AttachmentRef {
   attachmentId: string
   mediaType: string
+  /** 编码后字节数（0.2.2 的 `session/attachment` 要完整引用，strict codec 含 bytes/宽/高） */
+  bytes?: number
   name?: string
   /** 固有像素宽（图廊按它定尺寸） */
   width?: number
@@ -379,13 +381,16 @@ export type ViewToHostMessage =
   | { type: 'chatModeConfig'; agentPreset: string }
   | { type: 'pickFile' }
   /**
-   * 一张已存档图片的完整引用（宿主 `session/attachment` 的新请求形状）。
-   * `attachmentId` + `mediaType` 必需；尺寸/名字可选（服务端按存储校验，显示字段原样保留）。
+   * 一张已存档图片的完整引用（宿主 `session/attachment` 的请求形状）。
+   *
+   * 0.2.2 的 strict codec required = `attachmentId` + `mediaType` + `bytes` + `width` + `height`；
+   * 缺任一字段网关会拒。页面从事件里拿到的 `ImageAttachmentRef` 原样透传即可。
    */
   | {
       type: 'attachmentReq'
       attachmentId: string
       mediaType?: string
+      bytes?: number
       width?: number
       height?: number
       name?: string
@@ -414,6 +419,7 @@ export type ViewToHostMessage =
       attachmentId: string
       name?: string
       mediaType?: string
+      bytes?: number
       width?: number
       height?: number
     }

@@ -4,12 +4,20 @@
 // 分工：取值与归一化在 `chat-prefs.ts`（纯函数，守卫 `tmp/_chatprefs.follow.test.mjs`）；
 // 本文件只做 I/O：一次 `settings/describe` 读四项 + `$events` 跟随 + 值变化通知。
 // 实时跟随走 `settings/document-updated`；emit 之外仍有「read 时值一变就通知」兜底。
+// 另转发模型目录广播（`llm/adapters-updated` / `llm/models-updated`）给「文档订阅者」——
+// 网页端改模型配置后模型选择器即时重读目录（上游 model-selection 同口径）。
 import { rpcCall } from './rpc';
 import { dshEvents } from './events';
 import { chatPrefsOf, sameChatPrefs, type DshChatPrefs, type DshSettingsNamespace } from './chat-prefs';
 
 /** 设置文档变更的 $events emit 事件名。 */
 const SETTINGS_UPDATED_EVENT = 'settings/document-updated';
+
+/**
+ * 模型目录变更的 $events emit（上游 `dsh-llm` 广播，转发模式 `emit`）。
+ * 它不是设置文档、也不影响四项偏好，但**同样要重推 chatInfo** —— 模型选择器读的是这份目录。
+ */
+const MODEL_UPDATED_EVENTS: readonly string[] = ['llm/adapters-updated', 'llm/models-updated'];
 
 /** 这四项各自所属的命名空间（emit 过滤用；认不出是哪个命名空间时保守重读）。 */
 const PREF_NAMESPACES: readonly string[] = ['ui-chat', 'ui-settings', 'ui-conversation'];
@@ -91,6 +99,13 @@ function onReady(): void {
 }
 
 function onEmit(event: string, args: readonly unknown[]): void {
+    // 模型目录广播：只通知「文档订阅者」（模型选择器重读目录），不重读四项偏好。
+    if (MODEL_UPDATED_EVENTS.includes(event)) {
+        for (const cb of documentSubscribers) {
+            cb();
+        }
+        return;
+    }
     if (event !== SETTINGS_UPDATED_EVENT) {
         return;
     }

@@ -99,12 +99,16 @@ export type RenderGroup = { key: string; itemKeys: string[]; facts: DshRowGroupF
  */
 
 
+/** 已回答提问的渲染行（挂进 assistant 行或独立兜底）。 */
+export type RenderQuestionReplyRow = { kind: 'questionReply'; key: string; timeMs?: number; turn?: number; /** 节点锚（result seq）：用于插到两个分组之间 */ anchorSeq?: number; /** 渲染时插在这张分组之后（未设 = 整条链之后） */ afterGroupKey?: string; question: QuestionReplyData }
+
 /** 渲染行（节点 kind 的扁平投影；与 ChatRow 同构，缺省字段由接线层补）。 */
 export type RenderRow =
     | { kind: 'user'; key: string; text: string; steering?: boolean; timeMs?: number; rpcId?: string; /**
      * 用户消息里的**图片附件引用**（`user/message` 的 `content` 里 `{type:'image',attachment}`）。
-     * 字节不在事件里（内容寻址 id），渲染侧按 `attachmentId` 向宿主取（与图片卡同一条路）。
-     */ imageRefs?: Array<{ attachmentId: string; mediaType: string; name?: string; width?: number; height?: number }>; /**
+     * 字节不在事件里（内容寻址 id），渲染侧按 `attachmentId` 向宿主取（与图片卡同一条路）；
+     * `bytes`/`width`/`height` 是 `session/attachment` strict codec 的 required 字段，原样带上。
+     */ imageRefs?: Array<{ attachmentId: string; mediaType: string; bytes?: number; name?: string; width?: number; height?: number }>; /**
      * 文件附件：名字、字节数，以及**内容寻址 id**（`user/message` 的 `file` 块同样带
      * `attachment.attachmentId` —— 2026-10-12 更正"历史回放没有本地路径就打不开"的旧结论：
      * 有 id 就能照图片那条路取字节、落临时文件、在编辑区打开）。
@@ -113,13 +117,14 @@ export type RenderRow =
      * 不按普通用户气泡展示正文 JSON。
      */ questionReply?: QuestionReplyData }
     | { kind: 'sysprompt'; key: string; text: string }
+    | RenderQuestionReplyRow
     | { kind: 'command'; key: string; name: string | null; outcome?: { kind: string; text?: string } }
     | { kind: 'compaction'; key: string; summary?: string | null; shadowedItemCount?: number | null; shadowedTokenCount?: number | null }
     | { kind: 'retry'; key: string; retryId: string; retry: number; turn?: number; step?: number; provider?: string; mode?: string; maxRetries?: number; delayMs?: number; failure?: { message?: string; code?: string }; started?: number; cancelled?: boolean }
     | { kind: 'turnNotice'; key: string; tone: 'error' | 'warning'; turn?: number; step?: number; message?: string; code?: string }
     | { kind: 'context'; key: string; content: unknown; source: unknown }
     | { kind: 'trigger'; key: string; source: unknown; content: unknown; timeMs: number }
-    | { kind: 'assistant'; key: string; turn?: number; text: string; done: boolean; chain: RenderChainItem[]; counts: { toolCallCount: number; messageCount: number; subagentCount: number }; answerAnchorSeq: number | null; answerStep: number | null; controlAnchorSeq: number; processStartSeq: number; inlineReasoning: boolean; hasExternalProcess: boolean; hasInterleavedInput: boolean; compactAnswer: boolean; turnStarted: boolean; turnClosed: boolean; interrupted?: boolean; messageId?: string; seq?: number; timeMs?: number; turnStartMs?: number; status?: string; stats?: Record<string, unknown>; presentedFiles?: Array<{ path: string; description?: string }>; changesSeq?: number; pos: number; /**
+    | { kind: 'assistant'; key: string; turn?: number; text: string; done: boolean; chain: RenderChainItem[]; counts: { toolCallCount: number; messageCount: number; subagentCount: number }; answerAnchorSeq: number | null; answerStep: number | null; controlAnchorSeq: number; processStartSeq: number; inlineReasoning: boolean; hasExternalProcess: boolean; hasInterleavedInput: boolean; turnStarted: boolean; turnClosed: boolean; interrupted?: boolean; messageId?: string; seq?: number; timeMs?: number; turnStartMs?: number; status?: string; stats?: Record<string, unknown>; presentedFiles?: Array<{ path: string; description?: string }>; changesSeq?: number; pos: number; /** 已回答提问：渲染在过程链之后/正文之前（上游节点序） */ questionReplies?: RenderQuestionReplyRow[]; /**
      * **排序三键**（`(anchor, rank, originalAnchor)`）—— 与上游 `orderedVisibleChatNodes()` 的比较器
      * 逐字同口径（：anchor → rank → originalAnchor → key）。
      *
@@ -345,6 +350,16 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel, assistan
         case 'system-prompt':
             rows.push({ kind: 'sysprompt', key: node.key, text: String(node.data['text'] ?? '') })
             break
+        case 'question-reply':
+            rows.push({
+                kind: 'questionReply',
+                key: node.key,
+                timeMs: node.time,
+                turn: node.location.turn,
+                anchorSeq: node.anchorSeq,
+                question: node.data as unknown as QuestionReplyData,
+            })
+            break
         case 'command':
         case 'manual-compaction': {
             // ⚠️ **片外回落支**（2026-10-10）：有过程分组的回合里，命令行是**片的成员** →
@@ -487,6 +502,15 @@ export function nodesToSeatPlan(model: ChatNodeModel): RenderSeat[] {
         const node = model.nodes.get(entry.key)
         if (node === undefined) continue
         if (node.kind === 'model-retry' && chainRetryKeys.has(node.key)) continue
+        /**
+         * **已回答提问的 seat 不产行**：它的气泡挂进 assistant 行（渲染在链后正文前），
+         * 行表里没有独立行；但 entry 本身仍在（seat 计划必须与 `model.entries` 逐项对应），
+         * 所以保留一个空 seat 占位（与 `turn-tail` 这类"不产行"的项同形）。
+         */
+        if (node.kind === 'question-reply') {
+            seats.push({ key: node.key, kind: 'node', nodeKind: node.kind, turn: node.location.turn, rows: [] })
+            continue
+        }
         seats.push({
             key: node.key,
             kind: 'node',
@@ -601,7 +625,7 @@ export function nodesToRows(model: ChatNodeModel): RenderRow[] {
         const p = positionInTurn(node, turnFactsByTurn.get(turn) ?? { openingInputAnchor: undefined, earliestProcessAnchor: undefined })
         return { anchor: p.anchor, rank: p.rank, originalAnchor: p.originalAnchor }
     }
-    return rows.sort((a, b) => {
+    rows.sort((a, b) => {
         const pa = positionOfRow(a)
         const pb = positionOfRow(b)
         return pa.anchor - pb.anchor
@@ -609,6 +633,44 @@ export function nodesToRows(model: ChatNodeModel): RenderRow[] {
             || pa.originalAnchor - pb.originalAnchor
             || String(a.key).localeCompare(String(b.key))
     })
+    attachQuestionRepliesToAssistant(rows, model)
+    return rows
+}
+
+/**
+ * **已回答提问不是独立行**（对齐上游节点序 `过程片 → 问答气泡 → 回答正文`）。
+ *
+ * 上游把回答正文发成独立节点，气泡排在「过程片之后、正文之前」；插件把正文并进了 assistant 行，
+ * 若气泡还当独立行，排序只能排在整条 assistant 行之后（真机：气泡落到了回答正文下面）。
+ * 所以挂进**它之前最近的那条 assistant 行**，由 `AssistantRow` 渲染在 `Chain` 之后、正文之前。
+ * 找不到 assistant 行（旧窗口/只有问没有答）时保留独立行兜底。
+ * @param rows - 已排序的渲染行（原地挂载并删除被吃掉的独立行）
+ */
+function attachQuestionRepliesToAssistant(rows: RenderRow[], model: ChatNodeModel): void {
+    const lastAssistant = new Map<number, Extract<RenderRow, { kind: 'assistant' }>>()
+    const consumed: number[] = []
+    for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i]
+        if (row === undefined) continue
+        if (row.kind === 'assistant' && row.turn !== undefined) lastAssistant.set(row.turn, row)
+        if (row.kind !== 'questionReply' || row.turn === undefined) continue
+        const target = lastAssistant.get(row.turn)
+        if (target === undefined) continue
+        /**
+         * **插到两个分组之间**（上游 entry 序 = 片A → 问答气泡 → 片B → 回答正文）。
+         * 目标行每个分组的成员 key 就是链项 key（也等于节点 key）：取成员节点的锚，
+         * 找到最后一个"成员锚都 <= 气泡锚"的分组；没有就放到第一组之前（undefined = 链后兜底）。
+         */
+        let after: string | undefined
+        for (const group of target.groups ?? []) {
+            const anchors = group.itemKeys.map((k) => model.nodes.get(k)?.anchorSeq).filter((v): v is number => typeof v === 'number')
+            const last = anchors.length === 0 ? Number.NEGATIVE_INFINITY : Math.max(...anchors)
+            if (row.anchorSeq !== undefined && last <= row.anchorSeq) after = group.key
+        }
+        target.questionReplies = [...(target.questionReplies ?? []), { ...row, ...(after === undefined ? {} : { afterGroupKey: after }) }]
+        consumed.push(i)
+    }
+    for (const at of consumed.reverse()) rows.splice(at, 1)
 }
 
 /**
@@ -1089,7 +1151,6 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
             inlineReasoning: spec?.inlineReasoning === true,
             hasExternalProcess: presentation?.hasExternalProcess === true,
             hasInterleavedInput: presentation?.hasInterleavedInput === true,
-            compactAnswer: presentation?.compactAnswer === true,
             turnStarted: presentation?.turnStarted === true,
             turnClosed: presentation?.turnClosed === true,
             ...(segmentAnswer?.data['interrupted'] === true || (segmentAnswer?.data['finalNode'] as { interrupted?: boolean } | undefined)?.interrupted === true ? { interrupted: true } : {}),
@@ -1160,7 +1221,6 @@ function renderGroupFacts(g: ProcessGroupSnapshot, model: ChatNodeModel, spec: {
         // 上游 `data.summary`（时间序、递归 subCalls、callId 去重）：片头 label/detail/icon 的**唯一**来路。
         // 缺了它才退回按链项现算（老宿主），见 process-group-view 的注释。
         summary: g.data['summary'] as DshRowGroupSummary | undefined,
-        compactAnswer: presentation?.compactAnswer ?? false,
     }
 }
 

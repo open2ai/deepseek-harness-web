@@ -51,6 +51,10 @@ export function positionOfKind(kind: string): GroupTree | undefined {
         case 'turn-max-tokens':
         case 'turn-tail':
             return 'turn'
+        // 已回答提问（上游 kind = question-reply）：
+        // 独立于过程折叠、按回合树位置留在回合内（上游 groupTree: 'turn'）
+        case 'question-reply':
+            return 'turn'
         // 过程折叠内、step run 之外
         case 'model-retry':
             return 'process'

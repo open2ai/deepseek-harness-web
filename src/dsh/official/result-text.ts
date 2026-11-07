@@ -56,6 +56,8 @@ export function readToolResult(data: Record<string, unknown>): ToolResultPayload
 export interface ImageRef {
     attachmentId: string;
     mediaType: string;
+    /** 编码后字节数（`session/attachment` 的 strict codec 要它 —— 原样搬运，不解析） */
+    bytes?: number;
     name?: string;
     /** 固有像素宽（图廊按它定尺寸） */
     width?: number;
@@ -81,11 +83,13 @@ export function imageRefsOf(content: unknown): ImageRef[] {
         const media = a['mediaType'];
         if (typeof id !== 'string' || id === '' || typeof media !== 'string' || media === '') { continue; }
         const name = typeof a['name'] === 'string' ? a['name'] : undefined;
+        const bytes = typeof a['bytes'] === 'number' ? a['bytes'] : undefined;
         const width = typeof a['width'] === 'number' ? a['width'] : undefined;
         const height = typeof a['height'] === 'number' ? a['height'] : undefined;
         refs.push({
             attachmentId: id,
             mediaType: media,
+            ...(bytes === undefined ? {} : { bytes }),
             ...(name === undefined ? {} : { name }),
             ...(width === undefined ? {} : { width }),
             ...(height === undefined ? {} : { height }),

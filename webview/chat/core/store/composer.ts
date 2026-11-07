@@ -4,7 +4,9 @@ import { signal } from '@preact/signals'
 import type { ChatHost } from '../host'
 import type { StagedFile } from './types'
 import type { ImageAttachment } from '../protocol'
-import type { ChatStore, RefChip, RefSnap } from './types'
+import type { ChatStore, QuoteDraft, RefChip, RefSnap } from './types'
+
+/** 引用贴片的落点规则：`at` 是**输入框纯文本里的字符偏移**（点「引用」时的光标位置）。 */
 
 export interface ComposerSlice {
   store: Pick<
@@ -14,7 +16,9 @@ export interface ComposerSlice {
     | 'images'
     | 'refs'
     /** 选中文本的引用（0.2.2 quote）：输入区上方的可一键清除贴片，发送时并入正文引用块 */
-    | 'quote'
+    | 'quotes'
+    /** 输入框光标（纯文本偏移）：引用贴片落点用；由 Composer 的 textarea 事件回写 */
+    | 'caret'
     | 'focusTick'
     | 'runSlash'
     | 'pickFile'
@@ -29,6 +33,8 @@ export interface ComposerSlice {
     | 'removeRef'
     | 'readImageFile'
     | 'insertText'
+    | 'setText'
+    | 'setCaret'
   >
   /** 宿主草稿消息到达：并入输入框文本并触发焦点。 */
   appendDraft(draft: string | undefined): void
@@ -44,10 +50,16 @@ export interface ComposerSlice {
   /** 提交失败：把该次的内容放回输入区（输入框已被用户改写则不动）。 */
   restoreSentDraft(rpcId: string | undefined): void
   reset(): void
-  /** 记下选中文本的引用（同一时刻只有一条；再选一次即替换）。 */
+  /** 记下选中文本的引用（可**多次**引用；web 的原子 chip 也是多条，后选的追加在末尾）。 */
   setQuote(text: string): void
-  /** 清掉引用贴片（一键清除；发送成功时也会清）。 */
+  /** 移除第 `index` 条引用贴片（每条独立可删）。 */
+  removeQuote(index: number): void
+  /** 清掉全部引用贴片（一键清除；发送成功时也会清）。 */
   clearQuote(): void
+  /** 全量改写输入框文本（并**按 diff 平移**未发送引用的落点）。 */
+  setText(next: string): void
+  /** 记录输入框当前光标（textarea 的 selectionStart）。 */
+  setCaret(at: number): void
 }
 
 export function createComposer(host: ChatHost): ComposerSlice {
@@ -55,8 +67,10 @@ export function createComposer(host: ChatHost): ComposerSlice {
   const attachments = signal<StagedFile[]>([])
   const images = signal<ImageAttachment[]>([])
   const refs = signal<RefChip[]>([])
-  /** 选中文本引用（0.2.2）：输入区上方的贴片；不直接往 textarea 里塞 Markdown，避免"清不掉"。 */
-  const quote = signal<string | undefined>(undefined)
+  /** 选中文本引用（0.2.2）：输入区上方的贴片**列表**；`at` = 点「引用」时的输入框光标偏移。 */
+  const quotes = signal<readonly QuoteDraft[]>([])
+  /** 输入框光标（纯文本偏移）；引用贴片按它定位，编辑正文时按 `setText` 的 diff 平移。 */
+  const caret = signal(0)
   const focusTick = signal(0)
   let refKey = 1
 
@@ -64,7 +78,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
   function runSlash(line: string): void {
     const t = (line ?? '').trim()
     if (!t.startsWith('/')) return
-    if (text.value === t) text.value = ''
+    if (text.value === t) setText('')
     host.post({ type: 'slashRun', text: t })
   }
   /**
@@ -184,8 +198,44 @@ export function createComposer(host: ChatHost): ComposerSlice {
   }
 
   function appendDraft(draft: string | undefined): void {
-    text.value = text.value ? text.value + '\n' + (draft ?? '') : draft ?? ''
+    setText(text.value ? text.value + '\n' + (draft ?? '') : draft ?? '')
     focusTick.value++
+  }
+
+  /** 记录输入框光标（引用贴片落点用；Composer 的 select/key/input 事件回写）。 */
+  function setCaret(at: number): void {
+    caret.value = Number.isFinite(at) ? Math.max(0, Math.min(at, text.value.length)) : text.value.length
+  }
+
+  /**
+   * **全量改写输入框文本**，并按 diff 平移未发送引用的 `at`。
+   *
+   * 为什么必须平移：引用贴片的落点是"点引用时的光标偏移"，用户继续在正文里打字/删字时，
+   * 引用**前面**的文本长度会变；不跟着移，发送时引用就会插错位置（这是"引用夹在文字中间"的关键一环）。
+   * 只做**一次**公共前缀/后缀比较：单次插入/删除/替换都覆盖，成本 O(n)、无额外状态。
+   * @param next - 新文本（与当前相同则直接返回）
+   */
+  function setText(next: string): void {
+    const prev = text.value
+    if (next === prev) return
+    const max = Math.min(prev.length, next.length)
+    let prefix = 0
+    while (prefix < max && prev[prefix] === next[prefix]) prefix += 1
+    let suffix = 0
+    while (suffix < max - prefix && prev[prev.length - 1 - suffix] === next[next.length - 1 - suffix]) suffix += 1
+    const delta = next.length - prev.length
+    const changedEnd = prev.length - suffix
+    if (quotes.value.length > 0) {
+      quotes.value = quotes.value.map((q) => {
+        // 变化在引用之后 / 正好从引用处开始插入 → 引用不动（插进来的字落在引用**后面**）
+        if (q.at <= prefix) return q
+        // 变化完全在引用之前 → 整体平移
+        if (q.at >= changedEnd) return { ...q, at: Math.max(0, Math.min(next.length, q.at + delta)) }
+        // 引用落在被替换的区间里 → 收到变化起点
+        return { ...q, at: prefix }
+      })
+    }
+    text.value = next
   }
 
   /**
@@ -209,7 +259,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
     const start = el !== null && el.selectionStart !== null ? Math.min(el.selectionStart, current.length) : current.length
     const end = el !== null && el.selectionEnd !== null ? Math.min(el.selectionEnd, current.length) : current.length
     const next = current.slice(0, start) + insert + current.slice(Math.max(start, end))
-    text.value = next
+    setText(next)
     focusTick.value++
     if (el !== null) {
       const caret = start + insert.length
@@ -229,18 +279,27 @@ export function createComposer(host: ChatHost): ComposerSlice {
     attachments.value = []
     images.value = []
     refs.value = []
-    quote.value = undefined
-    text.value = ''
+    quotes.value = []
+    caret.value = 0
+    setText('')
     sentDrafts.clear()
   }
 
-  function setQuote(text: string): void {
-    const trimmed = text.trim()
-    quote.value = trimmed === '' ? undefined : trimmed
+  function setQuote(selected: string): void {
+    const trimmed = selected.trim()
+    if (trimmed === '') return
+    // **追加**而不是替换：web 可多次引用，每条独立成 chip；落点 = 点引用时的光标（默认末尾）
+    const at = Math.max(0, Math.min(caret.value, text.value.length))
+    quotes.value = [...quotes.value, { text: trimmed, at }]
+  }
+
+  /** 删掉第 `index` 条引用（每条 chip 的 ✕）。 */
+  function removeQuote(index: number): void {
+    quotes.value = quotes.value.filter((_, i) => i !== index)
   }
 
   function clearQuote(): void {
-    quote.value = undefined
+    quotes.value = []
   }
 
   /** 已发出、尚未被确认的那几次提交的内容（键 = 提交标识）；失败时据此还原输入区。 */
@@ -262,7 +321,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
     if (draft === undefined) return
     // 用户已经在写新内容：**不要覆盖**（上游也是"草稿留在机器里"，不是"抢回输入框"）
     if (text.value.trim() !== '' || images.value.length > 0 || attachments.value.length > 0) return
-    text.value = draft.text
+    setText(draft.text)
     images.value = draft.images
     attachments.value = draft.attachments
     // 贴片要带 key（输入区那份是 RefChip）；还原时按序重新编号，`token` 缺省补空串
@@ -275,7 +334,8 @@ export function createComposer(host: ChatHost): ComposerSlice {
       attachments,
       images,
       refs,
-      quote,
+      quotes,
+      caret,
       focusTick,
       runSlash,
       pickFile,
@@ -290,6 +350,8 @@ export function createComposer(host: ChatHost): ComposerSlice {
       removeRef,
       insertText,
       readImageFile,
+      setText,
+      setCaret,
     },
     receiveUpload,
     appendDraft,
@@ -297,6 +359,9 @@ export function createComposer(host: ChatHost): ComposerSlice {
     restoreSentDraft,
     reset,
     setQuote,
+    removeQuote,
     clearQuote,
+    setText,
+    setCaret,
   }
 }

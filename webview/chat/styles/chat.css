@@ -280,8 +280,9 @@
    */
   .msg-col > .turn-anchor:not([hidden]):not([data-blank='true']):not(:first-child) { margin-top: var(--dsh-chat-flow-gap, 6px); }
   /* 回答块之后那一档 12px（上游 `data-chat-group-part="response"` 的 12px 与 `response + next` 的 12px）。
-     ⚠️ 属性落在**真实承载它的那一层**：`data-turn-process-answer` 挂在 `.msg` 上（不是 `.turn-anchor`）。 */
-  .msg-col > .turn-anchor:has(> .msg[data-turn-process-answer]) { --dsh-chat-flow-gap: 12px; }
+     ⚠️ 属性落在**真实承载它的那一层**：`data-turn-process-row` 挂在 `.msg` 上（不是 `.turn-anchor`），
+     只表示"这一行带过程事实"（值恒为 `'true'`）。上游 0.2.2 删除了 `compactAnswer`，不再按插话分档。 */
+  .msg-col > .turn-anchor:has(> .msg[data-turn-process-row]) { --dsh-chat-flow-gap: 12px; }
   /* 承控制行的那条锚：自己 16px 上距，并把它作为"下一档 16px"的来源（上游 turn-process 一档）。 */
   .msg-col > .turn-anchor[data-turn-process-head]:not([hidden]):not([data-blank='true']):not(:first-child) { margin-top: 16px; }
   .msg-col > .turn-anchor[data-turn-process-head] { --dsh-chat-flow-gap: 16px; }
@@ -371,8 +372,8 @@
   /* 消息里的引用（上游 `QuotedUserText` → `QuotePreview`）：**气泡内联**的「引用标记 + 截断文字」，
      后接用户正文；整段文字同色（引用用业务蓝），不另起块、不出现字面 `>`。 */
   .msg.user .user-quote-inline {
-    display: inline-flex; align-items: baseline; gap: 4px; vertical-align: baseline;
-    max-width: min(80%, 300px); margin-right: 4px;
+    display: flex; align-items: baseline; gap: 4px; vertical-align: baseline;
+    max-width: min(80%, 300px); margin: 0 0 2px;
     color: var(--vscode-textLink-foreground, #4daafc);
   }
   .msg.user .user-quote-inline .codicon { font-size: 12px; flex: none; }
@@ -415,6 +416,31 @@
     border: none; background: none; padding: 0; cursor: pointer;
     color: var(--vscode-textLink-foreground, #4daafc); font-size: 11px; line-height: 16px;
   }
+  /* 已回答提问（上游 `answered-user-question` → `QuestionReplyView`）：右对齐气泡、逐题问答直接铺开，
+     没有「问题与回答」标题/摘要/展开（上游无这三样）；时间与复制在气泡内右下。 */
+  .qreply-bubble {
+    max-width: 100%; box-sizing: border-box; padding: 16px 20px; border-radius: var(--dsh-radius-lg, 10px);
+    background: var(--dsh-bubble); color: var(--vscode-editor-foreground, var(--vscode-foreground, #ddd));
+    white-space: normal; word-break: break-word;
+  }
+  .qreply-detail { display: flex; flex-direction: column; gap: 12px; margin: 0; }
+  .qreply-pair { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+  .qreply-q {
+    color: var(--vscode-descriptionForeground, #9d9d9d);
+    font-size: calc(13px + var(--dsh-content-font-delta, 0px));
+    line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0;
+  }
+  .qreply-header { display: block; }
+  .qreply-a { color: var(--vscode-editor-foreground, var(--vscode-foreground, #ddd)); margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .qreply-skipped { color: var(--vscode-descriptionForeground, #9d9d9d); }
+  .qreply-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; height: 28px; padding-right: 4px; }
+  .qreply-time { color: var(--vscode-descriptionForeground, #9d9d9d); font-size: 13px; line-height: 24px; }
+  .qreply-copy {
+    width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+    border: none; background: none; padding: 0; cursor: pointer; border-radius: 4px;
+    color: var(--vscode-descriptionForeground, #9d9d9d); font-size: 15px;
+  }
+  .qreply-copy:hover { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.2)); }
   /* 凭据遮挡（上游 `ui-secret-mask` 的等价物）：文本与眼睛**同一行**，眼睛在末尾、不换行。
      图标用内联 SVG（不依赖 codicon 字体），也不用任何 tooltip —— 提示只走 `aria-label`。 */
   .secret-text { display: inline; }
@@ -823,7 +849,7 @@
   #refRow .ref-chip .x { font-size: 10px; margin-left: 1px; }
   /* 选中文本引用（0.2.2 quote）：输入区上方的贴片。**不写进 textarea**（否则删起来像普通文本、
      也做不出"一键清除"），发送时才拼成引用块；有它时把 @ 贴片那一行往下让，避免重叠。 */
-  #quoteRow { position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 8px 0; min-width: 0; }
+  #quoteRow { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 8px 0; min-width: 0; }
   #quoteRow .quote-chip {
     display: inline-flex; align-items: center; gap: 5px; height: 20px; max-width: 76%;
     font-size: 11px; padding: 0 8px 0 5px; border-radius: 10px;
@@ -831,22 +857,23 @@
     color: var(--vscode-foreground, #ddd);
   }
   /* 贴片左侧图标：**默认是引号**（与上游一致）；鼠标悬停这一行时换成 ✕，点击就清掉 */
+  /* 贴片左端：默认引号图标；悬停变 ✕，点击只清这一条（不再有行尾「清除引用」按钮） */
   #quoteRow .quote-chip .x {
     flex: none; border: none; background: none; padding: 0; cursor: pointer;
     width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
     color: var(--vscode-foreground, #ddd); border-radius: 4px;
   }
   #quoteRow .quote-chip .x .codicon { font-size: 16px; line-height: 1; }
+  #quoteRow .quote-chip .x .ico-clear { display: none; }
+  #quoteRow .quote-chip:hover .x .ico-quote { display: none; }
+  #quoteRow .quote-chip:hover .x .ico-clear { display: inline-flex; }
+  #quoteRow .quote-chip:hover .x { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.25)); }
   /* 行尾的「清除引用」文字按钮（与贴片上的 ✕ 两个入口都保留） */
   #quoteRow .quote-clear {
     flex: none; border: none; background: none; padding: 0; cursor: pointer;
     color: var(--vscode-textLink-foreground, #4daafc); font-size: 10.5px; line-height: 16px;
   }
   #quoteRow .quote-clear:hover { text-decoration: underline; }
-  #quoteRow .quote-chip .x .ico-clear { display: none; }
-  #quoteRow .quote-chip:hover .x .ico-quote { display: none; }
-  #quoteRow .quote-chip:hover .x .ico-clear { display: inline-flex; }
-  #quoteRow .quote-chip:hover .x { color: var(--vscode-foreground, #ddd); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.25)); }
   #quoteRow .quote-chip .qtext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* 悬停自绘 tooltip：**固定定位**（不夹在输入区里被裁）、位置由组件按视口算（上/下翻转 + 左右夹取）；
      内容超过可用高度时纵向滚动（滚动条用 VSCode 滑块色）。颜色用 VSCode 悬停组件变量，浅/深主题都跟系统一致。 */

@@ -96,7 +96,6 @@ export interface ProcessPresentation {
     turnClosed: boolean
     hasExternalProcess: boolean
     hasInterleavedInput: boolean
-    compactAnswer: boolean
 }
 
 /** 过程组（上游 `ProcessGroup.snapshot`）。 */

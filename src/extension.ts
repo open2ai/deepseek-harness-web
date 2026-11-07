@@ -1591,12 +1591,23 @@ function setupChatWebview(
                 const ref = {
                     attachmentId: id,
                     ...(typeof msg.mediaType === 'string' && msg.mediaType !== '' ? { mediaType: msg.mediaType } : {}),
+                    ...(typeof msg.bytes === 'number' ? { bytes: msg.bytes } : {}),
                     ...(typeof msg.width === 'number' ? { width: msg.width } : {}),
                     ...(typeof msg.height === 'number' ? { height: msg.height } : {}),
                     ...(safe === '' ? {} : { name: safe }),
                 };
-                // 新主机的 `session/attachment` 只收图片；文件只能走本地对象库（同一个内容寻址目录）。
-                if (typeof msg.mediaType === 'string' && msg.mediaType.startsWith('image/')) {
+                /**
+                 * 0.2.2 的 `session/attachment` 是 **strict codec**：`attachment` 必须带
+                 * `mediaType` + `bytes` + `width` + `height`（缺一个网关就拒）。事件里的图片引用
+                 * 本来就带齐这四项；缺的时候**不发这条注定失败的 RPC**，直接走本地对象库。
+                 * 文件（非图片）上游不接受，只能走本地对象库（同一个内容寻址目录）。
+                 */
+                const attachmentRefComplete = typeof msg.mediaType === 'string'
+                    && msg.mediaType.startsWith('image/')
+                    && typeof msg.bytes === 'number'
+                    && typeof msg.width === 'number'
+                    && typeof msg.height === 'number';
+                if (attachmentRefComplete) {
                     try {
                         const img = await dsh.readImageAttachment(ref);
                         bytes = Buffer.from(img.data, 'base64');
@@ -1653,11 +1664,20 @@ function setupChatWebview(
                 const ref = {
                     attachmentId: String(msg.attachmentId ?? ''),
                     ...(typeof msg.mediaType === 'string' && msg.mediaType !== '' ? { mediaType: msg.mediaType } : {}),
+                    ...(typeof msg.bytes === 'number' ? { bytes: msg.bytes } : {}),
                     ...(typeof msg.width === 'number' ? { width: msg.width } : {}),
                     ...(typeof msg.height === 'number' ? { height: msg.height } : {}),
                 };
+                /** strict codec：四项齐了才发 RPC；缺任一字段直接走本地对象库（见 openAttachment 的说明）。 */
+                const refComplete = typeof msg.mediaType === 'string'
+                    && msg.mediaType.startsWith('image/')
+                    && typeof msg.bytes === 'number'
+                    && typeof msg.width === 'number'
+                    && typeof msg.height === 'number';
                 try {
-                    const img = await dsh.readImageAttachment(ref);
+                    const img = refComplete
+                        ? await dsh.readImageAttachment(ref)
+                        : await Promise.reject(new Error('附件引用缺少 strict codec 要求的字段（bytes/width/height）'));
                     post({ type: 'attachmentBytes', attachmentId: msg.attachmentId, mediaType: img.mediaType, data: img.data });
                 } catch (e) {
                     const local = await readLocalAttachmentObject(msg.attachmentId);

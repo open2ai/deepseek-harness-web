@@ -20,8 +20,12 @@ export function createAttachments(host: ChatHost): AttachmentsSlice {
   /** 已发出、还没回帧的 id：避免同一附件并发重复取。 */
   const inflight = new Set<string>()
 
-  /** 取件的引用字段（`attachmentId` + `mediaType` 必需；尺寸/名字可选，原样转给宿主）。 */
-  type AttachmentRef = { attachmentId: string; mediaType?: string; width?: number; height?: number; name?: string }
+  /**
+   * 取件的引用字段。0.2.2 的 `session/attachment` 描述符是 strict codec：`attachmentId` +
+   * `mediaType` + `bytes` + `width` + `height` 全部 required —— 有就原样转给宿主、缺了宿主会
+   * 直接走本地对象库（不再发一条注定被拒的 RPC）。
+   */
+  type AttachmentRef = { attachmentId: string; mediaType?: string; bytes?: number; width?: number; height?: number; name?: string }
 
   function requestAttachment(ref: AttachmentRef): void {
     if (ref.attachmentId === '') return
@@ -35,6 +39,7 @@ export function createAttachments(host: ChatHost): AttachmentsSlice {
       type: 'attachmentReq',
       attachmentId: ref.attachmentId,
       ...(ref.mediaType === undefined ? {} : { mediaType: ref.mediaType }),
+      ...(ref.bytes === undefined ? {} : { bytes: ref.bytes }),
       ...(ref.width === undefined ? {} : { width: ref.width }),
       ...(ref.height === undefined ? {} : { height: ref.height }),
       ...(ref.name === undefined ? {} : { name: ref.name }),

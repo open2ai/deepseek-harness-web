@@ -38,10 +38,12 @@ export function formatMsgClock(t: number | undefined | null): string {
 const TOOL_TITLES: Record<string, string> = {
   // ⚠️ 这里**只放上游有专属 title key 的工具**（`tool-call-model.ts` 的 `TOOL_TITLE_KEYS`、
   // 各 toolview 自己的 key、`ui-deliverables` 的 `row.title`）。其余一律走**变体兜底**
-  //（`VARIANT_TITLES`）—— 之前这里堆了一批上游根本没有的名字（apply_patch / shell / powershell /
+  //（`VARIANT_TITLES`）—— 之前这里堆了一批上游没有 title key 的名字（shell / powershell /
   // readTextFile / findings / search…），那些工具在上游是「工具调用」，插件却显示了别的说法。
+  // `apply_patch` 是 0.2.2 新增的**有** title key（`tool.title.applyPatch`）的工具，所以在这里。
   pwsh: '运行命令',
   read_image: '读取图片',
+  apply_patch: '应用补丁',
   grep: '搜索文件内容',
   glob: '查找文件',
   web_search: '网页搜索',

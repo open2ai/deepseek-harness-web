@@ -27,9 +27,8 @@
    * 于是"细线 → 正文"只剩座位那一档 12px。
    */
   .chain:not(:has(> .chain-done)):not(:has(> .chain-body:not([hidden]))) { margin-top: 0; margin-bottom: 0; }
-  /* 「回答收得紧不紧」（上游 `compactAnswer`）：过程区间里有人插话 / 追加提问（`wide`）时把链与正文拉开，
-     否则沿用本插件的紧凑节奏（6px）。上游同名的 flow-gap 取值是 8px 对 16px，这里按本插件自己的刻度取。 */
-  .msg.assistant[data-turn-process-answer='wide'] .chain { margin-bottom: 12px; }
+  /* 上游 0.2.2 已删除 `compactAnswer`（"有插话就放宽链与正文间距"）：这里同步退场，间距恒定
+     （本插件刻度：基础 `margin-bottom: 6px`，见上面的 `.chain`）。 */
   .chain-summary {
     display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
     border: none; background: none; color: inherit; padding: 2px 6px;

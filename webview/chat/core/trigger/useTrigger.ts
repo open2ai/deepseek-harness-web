@@ -197,6 +197,7 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
     const caret = taRef.current?.selectionStart ?? text.length
     const start = sel.start
     const focusAt = (pos: number): void => {
+      store.setCaret(pos)
       queueMicrotask(() => {
         const el = taRef.current
         el?.setSelectionRange(pos, pos)
@@ -205,11 +206,11 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
     }
     return {
       replace: (value: string): void => {
-        store.text.value = text.slice(0, start) + value + text.slice(caret)
+        store.setText(text.slice(0, start) + value + text.slice(caret))
         focusAt(start + value.length)
       },
       clear: (): void => {
-        store.text.value = text.slice(0, start) + text.slice(caret)
+        store.setText(text.slice(0, start) + text.slice(caret))
         focusAt(start)
       },
     }

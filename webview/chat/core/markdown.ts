@@ -9,6 +9,9 @@ import { CODE_ICON_CHECK, CODE_ICON_COPY, CODE_ICON_NOWRAP, CODE_ICON_WRAP } fro
 
 // 与旧 chat.ts 一致:禁用原生 HTML、自动链接、回车即换行。
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
+// markdown-it 15 起 linkify-it v6 **默认不再识别裸域名**（`example.com` 不再自动成链）。
+// 这里补回 v14 的行为：模型/用户输出里的裸域名照旧可点。
+md.linkify.set({ fuzzyLink: true })
 
 /**
  * TeX → HTML。**三档错误链与上游 `renderTexToReact` 逐档一致**：

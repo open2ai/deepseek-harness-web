@@ -2,7 +2,7 @@
   "name": "deepseek-harness-web",
   "displayName": "DeepSeek Harness Web",
   "description": "DeepSeek Harness 插件",
-  "version": "0.1.22-rc.1",
+  "version": "0.1.22-rc.2",
   "publisher": "csparksdev",
   "icon": "assets/icon.png",
   "engines": {
@@ -216,7 +216,7 @@
   "devDependencies": {
     "@types/vscode": "1.107.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "22.x",
+    "@types/node": "^24.19.2",
     "typescript-eslint": "^8.61.1",
     "eslint": "^10.5.0",
     "esbuild": "^0.28.1",

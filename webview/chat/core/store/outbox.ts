@@ -4,6 +4,7 @@ import type { ChatHost } from '../host'
 import { fileLabels } from '../file-labels'
 import type { ChatStore } from './types'
 import type { ComposerSlice } from './composer'
+import type { QuoteDraft } from './types'
 import type { CatalogsSlice } from './catalogs'
 import type { MessagesSlice } from './messages'
 
@@ -22,9 +23,37 @@ export interface OutboxSlice {
 
 export function createOutbox(deps: OutboxDeps): OutboxSlice {
   const { host, composer, catalogs, messages } = deps
-  const { text, attachments, images, refs, quote, runSlash } = composer.store
+  const { text, attachments, images, refs, quotes, setText, runSlash } = composer.store
   const { slashCatalog, requestSlashList } = catalogs.store
   const { processing } = messages.store
+
+  /**
+   * **把未发送的引用按落点拼进正文**（对齐 web 的编辑器内原子 chip）。
+   *
+   * 每条引用是一段 `> …` blockquote，插到它点引用时的光标偏移 `at`；同位置时按**点引用的先后**。
+   * 插入时与相邻正文之间补**空行**（Markdown 引用块与段落分开），渲染侧按 blockquote 段解析。
+   * 为什么倒序插：`at` 都是相对**原正文**的偏移，从后往前插不会让前面的偏移失效。
+   * @param quotes - 未发送引用（`text` + `at`）
+   * @param body - 输入框正文
+   * @returns 拼好的消息正文（无引用时原样返回）
+   */
+  function composeWithQuotes(quotes: readonly QuoteDraft[], body: string): string {
+    if (quotes.length === 0) return body
+    const ordered = quotes.map((quote, index) => ({ ...quote, index })).sort((a, b) => a.at - b.at || a.index - b.index)
+    let out = body
+    for (let i = ordered.length - 1; i >= 0; i -= 1) {
+      const quote = ordered[i]
+      if (quote === undefined) continue
+      const block = quote.text.split(/\r?\n/u).map((line) => `> ${line}`).join('\n')
+      const at = Math.max(0, Math.min(quote.at, out.length))
+      const before = out.slice(0, at)
+      const after = out.slice(at)
+      const pre = before === '' || /\n\n$/u.test(before) ? before : /\n$/u.test(before) ? before + '\n' : before + '\n\n'
+      const post = after === '' || /^\n\n/u.test(after) ? after : /^\n/u.test(after) ? '\n' + after : '\n\n' + after
+      out = pre + block + post
+    }
+    return out
+  }
 
   /**
    * 发送（用户发起的动作）。
@@ -50,7 +79,7 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
       const name = msg.slice(1).split(/[\s　]+/)[0].toLowerCase()
       const matched = !!(name && cat && cat.commands.some((c) => c.name.toLowerCase() === name))
       if (matched) {
-        text.value = ''
+        setText('')
         host.post({ type: 'slashRun', text: msg })
         return
       }
@@ -73,10 +102,10 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     const refTokens = refs.value.map((r) => r.token)
     // 选中文本引用（0.2.2 quote）：贴片挂在输入区上方，**发送时才**拼成 Markdown 引用块，
     // 所以输入框里始终是用户自己写的字、贴片可一键清除（上游原子 chip 的等价文本形态）。
-    const quoteText = quote.value
-    const quoteBlock = quoteText === undefined ? '' : quoteText.split(/\r?\n/u).map((line) => `> ${line}`).join('\n')
-    const prompt = [quoteBlock, ...refTokens, msg].filter(Boolean).join('\n\n') // 发给宿主：含引用 token/引用块
-    const display = [quoteBlock, msg].filter(Boolean).join('\n\n')
+    // **按落点拼**：每条引用插到它点引用时的光标位置（`at`），所以能夹在正文中间、后面接着写。
+    const composed = composeWithQuotes(quotes.value, msg)
+    const prompt = [...refTokens, composed].filter(Boolean).join('\n\n')
+    const display = composed
     const refSnap = refs.value.map((r) => ({ kind: r.kind, label: r.label, token: r.token }))
     // 提交标识：由本面板 mint，一路带到 session/prompt 的 requestId；
     // 服务端回显 user/message 时会带回同一个值，据它认领本地这一行（避免出现两行）
@@ -96,7 +125,7 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
       images.value = []
       refs.value = []
       composer.clearQuote()
-      text.value = ''
+      setText('')
       host.post({ type: 'chatSend', text: prompt, images: imgs, ...(files.length > 0 ? { files } : {}), rpcId, mode })
       return
     }
@@ -110,7 +139,7 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     images.value = []
     refs.value = []
     composer.clearQuote()
-    text.value = ''
+    setText('')
     // 不再建本地占位回答行（那正是「发送后闪一下」的来源）：回答只由宿主事件到达时出现；
     // 「深度求索中」由 processing 信号 + 提交台账 + turnActive 三条腿驱动（整表替换时一并重算）。
     // 「正在发送消息」相位：消息已发出、等 Host 接受；台账出现同 rpcId 或失败即结束（默认 10 秒兜底）。
@@ -133,7 +162,7 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     }
     // 未命中命令：按普通消息发（技能行 / 未知斜杠 token；用户已改写输入则放弃，交给下一次发送）
     if (text.value === line) {
-      text.value = ''
+      setText('')
       messages.addUser(line)
       processing.value = true
       host.post({ type: 'chatSend', text: line })

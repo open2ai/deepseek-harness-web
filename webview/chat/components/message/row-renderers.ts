@@ -9,6 +9,7 @@ import { UserRow } from './UserRow'
 import { AssistantRow } from './AssistantRow'
 import { ApprovalRow } from './ApprovalRow'
 import { QuestionRow } from './QuestionRow'
+import { QuestionReplyRow } from './QuestionReplyRow'
 import { TriggerRow } from './TriggerRow'
 import { NoticeRow } from './NoticeRow'
 import { CommandRow } from './CommandRow'
@@ -77,6 +78,8 @@ export const ROW_RENDERERS = {
   },
   approval: (row, ctx) => html`<${ApprovalRow} key=${row.key} row=${row} store=${ctx.store} />`,
   question: (row, ctx) => html`<${QuestionRow} key=${row.key} row=${row} store=${ctx.store} />`,
+  // 已回答提问（上游 answered-user-question → QuestionReplyView）：右对齐问答气泡，独立于过程折叠
+  questionReply: (row, ctx) => html`<${QuestionReplyRow} key=${row.key} row=${row} store=${ctx.store} />`,
   notice: (row) => html`<${NoticeRow} key=${row.key} row=${row} />`,
   // 回合终局通知行（上游 `turn-error` / `turn-max-tokens`）：独立行，永远可见（不参与过程折叠）
   turnNotice: (row) => html`<${TurnNoticeRow} key=${row.key} row=${row} />`,

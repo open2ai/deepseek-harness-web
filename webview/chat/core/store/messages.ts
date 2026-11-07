@@ -412,7 +412,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
   function openAttachment(
     attachmentId: string,
     name?: string,
-    ref?: { mediaType?: string; width?: number; height?: number }
+    ref?: { mediaType?: string; bytes?: number; width?: number; height?: number }
   ): void {
     if (!attachmentId) return
     host.post({
@@ -420,6 +420,7 @@ export function createMessages(host: ChatHost): MessagesSlice {
       attachmentId,
       ...(name === undefined || name === '' ? {} : { name }),
       ...(ref?.mediaType === undefined ? {} : { mediaType: ref.mediaType }),
+      ...(ref?.bytes === undefined ? {} : { bytes: ref.bytes }),
       ...(ref?.width === undefined ? {} : { width: ref.width }),
       ...(ref?.height === undefined ? {} : { height: ref.height }),
     })

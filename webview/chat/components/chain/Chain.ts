@@ -43,6 +43,7 @@ import {
 import { activityGlyph, chevronGlyph } from './ProcessIcons'
 import { ShimmerText } from './ShimmerText'
 import { ProcessGroup } from './ProcessGroup'
+import { QuestionReplyRow } from '../message/QuestionReplyRow'
 import { chainDetailBody, chainProcText, chainRenderPlan, HIDDEN_UNTIL_FOUND, outerFold, reasoningLive } from './plan'
 import { runFoldMotion } from '../../core/fold-motion'
 import { doneStatusText } from '../../core/run-status'
@@ -514,6 +515,14 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
   if (nodeGrouped) {
     const chainByKey = new Map(chain.map((c) => [c.key, c]))
     const lastGroupAt = row.nodeGroups!.length - 1
+    /**
+     * **已回答提问插在两个片之间**（上游 entry 序 = 片A → 问答气泡 → 片B → 回答正文）。
+     * 外层折起时片体被隐藏，但气泡要仍然可见（网页端折起态截图），所以：
+     *   · 展开（body 可见）→ 气泡渲染在 body 内、对应片之后；
+     *   · 折起（body hidden）→ 气泡移到 body 外面（紧跟折叠头），始终可见。
+     */
+    const replies = row.questionReplies ?? []
+    const loose = replies.filter((r) => r.afterGroupKey === undefined)
     return html`<div class="chain" ...${seatAttr}>
       ${doneRow}
       <div class="chain-body" ref=${outerRef}>
@@ -524,9 +533,15 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
               outerHidden=${outer.hidden}
               deferFold=${deferFold}
               tail=${index === lastGroupAt ? stoppedPill : null}
-              prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />`
+              prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />${
+              outer.hidden
+                ? null
+                : replies.filter((r) => r.afterGroupKey === g.key).map((reply) => html`<${QuestionReplyRow} key=${reply.key} row=${reply} store=${store} />`)
+            }`
         })}
+        ${outer.hidden ? null : loose.map((reply) => html`<${QuestionReplyRow} key=${reply.key} row=${reply} store=${store} />`)}
       </div>
+      ${outer.hidden ? replies.map((reply) => html`<${QuestionReplyRow} key=${reply.key} row=${reply} store=${store} />`) : null}
     </div>`
   }
   if (grouped) {
@@ -544,6 +559,7 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
                 prefs=${{ compact, grouping, liveProcessDetail: store.liveProcessDetail?.value }} />`
             : chainProcText(entry.item))}
       </div>
+      ${(row.questionReplies ?? []).map((reply) => html`<${QuestionReplyRow} key=${reply.key} row=${reply} store=${store} />`)}
     </div>`
   }
 
@@ -554,5 +570,6 @@ export function Chain({ row, store, ownsHead, stoppedPill, outerHidden, seatKey,
       ${head}
       ${chainDetailBody({ items: plan.items, bodyRef, groupBody, edges, done: row.done, store, tail: stoppedPill })}
     </div>
+    ${(row.questionReplies ?? []).map((reply) => html`<${QuestionReplyRow} key=${reply.key} row=${reply} store=${store} />`)}
   </div>`
 }

@@ -15,23 +15,48 @@ import { AttachmentGallery } from '../attachment/AttachmentGallery'
 import { fileExt, fileSizeText } from '../../core/file-labels'
 import { SecretText } from './SecretText'
 
+/** 用户正文里的一段：普通文字，或一段引用（blockquote）。 */
+type QuotedSegment = { kind: 'text'; text: string } | { kind: 'quote'; text: string }
+
 /**
- * 发送时引用贴片会被拼成正文开头的 Markdown 引用行（`> …`）：显示时把这几行从正文里剥出来，
- * 渲染成独立的引用块（对应上游消息里的引用样式）；其余部分才是用户正文。
- * @param text - 行上的完整正文（含可能的引用块）
- * @returns 引用文字 + 剩余正文
+ * 把用户消息正文切成「普通文字 / 引用段」序列（对齐上游 `QuotedUserText`）。
+ *
+ * **引用可以在任意位置**（不再只认开头）：发送时引用按点引用时的光标位置拼进正文
+ *（见 `outbox.composeWithQuotes`），所以渲染侧要按行扫描连续 `>` 行成组，
+ * 组与组之间的正文原样保留；引用段里的多行合成一段（同一组内 `>` 空行分条仍按组渲染）。
+ * @param text - 行上的完整正文
+ * @returns 按出现顺序的段列表
  */
-function splitLeadingQuote(text: string): { quoteText: string; rest: string } {
-  if (!text.startsWith('>')) return { quoteText: '', rest: text }
+function readQuotedText(text: string): QuotedSegment[] {
   const lines = text.split(/\r?\n/u)
-  const quoted: string[] = []
-  let index = 0
-  while (index < lines.length && lines[index].startsWith('>')) {
-    quoted.push(lines[index].replace(/^>\s?/u, ''))
-    index += 1
+  const segments: QuotedSegment[] = []
+  let textBuf: string[] = []
+  let quoteBuf: string[] = []
+  const flushText = (): void => {
+    if (textBuf.length === 0) return
+    const joined = textBuf.join('\n')
+    textBuf = []
+    if (joined.trim() !== '') segments.push({ kind: 'text', text: joined })
   }
-  if (quoted.every((line) => line.trim() === '')) return { quoteText: '', rest: text }
-  return { quoteText: quoted.join('\n'), rest: lines.slice(index).join('\n').replace(/^\n+/u, '') }
+  const flushQuote = (): void => {
+    if (quoteBuf.length === 0) return
+    segments.push({ kind: 'quote', text: quoteBuf.join('\n') })
+    quoteBuf = []
+  }
+  for (const line of lines) {
+    if (line.startsWith('>')) {
+      flushText()
+      const content = line.replace(/^>\s?/u, '')
+      if (content.trim() === '') flushQuote()
+      else quoteBuf.push(content)
+    } else {
+      flushQuote()
+      textBuf.push(line)
+    }
+  }
+  flushQuote()
+  flushText()
+  return segments
 }
 
 export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 'user' }>; store: ChatStore; latest?: boolean }) {
@@ -42,7 +67,7 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
    * 与输入区引用贴片同一套：固定定位、视口上下翻转/左右夹取、超高纵向滚动。
    */
   const [quoteTip, setQuoteTip] = useState<
-    { left: number; width: number; maxHeight: number; top?: number; bottom?: number } | null
+    { left: number; width: number; maxHeight: number; top?: number; bottom?: number; text: string } | null
   >(null)
   const quoteTipTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const cancelQuoteTipTimer = (): void => {
@@ -126,10 +151,10 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
   const showRefChips = !mentioned && localRefs !== undefined && localRefs.length > 0
   // 引用块（发送时由贴片拼出）：上游把它渲染成**气泡内的一行内联引用**（引用标记 + 截断文字），
   // 后面的正文紧跟着同一行流；消息里不出现字面的 `>`，也不拆成两个气泡。
-  const quoted = splitLeadingQuote(row.text)
-  const hasBubble = quoted.rest.length > 0 || quoted.quoteText !== ''
+  const segments = readQuotedText(row.text)
+  const hasBubble = segments.length > 0
   /** 悬停被截断的引用 → 显示全文浮层（短引用不弹）。 */
-  const showQuoteTip = (e: MouseEvent): void => {
+  const showQuoteTip = (e: MouseEvent, text: string): void => {
     cancelQuoteTipTimer()
     const inline = e.currentTarget as unknown as HTMLElement
     const src = inline.querySelector('.qsrc') as unknown as HTMLElement | null
@@ -150,8 +175,8 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
     const above = spaceAbove >= 160 || spaceAbove >= spaceBelow
     const maxHeight = Math.max(96, Math.min(vh * 0.6, above ? spaceAbove : spaceBelow))
     setQuoteTip(above
-      ? { left, width, maxHeight, bottom: vh - rect.top + 6 }
-      : { left, width, maxHeight, top: rect.bottom + 6 })
+      ? { left, width, maxHeight, bottom: vh - rect.top + 6, text }
+      : { left, width, maxHeight, top: rect.bottom + 6, text })
   }
   /**
    * **凭据遮挡**：已发送文本里认得出的凭据只留前 8 个字符，其余变 `*`。
@@ -185,7 +210,19 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
                 const open = f.path !== undefined
                   ? (): void => store.openFile(f.path as string)
                   : f.attachmentId !== undefined
-                    ? (): void => store.openAttachment(f.attachmentId as string, f.name)
+                    ? (): void => {
+                        /**
+                         * **文件块的原图不在本地对象库**（web 上传只留图片变体；`session/attachment`
+                         * 又只收图片引用）—— 同一条消息若带**同名图片**，改用那张图的 id/引用打开
+                         *（编辑器里至少能看到图）；否则按原逻辑只按文件 id 找本地对象。
+                         */
+                        const sameImage = (row.imageRefs ?? []).find((r) => r.name === f.name)
+                        if (sameImage !== undefined) {
+                          store.openAttachment(sameImage.attachmentId, sameImage.name ?? f.name, sameImage)
+                        } else {
+                          store.openAttachment(f.attachmentId as string, f.name)
+                        }
+                      }
                     : undefined
                 const inner = html`<span class="codicon codicon-file"></span>
                   <span class="ufname">${f.name}</span>
@@ -204,15 +241,14 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
     ${hasBubble
       ? html`<div class="body">
           <div class="user-text">
-            ${quoted.quoteText === ''
-              ? null
-              : html`<span class="user-quote-inline"
-                  onMouseOver=${showQuoteTip}
+            ${segments.map((segment, index) => segment.kind === 'quote'
+              ? html`<span class="user-quote-inline" key=${index}
+                  onMouseOver=${(e: MouseEvent) => showQuoteTip(e, segment.text)}
                   onMouseOut=${scheduleHideQuoteTip}>
                   <span class="codicon codicon-quote" aria-hidden="true"></span>
-                  <span class="qsrc">${quoted.quoteText}</span>
-                </span>`}
-            ${quoted.rest === '' ? null : html`<${SecretText} text=${quoted.rest} refs=${localRefs} />`}
+                  <span class="qsrc">${segment.text}</span>
+                </span>`
+              : html`<${SecretText} key=${index} text=${segment.text} refs=${localRefs} />`)}
           </div>
         </div>`
       : null}
@@ -222,7 +258,7 @@ export function UserRow({ row, store, latest }: { row: Extract<ChatRow, { kind: 
           onMouseOver=${cancelQuoteTipTimer}
           onMouseOut=${scheduleHideQuoteTip}
           style=${`left:${String(quoteTip.left)}px;width:${String(quoteTip.width)}px;max-height:${String(quoteTip.maxHeight)}px;` +
-            (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoted.quoteText}</div>`}
+            (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoteTip.text}</div>`}
     ${/* 引用贴片在**气泡之外**：
          本地回显还没把引用 token 写进正文时，靠这一行先把贴片画出来。 */ ''}
     ${showRefChips

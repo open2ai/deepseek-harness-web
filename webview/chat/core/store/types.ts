@@ -149,6 +149,22 @@ export interface RefSnap {
   token?: string
 }
 
+/** 未发送的引用贴片：`text` 为引用正文，`at` 为**输入框纯文本里的落点偏移**（点引用时的光标）。 */
+export interface QuoteDraft {
+  text: string
+  at: number
+}
+
+/** 已回答提问的独立行（挂进 assistant 行 `/` 独立兜底两种落点共用）。 */
+export type QuestionReplyRow = {
+  kind: 'questionReply'
+  key: number
+  time: string
+  /** 渲染时插在这张分组之后（分组行的数字 key，两个片之间）；未设 = 链后兜底 */
+  afterGroupKey?: number
+  question: import('../nodes/types').QuestionReplyData
+}
+
 export type ChatRow =
   | { kind: 'user'; key: number; text: string; images: ImageAttachment[]; time: string;
       /** 提交标识：本面板发出的消息带它，服务端回显的 `user/message` 会带回同一个值。
@@ -187,6 +203,12 @@ export type ChatRow =
       questionReply?: import('../nodes/types').QuestionReplyData }
   /** 系统提示词行（上游 `system-prompt` 节点）：该回合实际发给模型的 system，可折叠；位置在该回合用户提问之前 */
   | { kind: 'sysprompt'; key: number; text: string }
+  /**
+   * **已回答提问**的行（上游 `answered-user-question` 合成节点，kind `question-reply`）：
+   * 右对齐问答气泡，独立于过程折叠（`groupTree: 'turn'`）。数据从 `tool/call` 参数 +
+   * `tool/result` 的 answers 合成，见 `core/nodes/chat-nodes.ts` 的 3.5 段。
+   */
+  | QuestionReplyRow
   /**
    * 回合**终局通知**行（**独立行**，镜像上游 `turn-error` 与 `turn-max-tokens` 两个节点）：
    * 上游两节点都由 `turn/end` 建、与本回合有没有内容无关；都在 `INDEPENDENT` 集合里 → 不被折进过程组。
@@ -336,6 +358,12 @@ export type ChatRow =
       messageId?: string
       /** 本回合模型声明的交付文件（宿主事件带来；缺失 = 本回合没有声明，此时不渲染那一区） */
       presentedFiles?: DshPresentedFile[]
+      /**
+       * **已回答提问**（上游 answered-user-question）：挂在 assistant 行里、渲染在过程链之后/正文之前。
+       * 上游的节点序是「过程片 → 问答气泡 → 回答正文」，插件把回答正文并进 assistant 行，
+       * 所以气泡也要一起并进来，不能当独立行排在整行之后。
+       */
+      questionReplies?: QuestionReplyRow[]
       /**
        * 所属回合号（宿主给）。**同一回合可能有多条回答行**（插话切成「前段 / 后段」）。
        *
@@ -612,8 +640,10 @@ export interface ChatStore {
   images: Signal<ImageAttachment[]>
   /** 「@」引用贴片（不进正文；发送时转为引用行） */
   refs: Signal<RefChip[]>
-  /** 选中文本引用（0.2.2 quote）：输入区上方的可一键清除贴片，发送时并入正文引用块 */
-  quote: Signal<string | undefined>
+  /** 选中文本引用（0.2.2 quote）：输入区上方的贴片**列表**（可多次引用，各自可删） */
+  quotes: Signal<readonly QuoteDraft[]>
+  /** 输入框光标（纯文本偏移）：引用贴片落点；由 Composer 的 textarea 事件回写。 */
+  caret: Signal<number>
   focusTick: Signal<number>
   sel: Signal<SelectorState>
   openPopup: Signal<'perm' | 'model' | 'mode' | 'modelSearch' | null>
@@ -826,12 +856,12 @@ export interface ChatStore {
   /** 重试一次失败的上传 */
   retryUpload(key: string): void
   /** 按 attachmentId 懒取附件字节（已就绪/在飞时不重复发；失败可重试） */
-  /** 按附件引用懒取图片字节（0.2.2 要求完整引用：id + mediaType，尺寸/名字可缺） */
-  requestAttachment(ref: { attachmentId: string; mediaType?: string; width?: number; height?: number; name?: string }): void
+  /** 按附件引用懒取图片字节（0.2.2 strict codec：id + mediaType + bytes + 宽高；缺字段宿主走本地兜底） */
+  requestAttachment(ref: { attachmentId: string; mediaType?: string; bytes?: number; width?: number; height?: number; name?: string }): void
   /** 在编辑器区打开文件（相对路径按 cwd 解析；line 为 1 起的行号） */
   openFile(path: string, line?: number, cwd?: string): void
   /** 按附件 id 在编辑区打开图片（用户消息/图片卡里的图只有 id，没有本地路径）。 */
-  openAttachment(attachmentId: string, name?: string, ref?: { mediaType?: string; width?: number; height?: number }): void
+  openAttachment(attachmentId: string, name?: string, ref?: { mediaType?: string; bytes?: number; width?: number; height?: number }): void
   /** 把**还没有附件 id** 的字节在编辑区打开（本地乐观行里刚粘贴/拖进来的图；进日志后走 `openAttachment`）。 */
   openAttachmentBytes(data: string, mediaType?: string, name?: string): void
   removeAttachment(key: string): void
@@ -846,10 +876,16 @@ export interface ChatStore {
    * 正在写的这句话里"，并且**不覆盖**已有草稿。
    */
   insertText(insert: string): void
-  /** 记下选中文本的引用（0.2.2 quote；再选一次即替换，同一时刻只有一条）。 */
+  /** 记下选中文本的引用（0.2.2 quote；**追加**，web 可多次引用）。 */
   setQuote(text: string): void
+  /** 移除第 `index` 条引用贴片。 */
+  removeQuote(index: number): void
   /** 清掉引用贴片（一键清除；发送成功时也会清）。 */
   clearQuote(): void
+  /** 全量改写输入框文本（按 diff 平移未发送引用的落点）。 */
+  setText(next: string): void
+  /** 记录输入框光标（纯文本偏移）。 */
+  setCaret(at: number): void
   /**
    * 语音输入（实验）：录音/转写在**宿主进程**做（webview 拿不到麦克风），
    * 页面只维护四态（待命 / 准备模型 / 录音中 / 转写中）并收转写文字；

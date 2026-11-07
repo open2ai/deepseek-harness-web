@@ -788,13 +788,19 @@ export async function pageSessionEvents(
 /**
  * 一张已存档图片的完整引用（`ImageAttachmentRef`）。
  *
- * 新主机的 `session/attachment` 要求**整条引用**（id + 媒体类型 + 尺寸/名字），不再只收 id，
- * 也**不再校验"该会话历史里引用过它"**（权限只看 gateway 作用域）。尺寸/名字可缺，id 与
- * `mediaType` 必需（服务端会按存储校验）。
+ * 新主机的 `session/attachment` 要求**整条引用**（id + 媒体类型 + 字节数 + 尺寸），不再只收 id，
+ * 也**不再校验"该会话历史里引用过它"**（权限只看 gateway 作用域）。
+ *
+ * ⚠️ 描述符是 **strict codec**：`attachment` 的 required 是
+ * `attachmentId` / `mediaType` / `bytes` / `width` / `height`（见 `dsh-attachment` 的
+ * `ImageAttachmentRef` 与`session/attachment` 描述符）。缺任一字段网关会回 `gateway/input-invalid` ——
+ * 与旧版`只验 id`不同，宿主没有 widths/bytes 时**不要发这条 RPC**，直接走本地兜底。
  */
 export interface DshImageAttachmentRef {
     attachmentId: string;
     mediaType?: string;
+    /** 编码后字节数（strict codec 的 required 字段之一） */
+    bytes?: number;
     width?: number;
     height?: number;
     name?: string;
@@ -809,9 +815,14 @@ export interface DshImageAttachmentRef {
  * @returns 媒体类型与 base64 字节。
  */
 export async function readSessionAttachment(sessionId: string, attachment: DshImageAttachmentRef): Promise<DshImageAttachment> {
+    /**
+     * ⚠️ payload 是**请求对象本身**，`rpcCall` 会替它包成 `{args:{request: payload}}`
+     *（见 `auth.ts` 的 `argsWrap`）。这里再写一层 `{ request: … }` 会变成
+     * `args.request.request.*`，网关 strict codec 直接拒。
+     */
     const value = await rpcCall<{ attachment?: { mediaType?: unknown }; data?: unknown }>(
         'session/attachment',
-        { request: { sessionId, attachment } }
+        { sessionId, attachment }
     );
     const mediaType = typeof value?.attachment?.mediaType === 'string' ? value.attachment.mediaType : '';
     const data = typeof value?.data === 'string' ? value.data : '';

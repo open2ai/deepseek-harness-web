@@ -87,14 +87,6 @@ export interface DshTurnProcess {
     /** 过程区间内除回答步外是否还有别的过程成员 */
     hasExternalProcess: boolean;
     /**
-     * 最终回答是否按**紧凑形态**收（上游 `compactAnswer`）。
-     *
-     * 判据：过程区间内、开场人类锚点之后、回答锚点之前**是否有新的人类消息**（插话或追加提问）。
-     * 有 → false：回答与过程之间要留出常规间距，不被当成"紧贴折叠头的那一段"。
-     * 与上游同：这里 user 与 steering 一视同仁（分类只影响行的种类，不影响这条判据）。
-     */
-    compactAnswer: boolean;
-    /**
      * **过程区间里有没有"被插进来的话"**（上游 `hasInterleavedInput`）：本回合里存在
      * `user`/`steering` 消息且它的 seq 晚于开场人类锚点。
      *
@@ -149,8 +141,6 @@ export interface DshRowGroupFacts {
     processStartSeq: number;
     /** 片区间内除收口步外是否还有别的过程成员 */
     hasExternalProcess: boolean;
-    /** 片区间内是否有人插话（上游 `compactAnswer` 的片级形态） */
-    compactAnswer: boolean;
     /**
      * **这一片自己收口了没**（上游 `ChatGroupSeat` 的 `data.closed` = 组收口 || 回合关闭）。
      *

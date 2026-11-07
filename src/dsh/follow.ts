@@ -111,6 +111,9 @@ export function followSession(sessionId: string, handlers: DshFollowHandlers): D
                         address: { kind: 'session', sessionId },
                         ...HISTORY_PAGE,
                         assistantStream: true,
+                        // 上游客户端每次 follow 都带 activate：打开冷会话即让 Host 后台恢复/激活 Agent。
+                        // 不带的表现是 agentAvailable / 控制流基线偏旧（聊天主链路不坏）。批量读快照那条**不带**。
+                        activate: true,
                     },
                 },
             },

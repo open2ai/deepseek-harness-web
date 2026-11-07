@@ -53,7 +53,7 @@ export type TurnProcessEntry =
     /**
      * 本回合的人类消息（用户提问 / 插话）。
      *
-     * 只用于 `compactAnswer` 的判据；**不带插话标记** —— 上游那条判据对 user 与 steering
+     * 只用于 `hasInterleavedInput` 的判据；**不带插话标记** —— 上游那条判据对 user 与 steering
      * 一视同仁（插话分类落在**行**上，见 `rows/inbox-claims.ts`）。
      */
     | { kind: 'human'; seq?: number };
@@ -143,7 +143,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
      * `ask` = 提问工具调用，照常计入（仅作事实标注）。
      */
     const otherMembers: Array<{ seq: number; step: number | undefined; kind: 'tool' | 'context' | 'retry'; ask?: boolean }> = [];
-    /** 本回合的人类消息序号（插话与追加提问都算）：`compactAnswer` 与插话判据共用 */
+    /** 本回合的人类消息序号（插话与追加提问都算）：`hasInterleavedInput` 与开场人类锚点共用 */
     const humans: number[] = [];
 
     for (const e of input.entries) {
@@ -252,21 +252,8 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
         }
     }
     /**
-     * 紧凑回答（上游 `compactAnswer`）：开场锚点之后、回答锚点之前**又出现人类消息** → 假。
-     *
-     * 含义是「过程区间里有人插了话」，回答就不该被当作紧贴折叠头的那一段（上游据此把间距放宽）。
-     * 没有回答锚点时用 `null`：此时任何一条后续人类消息都让它为假（与上游同）。
-     */
-    const compactAnswerOf = (answerAnchorSeq: number | null): boolean =>
-        !humans.some(
-            (seq) =>
-                (openingHumanAnchor === undefined || seq > openingHumanAnchor) &&
-                (answerAnchorSeq === null || seq < answerAnchorSeq)
-        );
-
-    /**
-     * **过程区间里有没有"被插进来的话"**（上游 `hasInterleavedInput`）：与上面的 `compactAnswer`
-     * 共用判据，只是**不设回答锚点上界**。上游 `turnProcessAlwaysOpen()` 的一项 —— 有插话就不许折。
+     * **过程区间里有没有"被插进来的话"**（上游 `hasInterleavedInput`）：开场人类锚点之后
+     * 又出现人类消息。上游 `turnProcessAlwaysOpen()` 的一项 —— 有插话就不许折。
      */
     const hasInterleavedInput = humans.some(
         (seq) => openingHumanAnchor === undefined || seq > openingHumanAnchor
@@ -308,7 +295,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
      * （「执行了命令，已调用工具，已搜索代码」 + 「已读取文件并搜索代码」），插件只剩一片
      * （「执行了命令，已搜索代码，已读取文件**等**」）—— 末片多出一类、末尾还多一个「等」。
      *
-     * 片级事实与回合级**同一套判据**（`memberSeqs` / `compactAnswerOf` / 定稿口径），只是区间换成片内。
+     * 片级事实与回合级**同一套判据**（`memberSeqs` / 定稿口径），只是区间换成片内。
      *
      * @param fromSeq - 第一片的起点（回合起点；没有回答时取控制锚 —— 上游同）。
      */
@@ -343,7 +330,6 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
                         // 与回合级**同一判据**（提问也包括，见上面成员构造的注释）
                         (m) => m.seq >= from && m.seq < anchor && !(m.assistant && m.step === step)
                     ),
-                    compactAnswer: compactAnswerOf(anchor),
                 },
             });
             from = anchor;
@@ -371,7 +357,6 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
                     controlAnchorSeq,
                     processStartSeq: from,
                     hasExternalProcess: true,
-                    compactAnswer: compactAnswerOf(null),
                 },
             });
         }
@@ -396,7 +381,6 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
             processStartSeq: controlAnchorSeq,
             hasExternalProcess: memberSeqs.some((m) => !m.assistant),
             hasInterleavedInput,
-            compactAnswer: compactAnswerOf(null),
             ...(bareGroups.length === 0 ? {} : { groups: bareGroups }),
         };
     }
@@ -425,7 +409,7 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
      * 所以这里只产出**分界**：每一片 = 上一次收口之后到这一次收口之间的一段过程，
      * **外加末尾那一截**（最后一次收口之后到回合结束 —— 上游走查末尾的 `flush(followed)`）。
      *
-     * 片的判据与回合级**完全同一套**（`memberSeqs` / `compactAnswerOf` / 定稿口径），只是区间换成片内：
+     * 片的判据与回合级**完全同一套**（`memberSeqs` / 定稿口径），只是区间换成片内：
      *   · 片的回答锚点 = 收口那一步的定稿序号（缺则首条可见证据）；
      *   · 片的 `hasExternalProcess` = 片区间内除收口步外还有别的过程成员；
      *   · 片的 `inlineReasoning` = 收口那一步自带推理。
@@ -444,7 +428,6 @@ export function deriveTurnProcess(input: TurnProcessInput): DshTurnProcess | nul
         processStartSeq,
         hasExternalProcess,
         hasInterleavedInput,
-        compactAnswer: compactAnswerOf(answer.seq),
         // **只在真有分组时才带上这个键**：单步回合（最常见）保持与既有完全一致的载荷，
         // 免得几十套逐字节比对的行守卫因为多一个空数组而全红。
         ...(groups.length === 0 ? {} : { groups }),

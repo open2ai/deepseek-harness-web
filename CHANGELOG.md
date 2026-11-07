@@ -2,6 +2,13 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.22-rc.2] — 2026-11-07
+
+### 变更
+
+- **适配 dsh 0.2.2-rc.1**：修复附件请求、图片引用、问答记录渲染、自动化任务卡片及上传图片的「文件块」双击报错
+- 新增 apply_patch 文件修改工具; 模型目录实时同步
+
 ## [0.1.22-rc.1] — 2026-11-06
 
 ### 破坏性变更

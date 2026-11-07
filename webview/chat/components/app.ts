@@ -267,16 +267,14 @@ function Popup({ store }: { store: ChatStore }) {
 export function Composer({ store }: { store: ChatStore }) {
   const text = store.text.value
   const processing = store.processing.value
-  /** 选中文本引用（0.2.2 quote）：贴片挂在输入区上方，发送时才拼成引用块，可一键清除。 */
-  const quoteValue = store.quote.value
-  const quotePreview = quoteValue === undefined
-    ? ''
-    : quoteValue.length > 80 ? `${quoteValue.slice(0, 80)}…` : quoteValue
+  /** 选中文本引用（0.2.2 quote）：贴片**列表**挂在输入区上方，发送时才拼成引用块，每条可单独清除。 */
+  const quoteValues = store.quotes.value
+  const quotePreviewOf = (value: string): string => (value.length > 80 ? `${value.slice(0, 80)}…` : value)
   // 悬停引用贴片时用**自绘 tooltip**（原生 title 在浅/深色主题下都跟 VSCode 不搭）。
   // 只有鼠标在**贴片文字上**才出；移到行尾「清除引用」按钮上不出（否则挡住点击）。
   // 位置按贴片在视口里的位置**固定定位 + 上下翻转 + 视口夹取**；内容超过可用高度时纵向滚动。
   const [quoteTip, setQuoteTip] = useState<
-    { left: number; width: number; maxHeight: number; top?: number; bottom?: number } | null
+    { left: number; width: number; maxHeight: number; top?: number; bottom?: number; text: string } | null
   >(null)
   /** 贴片→tooltip 之间有一小段空隙，用短延迟兜住；移进 tooltip 就取消，方便滚动。 */
   const quoteTipTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -294,7 +292,7 @@ export function Composer({ store }: { store: ChatStore }) {
     }, 200)
   }
   useEffect(() => cancelQuoteTipTimer, [])
-  const showQuoteTip = (e: MouseEvent): void => {
+  const showQuoteTip = (e: MouseEvent, text: string): void => {
     cancelQuoteTipTimer()
     const chip = e.currentTarget as unknown as HTMLElement
     let rect: DOMRect = { left: 0, top: 0, bottom: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
@@ -313,8 +311,8 @@ export function Composer({ store }: { store: ChatStore }) {
     const above = spaceAbove >= 160 || spaceAbove >= spaceBelow
     const maxHeight = Math.max(96, Math.min(vh * 0.6, above ? spaceAbove : spaceBelow))
     setQuoteTip(above
-      ? { left, width, maxHeight, bottom: vh - rect.top + 6 }
-      : { left, width, maxHeight, top: rect.bottom + 6 })
+      ? { left, width, maxHeight, bottom: vh - rect.top + 6, text }
+      : { left, width, maxHeight, top: rect.bottom + 6, text })
   }
   // 「空」= 草稿 + 附件 + 图片 + 引用**全都空**（与上游同一判据）
   const empty =
@@ -531,7 +529,7 @@ export function Composer({ store }: { store: ChatStore }) {
         return
       case 'run-command':
         e.preventDefault()
-        store.text.value = '' // 回车执行 host 指令：无条件清空输入
+        store.setText('') // 回车执行 host 指令：无条件清空输入
         store.runSlash(argCommand as string)
         return
       case 'send':
@@ -631,26 +629,25 @@ export function Composer({ store }: { store: ChatStore }) {
          flex 列容器，塞进去会掉到「输入框内底部」并把边框撑高。 */ ''}
     <${GoalBar} store=${store} />
     <div id="inputbox">
-      ${quoteValue === undefined
+      ${quoteValues.length === 0
         ? null
         : html`<div id="quoteRow">
-            <span class="quote-chip" onMouseOver=${showQuoteTip} onMouseOut=${scheduleHideQuoteTip}>
-              <button type="button" class="x" aria-label="清除引用"
-                onClick=${() => { cancelQuoteTipTimer(); store.clearQuote(); setQuoteTip(null) }}>
+            ${quoteValues.map((q, index) => html`<span class="quote-chip" key=${index}
+                    onMouseOver=${(e: MouseEvent) => showQuoteTip(e, q.text)} onMouseOut=${scheduleHideQuoteTip}>
+              <button type="button" class="x" aria-label="清除引用" title="清除引用"
+                onClick=${() => { cancelQuoteTipTimer(); store.removeQuote(index); setQuoteTip(null) }}>
                 <span class="ico-quote codicon codicon-quote" aria-hidden="true"></span>
                 <span class="ico-clear codicon codicon-close" aria-hidden="true"></span>
               </button>
-              <span class="qtext">${quotePreview}</span>
-            </span>
-            <button type="button" class="quote-clear"
-              onClick=${() => { cancelQuoteTipTimer(); store.clearQuote(); setQuoteTip(null) }}>清除引用</button>
+              <span class="qtext">${quotePreviewOf(q.text)}</span>
+            </span>`)}
             ${quoteTip === null
               ? null
               : html`<div class="quote-tip" role="tooltip"
                   onMouseOver=${cancelQuoteTipTimer}
                   onMouseOut=${scheduleHideQuoteTip}
                   style=${`left:${String(quoteTip.left)}px;width:${String(quoteTip.width)}px;max-height:${String(quoteTip.maxHeight)}px;` +
-                    (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoteValue}</div>`}
+                    (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoteTip.text}</div>`}
           </div>`}
       ${store.refs.value.length > 0
         ? html`<div id="refRow" ref=${refRowRef}>${store.refs.value.map(
@@ -662,11 +659,25 @@ export function Composer({ store }: { store: ChatStore }) {
           )}</div>`
         : null}
       <textarea id="input" ref=${taRef} placeholder=${text || store.refs.value.length > 0 ? '' : '向 AI 提问（Enter 发送，Shift+Enter 换行）'} value=${text}
-        onInput=${(e: Event) => { store.text.value = (e.target as HTMLTextAreaElement).value; trigger.sync() }}
+        onInput=${(e: Event) => {
+          const el = e.target as HTMLTextAreaElement
+          store.setText(el.value)
+          store.setCaret(el.selectionStart ?? el.value.length)
+          trigger.sync()
+        }}
         onKeyDown=${inputKeyDown}
-        onKeyUp=${trigger.sync}
-        onSelect=${trigger.sync}
-        onClick=${trigger.sync}
+        onKeyUp=${(e: KeyboardEvent) => {
+          store.setCaret((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0)
+          trigger.sync()
+        }}
+        onSelect=${(e: Event) => {
+          store.setCaret((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0)
+          trigger.sync()
+        }}
+        onClick=${(e: MouseEvent) => {
+          store.setCaret((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0)
+          trigger.sync()
+        }}
         onPaste=${(e: ClipboardEvent) => {
           const items = e.clipboardData?.items
           if (!items) return

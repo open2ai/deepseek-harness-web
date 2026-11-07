@@ -24,8 +24,9 @@ export function AssistantRow({ row, store, latest, turnTail, ownsHead, tailNotic
   }
   // 上游无正文流式光标（流式指示靠左下角 TurnStatus），正文不加打字光标
   // 动作条（复制/分叉/反馈/用量/用时）：仅回答结束后(done)显示，回答过程中不出现
-  // 回答收得紧不紧（`compactAnswer`）：过程区间里有人插话时为 `wide`，链与正文之间放宽（见 chain.css）
-  const answerGap = row.process === undefined ? undefined : row.process.compactAnswer ? 'compact' : 'wide'
+  // 行上是否带过程事实：座位那一档 12px 挂在它上面（`chat.css` 的 `data-turn-process-row`）。
+  // 上游 0.2.2 已删除 `compactAnswer`（插话回合不再单独放宽链与正文间距），插件同步退场。
+  const processRow = row.process === undefined ? undefined : 'true'
   // 分叉可不可用**只有两条判据**（与上游逐字同口径）：① 这一轮**没有定稿回答**（没有回答锚点）；
   // ② 收官回答**之后、同一回合里还有转录活动**。后者的等价物就是 `turnTail`：本行是这一轮的
   // 内容收尾节点（回合内没有更晚的内容行）。
@@ -59,7 +60,7 @@ export function AssistantRow({ row, store, latest, turnTail, ownsHead, tailNotic
    */
   const alwaysShowActions = latest === true && row.text.trim() !== ''
   // 失败原因**不在这里**：它是独立行（镜像上游 `turn-error` / `turn-max-tokens`，见 `TurnNoticeRow.ts`）
-  return html`<div class="msg assistant${alwaysShowActions ? ' latest' : ''}" data-turn-process-answer=${answerGap}><div class="col">
+  return html`<div class="msg assistant${alwaysShowActions ? ' latest' : ''}" data-turn-process-row=${processRow}><div class="col">
     <${Chain} row=${row} store=${store} ownsHead=${ownsHead} stoppedPill=${pillInChain ? stoppedPill : null} outerHidden=${outerHidden} seatKey=${seatKey} turnCurrentStep=${turnCurrentStep} deferFold=${deferFold} />
     ${/* 答句正文：更早世代的整段由上面的 `answerRef` 挂 `hidden="until-found"` 折起
          （答句在 `.chain-body` 之外，只折链体折不住它）—— 展开入口是「已完成，用时 …」那个控件。 */ ''}

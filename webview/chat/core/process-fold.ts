@@ -19,9 +19,9 @@
 //      `processWindowReady = … && (turnStarted || turnClosed)`。所以「历史被分页截断」**不是**不折叠的理由，
 //      「拿到了回合结尾但没拿到它的开头」照样折。本文件按这条判（见 `turnStarted`）。
 //
-// 注：上游的 `compactAnswer`（区间内有插话时不按紧凑形态收回答）**不在这里判** —— 它只影响
-// 「链与正文之间的间距」，事实由过程规格给出（`DshTurnProcess.compactAnswer`），渲染侧按其落一个属性
-// （见 components/message/AssistantRow 与 styles/chain.css），不参与折叠头/明细的可见性判定。
+// 注：0.2.2 起上游删除了 `compactAnswer`（"有插话就放宽链与正文间距"），插件同步退场、间距恒定。
+// `hasInterleavedInput` 仍参与折叠判据（有插话的回合"永远展开"，见 `Chain` 与 `plan` 的 alwaysOpen），
+// 与间距无关。
 import type { DshTurnProcess } from '../../../src/dsh/rows/types'
 
 export interface ProcessDisclosureInput {
