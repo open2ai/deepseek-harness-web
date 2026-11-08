@@ -2090,8 +2090,8 @@ async function runDshTask(prompt: string, ctx: SelectionContext, mode: 'apply' |
 /** QuickPick 行的状态 → 统一的 iconPath/description（图标列由 QuickPick 自己对齐，label 不再塞 codicon）。 */
 function pickSessionState(s: WsSessionRow): { icon: string; desc: string } {
     const parts: string[] = [];
-    // 当前会话不再在描述里写「当前」：QuickPick 描述会紧贴会话名，看起来像标题的一部分。
-    // 用 check 图标 + 行选中态表达；工作区行保留「当前」。
+    // 当前会话在描述里写「当前」；前面用更多 NBSP 和标题拉开（原生 QuickPick 没有 margin API）。
+    if (s.current) parts.push('当前');
     if (s.pendingInteraction === 'approval') parts.push('待审批');
     else if (s.pendingInteraction === 'plan-review') parts.push('计划待审');
     else if (s.pendingInteraction === 'question') parts.push('待回答');
@@ -2110,7 +2110,8 @@ function pickSessionState(s: WsSessionRow): { icon: string; desc: string } {
                   : s.current
                     ? 'check'
                     : 'history';
-    return { icon, desc: parts.join(' · ') };
+    // 状态描述前加不可见间距：原生 QuickPick 不支持自定义 margin，用 NBSP 把状态和标题拉开一点。
+    return { icon, desc: parts.length === 0 ? '' : `${'\u00A0'.repeat(8)}${parts.join(' · ')}` };
 }
 
 type WsPick = vscode.QuickPickItem & {
