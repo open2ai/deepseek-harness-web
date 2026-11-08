@@ -46,6 +46,15 @@ export interface QuestionOption {
   description?: string
 }
 
+export interface QuestionIntent {
+  /** `'plan-review'` = plan-mode 的审阅请求（见 core/plan-review）。 */
+  kind?: string
+  /** plan-review 的具名 approve 选项 label。 */
+  approve?: string
+  /** 限时提问的调用标识（plan-review 也带）。 */
+  callId?: string
+}
+
 export interface QuestionSpec {
   id: string
   question: string
@@ -53,6 +62,8 @@ export interface QuestionSpec {
   detail?: string
   options?: QuestionOption[]
   multiSelect?: boolean
+  /** 提问意图（0.2.2 起随 question 透传；plan-review 用来收窄成计划审阅卡）。 */
+  intent?: QuestionIntent
 }
 
 export interface ChatModelGroup {
@@ -404,6 +415,15 @@ export type ViewToHostMessage =
   | { type: 'localImageReq'; path: string }
   // 在编辑器区打开一个文件（相对路径由宿主按 cwd 解析）；line 为 1 起的行号
   | { type: 'openFile'; path: string; line?: number; cwd?: string }
+  /**
+   * **把计划 Markdown 在 VS Code 编辑区打开**（上游 ui-plan 的「打开计划」在侧边栏；
+   * VS Code 的等价落点是编辑区的 Markdown 预览，见宿主 `openPlanInEditor`）。
+   */
+  | { type: 'openPlanDocument'; title: string; markdown: string; callId?: string }
+  /** 思考过程机器翻译：读宿主翻译服务的偏好与单请求上限。 */
+  | { type: 'cotTranslationLimitsReq'; requestId: number }
+  /** 思考过程机器翻译：翻译一个完整片段（宿主带 sessionId 复用缓存）。 */
+  | { type: 'cotTranslationTranslateReq'; requestId: number; text: string; targetLanguage: string; provider?: string }
   /**
    * **按附件 id 在编辑区打开一个图片附件**。
    *

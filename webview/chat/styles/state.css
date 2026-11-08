@@ -2,7 +2,7 @@
   .composer.is-busy { opacity: 0.65; }
   /* busy 期间禁输入与「发送」；但**处于「终止」形态（.stop）的按钮例外** ——
      它的职责是停掉正在跑的回合，被一并禁掉就点不动（真机现象：回答过程中「终止」无法点击）。 */
-  .composer.is-busy #input, .composer.is-busy #send:not(.stop) { pointer-events: none; }
+  .composer.is-busy #send:not(.stop) { pointer-events: none; }
   .composer-busy {
     display: flex; align-items: center; gap: 6px;
     font-size: 11px; color: var(--vscode-descriptionForeground, #888);

@@ -2,6 +2,7 @@
 // 独立成文件是为了让各切片能 Pick<ChatStore, K> 而不与 store/chat.ts 形成环；
 // 依赖方向固定为 chat.ts 与各切片 → types.ts。
 import type { Signal } from '@preact/signals'
+import type { CotClient } from '../cot'
 import type { LateAnswerCall, LateAnswerItem, LateAnswerQuestion } from '../late-answer'
 import type {
   DshTurnProcess as DshRowProcess,
@@ -107,7 +108,22 @@ export type DshTurnProcessItem =
       kind: 'command'
       key: number
       name: string | null
+      /** 命令参数原文（`/goal` 的回显气泡用；上游 `command/run.args`）。 */
+      args?: string | null
       outcome?: { kind: 'success' | 'error'; text?: string }
+    }
+  /**
+   * **过程链上的手动压缩**（`/compact`，上游 `manual-compaction` 节点当片成员）：
+   * 与自动压缩同一个 `CompactionRow`，只是标题固定为 `compact`、摘要回退到命令结算文案。
+   */
+  | {
+      kind: 'compaction'
+      key: number
+      title?: string
+      summary?: string
+      fallbackSummary?: string
+      shadowedItemCount?: number
+      shadowedTokenCount?: number
     }
   /**
    * **过程链上的模型重试链**（上游 `model-retry` 节点；`groupTree:'process'` → 过程折叠里的成员）。
@@ -244,12 +260,17 @@ export type ChatRow =
       key: number
       commandId: string
       name: string | null
+      /** 命令参数原文（`/goal` 回显气泡用；上游 `command/run.args`）。 */
+      args?: string | null
       outcome?: { kind: 'success' | 'error'; text?: string }
     }
   | {
       kind: 'compaction'
       key: number
       compactionId: string
+      /** 手动压缩用：标题（`compact`）与命令结算文案回退。 */
+      title?: string
+      fallbackSummary?: string
       /** 检查点事件序号（= 这一行的锚点） */
       seq: number
       summaryEventSeq?: number
@@ -358,6 +379,8 @@ export type ChatRow =
       messageId?: string
       /** 本回合模型声明的交付文件（宿主事件带来；缺失 = 本回合没有声明，此时不渲染那一区） */
       presentedFiles?: DshPresentedFile[]
+      /** 本回合提交的计划（上游 `submitted-plan` → turn-tail 计划卡）。 */
+      plans?: Array<{ callId: string; markdown: string; title: string }>
       /**
        * **已回答提问**（上游 answered-user-question）：挂在 assistant 行里、渲染在过程链之后/正文之前。
        * 上游的节点序是「过程片 → 问答气泡 → 回答正文」，插件把回答正文并进 assistant 行，
@@ -570,6 +593,8 @@ export interface PendingEcho {
 }
 
 export interface ChatStore {
+  /** 思考过程机器翻译（宿主 translator remote 的请求-应答客户端；未启用时入口不可用）。 */
+  cot: CotClient
   // 信号
   messages: Signal<ChatRow[]>
   /**
@@ -860,13 +885,17 @@ export interface ChatStore {
   requestAttachment(ref: { attachmentId: string; mediaType?: string; bytes?: number; width?: number; height?: number; name?: string }): void
   /** 在编辑器区打开文件（相对路径按 cwd 解析；line 为 1 起的行号） */
   openFile(path: string, line?: number, cwd?: string): void
+  /** 计划 Markdown → 编辑区 Markdown 预览（上游「打开计划」的 VS Code 等价落点）。 */
+  openPlanDocument(title: string, markdown: string, callId?: string): void
   /** 按附件 id 在编辑区打开图片（用户消息/图片卡里的图只有 id，没有本地路径）。 */
   openAttachment(attachmentId: string, name?: string, ref?: { mediaType?: string; bytes?: number; width?: number; height?: number }): void
   /** 把**还没有附件 id** 的字节在编辑区打开（本地乐观行里刚粘贴/拖进来的图；进日志后走 `openAttachment`）。 */
   openAttachmentBytes(data: string, mediaType?: string, name?: string): void
   removeAttachment(key: string): void
   /** 添加一条 @ 引用贴片（文件/目录/会话） */
-  addRef(kind: RefChip['kind'], label: string, token: string, detail?: string): void
+  addRef(kind: RefChip['kind'], label: string, token: string, detail?: string): RefChip
+  /** 编辑器内联引用整表回写（chips 是权威；发送仍读 refs）。 */
+  setReferences(next: readonly RefChip[]): void
   removeRef(key: number): void
   readImageFile(file: File): void
   /**
@@ -882,6 +911,8 @@ export interface ChatStore {
   removeQuote(index: number): void
   /** 清掉引用贴片（一键清除；发送成功时也会清）。 */
   clearQuote(): void
+  /** 全量替换引用列表（草稿还原/编辑器适配器同步用）。 */
+  setQuotes(quotes: readonly QuoteDraft[]): void
   /** 全量改写输入框文本（按 diff 平移未发送引用的落点）。 */
   setText(next: string): void
   /** 记录输入框光标（纯文本偏移）。 */

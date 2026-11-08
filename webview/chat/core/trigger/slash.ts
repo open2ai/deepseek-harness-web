@@ -64,8 +64,9 @@ export function slashTrigger(store: ChatStore): TriggerDef {
         store.runSlash('/' + row.name)
         return
       }
-      // 带参命令 / 技能：插入 "/name " 保留光标，继续输参后回车（命令走宿主执行、技能走正常发送）
-      helpers.replace('/' + row.name + ' ')
+      // 带参 host 命令：插入原子命令 chip（上游 CommandChipNode）；技能仍用纯文本 "/name "
+      if (row.kind === 'command' && row.hint) helpers.insertCommand(row.name)
+      else helpers.replace('/' + row.name + ' ')
     },
   }
 }

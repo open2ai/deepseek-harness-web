@@ -8,6 +8,7 @@ import { rankByName } from '../rank-by-name'
 import { html } from 'htm/preact'
 import { keepRowVisible } from '../scroll'
 import type { ChatStore } from '../store/chat'
+import type { ComposerInputAccess, ComposerReference } from '../../composer/core/types'
 
 /** 菜单里的一行候选（slash 命令 / 技能 / 本地动作 / 将来 @ 的文件…）。 */
 export interface TriggerRow {
@@ -75,6 +76,10 @@ export interface TriggerPickHelpers {
   replace(value: string): void
   /** 删除「触发符之后到光标前」的整段（清掉刚输入的触发内容）。 */
   clear(): void
+  /** 把已认领的斜杠命令作为编辑器内原子 chip 插入（编辑器不支持时退回 `/name ` 纯文本）。 */
+  insertCommand(name: string): void
+  /** 把一条 @ 引用作为编辑器内原子 chip 插入；返回 false = 编辑器不支持（调用方退回 store.addRef）。 */
+  insertReference(ref: ComposerReference): boolean
 }
 
 export interface TriggerDef {
@@ -117,7 +122,35 @@ export interface TriggerMenuApi {
 const MENU_ID = 'triggerPopup'
 
 /** 一个触发器菜单的控制器。defs 可按需传入，命中取第一个 match 非空者。 */
-export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { current: HTMLTextAreaElement | null }): TriggerMenuApi {
+/** 触发器的输入访问：新代码传 ComposerInputAccess；旧调用点仍可传 textarea 引用（兼容）。 */
+type TriggerSource = { current: HTMLTextAreaElement | null } | ComposerInputAccess
+
+/** 把旧 textarea 引用归一成 ComposerInputAccess（行为与迁移前逐字一致）。 */
+function textareaAccess(taRef: { current: HTMLTextAreaElement | null }, store: ChatStore): ComposerInputAccess {
+  const focusAt = (pos: number): void => {
+    store.setCaret(pos)
+    queueMicrotask(() => {
+      const el = taRef.current
+      el?.setSelectionRange(pos, pos)
+      el?.focus()
+    })
+  }
+  return {
+    getText: () => store.text.value,
+    getCaret: () => taRef.current?.selectionStart ?? store.text.value.length,
+    setCaret: (pos) => { store.setCaret(pos) },
+    replaceRange: (start, end, value) => {
+      const text = store.text.value
+      store.setText(text.slice(0, start) + value + text.slice(end))
+      focusAt(start + value.length)
+    },
+    focus: () => { taRef.current?.focus() },
+    contains: (node) => node !== null && taRef.current?.contains(node) === true,
+  }
+}
+
+export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, source: TriggerSource): TriggerMenuApi {
+  const input: ComposerInputAccess = "getText" in source ? source : textareaAccess(source, store)
   // 当前命中：触发符所属 def + 触发符位置 + 查询串（含是否 `@"…"` 引号态：面包屑根层要沿用同一形态）
   const [sel, setSel] = useState<{ defId: string; start: number; query: string; quoted: boolean } | null>(null)
   const [idx, setIdx] = useState(0)
@@ -155,9 +188,8 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
   }
 
   const sync = (): void => {
-    const el = taRef.current
-    const text = store.text.value
-    const caret = el?.selectionStart ?? text.length
+    const text = input.getText()
+    const caret = input.getCaret()
     for (const d of defs) {
       const m = d.match(text, caret)
       if (m) {
@@ -174,9 +206,8 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
   useEffect(() => {
     const onClick = (e: MouseEvent): void => {
       const t = e.target as Node
-      const ta = taRef.current
       const menu = document.getElementById(MENU_ID)
-      if (!ta?.contains(t) && !menu?.contains(t)) close()
+      if (!input.contains(t as Node) && !menu?.contains(t)) close()
     }
     document.addEventListener('click', onClick)
     return () => document.removeEventListener('click', onClick)
@@ -193,25 +224,27 @@ export function useTriggerMenu(defs: TriggerDef[], store: ChatStore, taRef: { cu
 
   const makeHelpers = (): TriggerPickHelpers | null => {
     if (!def || !sel) return null
-    const text = store.text.value
-    const caret = taRef.current?.selectionStart ?? text.length
+    const caret = input.getCaret()
     const start = sel.start
-    const focusAt = (pos: number): void => {
-      store.setCaret(pos)
-      queueMicrotask(() => {
-        const el = taRef.current
-        el?.setSelectionRange(pos, pos)
-        el?.focus()
-      })
-    }
     return {
       replace: (value: string): void => {
-        store.setText(text.slice(0, start) + value + text.slice(caret))
-        focusAt(start + value.length)
+        input.replaceRange(start, caret, value)
+        input.setCaret(start + value.length)
       },
       clear: (): void => {
-        store.setText(text.slice(0, start) + text.slice(caret))
-        focusAt(start)
+        input.replaceRange(start, caret, "")
+        input.setCaret(start)
+      },
+      insertCommand: (name: string): void => {
+        input.replaceRange(start, caret, "")
+        if (input.insertCommand !== undefined) input.insertCommand(name)
+        else input.replaceRange(start, start, '/' + name + ' ')
+      },
+      insertReference: (ref: ComposerReference): boolean => {
+        input.replaceRange(start, caret, "")
+        if (input.insertReference === undefined) return false
+        input.insertReference(ref)
+        return true
       },
     }
   }

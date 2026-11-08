@@ -16,6 +16,7 @@ import {
     type SessionEvent,
 } from './types'
 import { isAtOrOutside, positionOfKind } from './group-tree'
+import { submittedPlanOf, type SubmittedPlan } from '../plan-artifacts'
 import {
     blockIsVisible,
     displayFailure,
@@ -402,7 +403,12 @@ export function isVisibleChatNode(node: ChatNode): boolean {
         const blocks = Array.isArray(content) ? content : content === null || content === undefined ? [] : [content]
         return blocks.some((block) => (block as { type?: unknown })?.type === 'tool-addition' || (block as { type?: unknown })?.type === 'tool-removal')
     }
-    if (node.kind === 'command' && node.data['name'] === 'permission') return false
+    if (node.kind === 'command') {
+        const name = node.data['name']
+        // permission 上游显式剔除；export/feedback 在网页端是客户端动作（下载/反馈），不产生聊天行；
+        // 插件由宿主执行命令会落 command 事件，这里按同一「不可见」口径过滤。
+        if (name === 'permission' || name === 'export' || name === 'feedback') return false
+    }
     return true
 }
 
@@ -1523,6 +1529,25 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
             mkNode(`command:${id}`, 'command', id, seq, loc as ChatLocation, 'visible', command)
         }
     }
+    // 3.7 计划产物（上游 ui-plan 的 `submitted-plan`，**hidden**：不占行，只喂回合尾部的计划卡）
+    const submittedPlans = new Map<string, SubmittedPlan & { seq: number; time: number; loc: ChatLocation }>()
+    for (const event of events) {
+        const plan = submittedPlanOf(event)
+        if (plan === undefined || submittedPlans.has(plan.callId)) continue
+        const loc = locationBySeq.get(event.seq) ?? { kind: 'turn', turn: 0 }
+        submittedPlans.set(plan.callId, { ...plan, seq: event.seq, time: event.time, loc: loc as ChatLocation })
+    }
+    const turnPlans = new Map<number, SubmittedPlan[]>()
+    for (const [callId, plan] of submittedPlans) {
+        mkNode(`submitted-plan:${callId}`, 'submitted-plan', callId, plan.seq, plan.loc, 'hidden', {
+            callId, markdown: plan.markdown, title: plan.title, seq: plan.seq, time: plan.time,
+        })
+        const turn = plan.loc.kind === 'turn' || plan.loc.kind === 'step' ? plan.loc.turn : undefined
+        if (turn === undefined) continue
+        const list = turnPlans.get(turn) ?? []
+        list.push({ callId, markdown: plan.markdown, title: plan.title })
+        turnPlans.set(turn, list)
+    }
     for (const [compactionId, checkpoint] of compactionCheckpoints) {
         const summary = compactionSummaries.get(compactionId)
         const marker = compactSummary(summary, checkpoint)
@@ -1606,7 +1631,7 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
         presentations.set(turn, derivePresentation(timelineTurn, spec, turnNodeKeys.get(turn) ?? [], nodes))
     }
     // 呈现层不发布会话级那一桶（`turn: 0`）的分组：它没有回合级 `presentations`，也没人认领。
-    return { nodes, order, entries, groups, presentations, turnTimes, turnStats, turnPresented, turnChanges, todoBaselines: todo.baselines, todoSeed: todo.seed }
+    return { nodes, order, entries, groups, presentations, turnTimes, turnStats, turnPresented, turnPlans, turnChanges, todoBaselines: todo.baselines, todoSeed: todo.seed }
 }
 
 /** 增量折叠的断点：`prefix` = 最后一条 `turn/start` **之前**已定稿的完整模型；
@@ -1644,6 +1669,7 @@ function mergeModels(a: ChatNodeModel, b: ChatNodeModel): ChatNodeModel {
         turnTimes: new Map([...a.turnTimes, ...b.turnTimes]),
         turnStats: new Map([...a.turnStats, ...b.turnStats]),
         turnPresented: new Map([...a.turnPresented, ...b.turnPresented]),
+        turnPlans: new Map([...a.turnPlans, ...b.turnPlans]),
         turnChanges: new Map([...a.turnChanges, ...b.turnChanges]),
         // 两段的配对表按 id 合并（id 唯一，后段不会覆盖前段）；种子取"更靠后"的那个。
         todoBaselines: new Map([...a.todoBaselines, ...b.todoBaselines]),
@@ -1722,6 +1748,7 @@ export function buildChatNodesIncremental(events: readonly SessionEvent[], check
             turnTimes: byTurn(model.turnTimes),
             turnStats: byTurn(model.turnStats),
             turnPresented: byTurn(model.turnPresented),
+            turnPlans: byTurn(model.turnPlans),
             turnChanges: byTurn(model.turnChanges),
             // 前缀的配对表按**节点**切（与上面同一把尺）：节点 key 就含调用 id（`tool:<callId>`），
             // 所以用一次 `endsWith` 反查即可，不做 n×m 扫描。查不到就丢掉（边界处宁少不多）。

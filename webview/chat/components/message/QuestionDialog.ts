@@ -17,6 +17,8 @@ import { useState } from 'preact/hooks'
 import type { ChatStore } from '../../core/store/chat'
 import type { QuestionSpec } from '../../core/protocol'
 import { initialQuestionDraft, splitRecommended } from '../../core/question-draft'
+import { planReviewOf } from '../../core/plan-review'
+import { PlanReviewPanel } from './PlanReviewPanel'
 
 interface Draft {
   selected: string[]
@@ -48,6 +50,14 @@ export function QuestionDialog({ store }: { store: ChatStore }) {
   if (q === null && late === null) return null
 
   const questions: QuestionSpec[] = q?.questions ?? late?.questions ?? []
+  /**
+   * **计划审阅**（上游 `planReviewOf`）：plan-mode 的 ask 请求带 `intent.kind === 'plan-review'`
+   * 与计划正文（`detail`）→ 换成「计划待审」卡片；不满足形状的仍走下面的一题一屏流程。
+   */
+  const planReview = late === null && q !== null ? planReviewOf(questions) : undefined
+  if (planReview !== undefined && q !== null) {
+    return html`<${PlanReviewPanel} store=${store} review=${planReview} rpcId=${q.rpcId} sessionId=${q.sessionId} />`
+  }
   const current = questions[index]
   if (current === undefined) return null
   const draft: Draft = drafts[current.id] ?? initialQuestionDraft(current)

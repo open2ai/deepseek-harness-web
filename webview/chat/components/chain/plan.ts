@@ -11,6 +11,7 @@ import { renderMd } from '../../core/markdown'
 import type { ScrollEdges } from '../../core/scroll-edges'
 import { ContextInjectionRow } from '../message/ContextInjectionRow'
 import { CommandRow } from '../message/CommandRow'
+import { CompactionRow } from '../message/CompactionRow'
 import { RetryRow } from '../message/RetryRow'
 import { ReasoningRow } from './ReasoningRow'
 import { ToolRow } from './ToolRow'
@@ -103,7 +104,7 @@ export function chainItemNode(
     // **进行中的思考行照常预览**（与 `liveProcessDetail` 无关 —— 那是分组头实时细节的门）；
     // 已定稿的才看 `settledReasoningPreview`。
     const showPreview = live || ctx.store.settledReasoningPreview?.value !== false
-    return html`<${ReasoningRow} key=${item.key} item=${item} live=${live} showPreview=${showPreview} />`
+    return html`<${ReasoningRow} key=${item.key} item=${item} store=${ctx.store} live=${live} showPreview=${showPreview} />`
   }
   if (item.kind === 'context') {
     // **聊天区可见性按上游 0.1.7-alpha.1 起的口径**：普通上下文注入（召回 / 技能目录 / 快照 / notice…）
@@ -118,6 +119,10 @@ export function chainItemNode(
     // 保留在明细里（与工具交错的原位），片间边界也用它渲染同一个元素/样式。内容按 markdown 解析，
     // 判据与理由见 `chainProcText`。
     return chainProcText(item)
+  }
+  if (item.kind === 'compaction') {
+    // 手动压缩（上游 `manual-compaction` 当片成员）：与顶层压缩卡同一组件，标题 `compact`。
+    return html`<${CompactionRow} key=${item.key} row=${item as unknown as Extract<ChatRow, { kind: 'compaction' }>} store=${ctx.store} />`
   }
   if (item.kind === 'command') {
     // 命令行 / 手动压缩（上游 `command` / `manual-compaction` 节点当**片的成员**）：

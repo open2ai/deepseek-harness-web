@@ -10,6 +10,7 @@ import {
   commandTitle,
 } from '../../core/command-copy'
 import type { ChatRow } from '../../core/store/types'
+import { COMPACTION_RUNNING } from '../../core/compaction-copy'
 import { ShimmerText } from '../chain/ShimmerText'
 
 export function CommandRow({ row }: { row: Extract<ChatRow, { kind: 'command' }> }) {
@@ -17,9 +18,20 @@ export function CommandRow({ row }: { row: Extract<ChatRow, { kind: 'command' }>
   const state = commandState(row)
   const running = state === 'running'
   const text = row.outcome?.text
+  // `/compact` 还没有压缩检查点（命令未结算）时，上游摘要用「正在压缩…」而不是泛化的「执行中…」
+  const summary = row.outcome === undefined && row.name === 'compact' ? COMPACTION_RUNNING : commandSummary(row)
   const expandable = commandExpandable(row)
   const open = expandable && expanded
-  return html`<div class="command-row" data-state=${state}>
+  /**
+   * `/goal` 的指令回显：上游 ui-goal 的 `GoalCommandInputView` 为 `command/run` 单独投影一个
+   * 右对齐气泡（`/goal` 作为命令 chip、参数为普通文本），通用命令行（结果卡）照常在其下方。
+   */
+  const commandInput = row.name === 'goal'
+    ? html`<div class="command-input-row" data-command-input role="group" aria-label="指令输入">
+        <div class="command-input-stack"><div class="command-input-bubble"><span class="command-input-chip">/goal</span>${(row.args ?? '').trimEnd()}</div></div>
+      </div>`
+    : null
+  return html`${commandInput}<div class="command-row" data-state=${state}>
     <button
       class="command-head"
       type="button"
@@ -30,7 +42,7 @@ export function CommandRow({ row }: { row: Extract<ChatRow, { kind: 'command' }>
       <span class="command-icon codicon codicon-terminal" aria-hidden="true"></span>
       <span class="command-title">${commandTitle(row)}</span>
       <span class="command-sep" aria-hidden="true"></span>
-      <${ShimmerText} text=${commandSummary(row)} className="command-summary" active=${running} />
+      <${ShimmerText} text=${summary} className="command-summary" active=${running} />
     </button>
     ${open && text !== undefined ? html`<pre class="command-body">${text}</pre>` : null}
   </div>`

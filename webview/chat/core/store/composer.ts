@@ -35,6 +35,8 @@ export interface ComposerSlice {
     | 'insertText'
     | 'setText'
     | 'setCaret'
+    | 'setQuotes'
+    | 'setReferences'
   >
   /** 宿主草稿消息到达：并入输入框文本并触发焦点。 */
   appendDraft(draft: string | undefined): void
@@ -56,6 +58,8 @@ export interface ComposerSlice {
   removeQuote(index: number): void
   /** 清掉全部引用贴片（一键清除；发送成功时也会清）。 */
   clearQuote(): void
+  /** 全量替换引用列表（草稿还原 / 编辑器适配器用；`at` 会被夹进正文范围）。 */
+  setQuotes(quotes: readonly QuoteDraft[]): void
   /** 全量改写输入框文本（并**按 diff 平移**未发送引用的落点）。 */
   setText(next: string): void
   /** 记录输入框当前光标（textarea 的 selectionStart）。 */
@@ -180,8 +184,14 @@ export function createComposer(host: ChatHost): ComposerSlice {
     attachments.value = attachments.value.filter((a) => a.key !== key)
   }
   /** 添加一条 @ 引用贴片（label 用于显示，token 为发送时注入 prompt 的引用文本）。 */
-  function addRef(kind: RefChip['kind'], label: string, token: string, detail?: string): void {
-    refs.value = [...refs.value, { key: refKey++, kind, label, token, detail }]
+  function addRef(kind: RefChip['kind'], label: string, token: string, detail?: string): RefChip {
+    const chip: RefChip = { key: refKey++, kind, label, token, detail }
+    refs.value = [...refs.value, chip]
+    return chip
+  }
+  /** 编辑器内联引用是权威列表：订阅后整表替换（删除 chip 会同步到这里）。 */
+  function setReferences(next: readonly RefChip[]): void {
+    refs.value = [...next]
   }
   const removeRef = (key: number): void => {
     refs.value = refs.value.filter((r) => r.key !== key)
@@ -302,6 +312,13 @@ export function createComposer(host: ChatHost): ComposerSlice {
     quotes.value = []
   }
 
+  /** 全量替换引用（草稿还原/适配器同步用）；`at` 夹进当前正文长度，文本非空才收。 */
+  function setQuotes(next: readonly QuoteDraft[]): void {
+    quotes.value = next
+      .map((quote) => ({ text: quote.text.trim(), at: Math.max(0, Math.min(quote.at, text.value.length)) }))
+      .filter((quote) => quote.text !== '')
+  }
+
   /** 已发出、尚未被确认的那几次提交的内容（键 = 提交标识）；失败时据此还原输入区。 */
   const sentDrafts = new Map<string, { text: string; images: ImageAttachment[]; attachments: StagedFile[]; refs: RefSnap[] }>()
 
@@ -352,6 +369,8 @@ export function createComposer(host: ChatHost): ComposerSlice {
       readImageFile,
       setText,
       setCaret,
+      setQuotes,
+      setReferences,
     },
     receiveUpload,
     appendDraft,
@@ -361,6 +380,7 @@ export function createComposer(host: ChatHost): ComposerSlice {
     setQuote,
     removeQuote,
     clearQuote,
+    setQuotes,
     setText,
     setCaret,
   }

@@ -5,6 +5,7 @@ import { TurnStats } from '../TurnStats'
 import { FeedbackActions } from './FeedbackActions'
 import { Chain } from '../chain/Chain'
 import { Deliverables } from './Deliverables'
+import { PlanArtifacts } from './PlanArtifacts'
 import { MessageBody } from './MessageBody'
 import { RowMeta } from './meta'
 import { TurnNoticeRow } from './TurnNoticeRow'
@@ -85,6 +86,7 @@ export function AssistantRow({ row, store, latest, turnTail, ownsHead, tailNotic
     ${tailNotices !== undefined && tailNotices.length > 0
       ? tailNotices.map((notice) => html`<${TurnNoticeRow} key=${notice.key} row=${notice} />`)
       : null}
+    ${row.plans !== undefined && row.plans.length > 0 ? html`<${PlanArtifacts} plans=${row.plans} store=${store} />` : null}
     <${Deliverables} row=${row} store=${store} />
     ${/* 动作条（时间/复制/反馈/分叉/用量用时）的**唯一门控是「有没有定稿的回答锚点」**（`row.seq`），
          不是「回合结束了没有」。与上游同口径（`TurnTailNodeView.tsx:27`）：被终止的回合若没产出定稿回答，

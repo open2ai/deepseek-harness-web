@@ -247,6 +247,11 @@ dsh.onContext = (sessionId, value) => {
 // 投影一变就推一份当前值 —— 输入框下方那两张卡据此**跟着流式实时变**（见 dshService.onProjections）。
 dsh.onProjections = (sessionId, values, goalActivation) => {
     postToChats({ type: 'projections', sessionId, values, goalActivation });
+    // 「随对话更新的标题」：宿主插件把最新标题写进 title 投影 —— 只对**当前会话**生效，
+    // 且空值（新会话/标题被清）回退默认名。
+    if (sessionId === dsh.currentSession()) {
+        applySessionTitle(typeof values['title'] === 'string' ? values['title'] : '');
+    }
 };
 // 审批/提问：宿主侧常驻（见 dshService.ensureAskSubscription）。缓存最后一帧，新 webview ready 时重放。
 dsh.onApproval = (a) => {
@@ -414,6 +419,24 @@ function clearPendingAsk(): void {
     pendingAskRpcId = undefined;
     if (rpcId !== undefined) {
         postToChats({ type: 'questionClosed', rpcId });
+    }
+}
+
+/**
+ * 会话标题实时刷新（上游实验插件「随对话更新的标题」的宿主投影 `title`）。
+ *
+ * VS Code 侧没有"页内顶栏"，标题的可见位置是：
+ *   · 编辑器区聊天面板的**页签标题**（`panel.title`）；
+ *   · 侧边栏 webview 视图的**副标题**（`view.description`，原生 view 头第二行）。
+ * 两处都跟随投影里的 title 变；空标题回退默认名（新会话还没生成标题时）。
+ */
+function applySessionTitle(title: string): void {
+    const clean = title.trim();
+    if (chatPanel !== undefined) {
+        chatPanel.title = clean === '' ? 'DeepSeek Harness' : clean;
+    }
+    if (launcherView !== undefined) {
+        launcherView.description = clean === '' ? undefined : clean;
     }
 }
 
@@ -617,7 +640,7 @@ async function loadChatHtml(
          * 界面一点没变」，而宿主侧改动却生效，最容易被误判成热更新坏了。
          */
         let stamp = 0;
-        for (const f of ['chat.js', 'chat.css', 'index.html']) {
+        for (const f of ['chat.js', 'chat.css', 'index.html', 'lexical.js']) {
             try {
                 stamp = Math.max(stamp, (await vscode.workspace.fs.stat(vscode.Uri.joinPath(chatRoot, f))).mtime);
             } catch {
@@ -628,6 +651,10 @@ async function loadChatHtml(
             const asset = vscode.Uri.joinPath(chatRoot, p);
             return `${attr}="${webview.asWebviewUri(asset)}?v=${String(stamp)}"`;
         });
+        // 可选编辑器 chunk：由宿主给出**确定的**资源 URI（不靠 document.baseURI 猜相对路径），
+        // 既避免资源 scheme/路径差异，也让失败可被页面识别并在需要时回退。
+        const lexicalUri = `${String(webview.asWebviewUri(vscode.Uri.joinPath(chatRoot, 'lexical.js')))}?v=${String(stamp)}`
+        html = html.replace('<head>', `<head><meta name="dsh-composer-editor" content="${lexicalUri}">`)
         // 原生/自绘 标题栏通道：原生标题栏模式时 index.html 的 CSS 让 #titlebar 首帧即 display:none
         html = html.replace('<body>', `<body ${TITLEBAR_MODE_ATTR}="${titlebarMode}">`);
         const csp =
@@ -1555,6 +1582,39 @@ function setupChatWebview(
             })();
         } else if (msg.type === 'openFile') {
             void openFileInEditor(msg.path, msg.line, msg.cwd);
+        } else if (msg.type === 'cotTranslationLimitsReq') {
+            void (async () => {
+                const limits = await dsh.cotTranslationLimits();
+                await webview.postMessage({
+                    type: 'cotTranslationLimitsRep',
+                    requestId: msg.requestId,
+                    ok: limits !== undefined,
+                    ...(limits === undefined ? {} : { limits }),
+                });
+            })();
+        } else if (msg.type === 'cotTranslationTranslateReq') {
+            void (async () => {
+                const text = typeof msg.text === 'string' ? msg.text : '';
+                const targetLanguage = typeof msg.targetLanguage === 'string' ? msg.targetLanguage : 'auto';
+                const translated = await dsh.cotTranslationTranslate(
+                    text,
+                    targetLanguage,
+                    typeof msg.provider === 'string' && msg.provider !== '' ? msg.provider : undefined
+                );
+                await webview.postMessage({
+                    type: 'cotTranslationTranslateRep',
+                    requestId: msg.requestId,
+                    ok: translated !== undefined,
+                    ...(translated === undefined ? {} : { text: translated }),
+                });
+            })();
+        } else if (msg.type === 'openPlanDocument') {
+            void openPlanInEditor(
+                globalStorageUri,
+                typeof msg.title === 'string' ? msg.title : '计划',
+                typeof msg.markdown === 'string' ? msg.markdown : '',
+                typeof msg.callId === 'string' ? msg.callId : undefined
+            );
         } else if (msg.type === 'openAttachment') {
             /**
              * **按附件 id 在编辑区打开附件**（用户消息 / 图片卡里的图与文件只有内容寻址 id，没有本地路径）。
@@ -2155,6 +2215,31 @@ function sniffImageMediaType(bytes: Buffer): string {
  * @param line - 1 起的行号（仅文本文件用；图片忽略）。
  * @param cwd - 会话工作区根（相对路径的基准）；缺省用当前 VS Code 文件夹。
  */
+/**
+ * **把计划 Markdown 在编辑区打开**（上游「打开计划」在右侧文档页签；VS Code 的等价落点是
+ * 内置 Markdown 预览）。落到 `globalStorageUri/plans/<callId>.md` 再 `markdown.showPreview`，
+ * 这样渲染、搜索、大纲、滚动都是 VS Code 原生能力；命令不可用时退回普通文本编辑器。
+ * @param storage - 扩展的 globalStorageUri
+ * @param title - 计划标题（仅作日志/兜底文案；文件名优先用 callId）
+ * @param markdown - 计划正文
+ * @param callId - 计划调用 id（决定稳定的临时文件名）
+ */
+async function openPlanInEditor(storage: vscode.Uri, title: string, markdown: string, callId?: string): Promise<void> {
+    const dir = vscode.Uri.joinPath(storage, 'plans')
+    await vscode.workspace.fs.createDirectory(dir)
+    const stem = (callId !== undefined && callId !== '' ? callId : `${title}-${String(Date.now())}`)
+        .replace(/[^A-Za-z0-9._-]/g, '_')
+        .slice(0, 120)
+    const file = vscode.Uri.joinPath(dir, `${stem === '' ? 'plan' : stem}.md`)
+    await vscode.workspace.fs.writeFile(file, Buffer.from(markdown, 'utf8'))
+    try {
+        await vscode.commands.executeCommand('markdown.showPreview', file)
+        return
+    } catch {
+        /* 没有内置 Markdown 扩展 / 命令被禁用 → 交给通用编辑器 */
+    }
+    await openFileInEditor(file.fsPath)
+}
 async function openFileInEditor(p: string, line?: number, cwd?: string): Promise<void> {
     const base = cwd && cwd !== '' ? cwd : (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '');
     const abs = path.isAbsolute(p) ? p : path.resolve(base, p);

@@ -6,7 +6,7 @@
 // （见 `components/message/PendingSteeringRow`），不在这张卡里重复显示。
 // 布局照既有卡片（见 TodoCard）：一行头（图标 + 计数 + 折叠箭头），展开才出列表；单条时直接显示那一行。
 import { html } from 'htm/preact'
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import type { ChatStore } from '../core/store/chat'
 import type { QueueItemView } from '../core/protocol'
 import type { PendingAttachment, PendingSubmission } from '../core/store/types'
@@ -38,10 +38,41 @@ export function QueueCard({ store }: { store: ChatStore }) {
   // 默认折叠：队列是过渡态，多条时不该常驻占掉输入区上方的空间
   const [collapsed, setCollapsed] = useState(true)
   const total = items.length + sending.length
+  const anyBusy = busyId !== null
+  /**
+   * 排队项里的图片：优先内联预览（发送中那条），否则按 attachmentId 向附件层取字节
+   *（上游 QueueDock 用 `loadImage` 渲染真图；这里同一份懒取缓存，未就绪先回退文字标签）。
+   */
+  // 守卫/测试里会喂 partial store（只有队列切片）：附件缓存缺省按空表处理
+  const cache = store.attachmentCache?.value ?? {}
+  const imageOf = (attachment: QueueAttachment): string | null => {
+    if (attachment.kind !== 'image') return null
+    if ('preview' in attachment && attachment.preview !== undefined) {
+      return `data:${attachment.preview.mediaType};base64,${attachment.preview.data}`
+    }
+    if (!('attachmentId' in attachment) || typeof attachment.attachmentId !== 'string' || attachment.attachmentId === '') return null
+    const entry = cache[attachment.attachmentId]
+    return entry !== undefined && entry.state === 'ready' ? `data:${entry.mediaType};base64,${entry.data}` : null
+  }
+  const imageRefsKey = items
+    .flatMap((item) => (item.attachments ?? []).map((a) => ('attachmentId' in a ? a.attachmentId ?? '' : '')))
+    .join(',')
+  useEffect(() => {
+    for (const item of items) {
+      for (const attachment of item.attachments ?? []) {
+        if (attachment.kind !== 'image' || !('attachmentId' in attachment) || attachment.attachmentId === undefined) continue
+        store.requestAttachment?.({
+          attachmentId: attachment.attachmentId,
+          ...(attachment.name === undefined ? {} : { name: attachment.name }),
+          ...(attachment.bytes === undefined ? {} : { bytes: attachment.bytes }),
+        })
+      }
+    }
+    // 依赖只取 id 串：条目数组每帧都是新对象
+  }, [imageRefsKey, store])
   if (total === 0) {
     return null
   }
-  const anyBusy = busyId !== null
   // 单条、或正在编辑、或用户展开 → 出列表
   const expanded = total === 1 || !collapsed || editing !== null
 
@@ -67,9 +98,12 @@ export function QueueCard({ store }: { store: ChatStore }) {
                 <span class="codicon codicon-list-ordered queue-glyph" aria-hidden="true"></span>
                 <span class="queue-main">
                   ${atts.length > 0
-                    ? html`<span class="queue-atts">${atts.map(
-                        (a, i) => html`<span class="queue-att" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`}>${attachmentLabel(a)}</span>`
-                      )}</span>`
+                    ? html`<span class="queue-atts">${atts.map((a, i) => {
+                        const src = imageOf(a)
+                        return src !== null
+                          ? html`<img class="queue-thumb" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`} src=${src} alt=${a.name ?? '排队消息图片'} title=${a.name ?? ''} />`
+                          : html`<span class="queue-att" key=${`${a.kind}:${a.name ?? ''}:${String(i)}`}>${attachmentLabel(a)}</span>`
+                      })}</span>`
                     : null}
                   ${editingThis
                     ? html`<input class="queue-editor" value=${editing.text} autofocus aria-label="编辑排队消息"

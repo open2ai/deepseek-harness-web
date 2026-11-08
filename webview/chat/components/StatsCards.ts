@@ -162,7 +162,7 @@ export function StatsCards({ store }: { store: ChatStore }) {
 
   return html`<div class="stats-cards" ref=${rootRef}>
     ${steps > 0
-      ? card('time', 'dashboard', '会话统计', timeTitle, tps !== '' ? `${tps} tok/s` : '', timeRows)
+      ? card('time', 'dashboard', '会话统计', timeTitle, tps !== '' ? `${tps} tok/s` : '', timeRows, countsText)
       : null}
     ${hasTokens
       ? card('usage', 'database', 'Token 用量', usageTitle, hit !== '' ? `缓存命中 ${hit}%` : '', usageRows,

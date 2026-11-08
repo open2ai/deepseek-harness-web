@@ -107,8 +107,8 @@ export function GoalBar({ store }: { store: ChatStore }) {
   const label = goal.phase === 'active' && activation === 'disarmed'
     ? ACTIVE_DISARMED_LABEL
     : PHASE_LABEL[goal.phase] ?? goal.phase
-  /** 恢复：上游 `showResume = phase === 'paused' || (phase === 'active' && activation === 'disarmed')` */
-  const showResume = goal.phase === 'paused' || (goal.phase === 'active' && activation === 'disarmed')
+  /** 恢复：上游 `showResume = phase !== 'active' || activation === 'disarmed'`（**blocked 也有恢复**） */
+  const showResume = goal.phase !== 'active' || activation === 'disarmed'
   /** 暂停：上游只在 **`active` + `armed`** 时给（激活还不知道时两边都不给，不是"默认给暂停"） */
   const showPause = goal.phase === 'active' && activation === 'armed'
   return html`<div class="goal-bar" data-goal-bar>

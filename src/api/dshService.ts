@@ -370,6 +370,13 @@ function modelBadgeOf(raw: unknown): { text: string; tone: string } | undefined 
     return { text, tone: typeof badge.tone === 'string' ? badge.tone : 'neutral' };
 }
 
+/** `cotTranslation/limits` 的返回：翻译服务的接收偏好与单请求上限。 */
+export interface DshCotTranslationLimits {
+    maxTextChars: number;
+    preferences: { provider: string; targetLanguage: string };
+    availableProviders: string[];
+}
+
 export class DshService {
     /**
      * 事件窗口（分页）：**它才是窗口的真正持有者**，`streamEvents` 只是它的只读视图。
@@ -2615,6 +2622,11 @@ export class DshService {
         this.stopTurnWatch();
     }
 
+    /** 当前会话 id（纯读，不创建新会话）。标题实时刷新用它判断"是不是当前会话"。 */
+    currentSession(): string | undefined {
+        return this.currentSessionId;
+    }
+
     async getSession(): Promise<string> {
         if (this.currentSessionId) {
             return this.currentSessionId;
@@ -3427,6 +3439,58 @@ export class DshService {
             this.seedProjections(projections);
         } catch {
             // 服务未就绪：控制流随后会推变化
+        }
+    }
+
+    /**
+     * dsh 实验插件「思考过程机器翻译」的偏好与单请求上限（`cotTranslation/limits`）。
+     * 插件没启用/服务没挂时 remote 会失败 → 返回 undefined（页面据此**不显示翻译入口**）。
+     */
+    async cotTranslationLimits(): Promise<DshCotTranslationLimits | undefined> {
+        try {
+            const raw = await this.call<DshCotTranslationLimits>('cotTranslation/limits', {}, 10_000);
+            if (typeof raw.maxTextChars !== 'number' || raw.maxTextChars <= 0) {
+                return undefined;
+            }
+            if (raw.preferences === null || typeof raw.preferences !== 'object') {
+                return undefined;
+            }
+            if (typeof raw.preferences.provider !== 'string' || raw.preferences.provider === '') {
+                return undefined;
+            }
+            return {
+                maxTextChars: raw.maxTextChars,
+                preferences: {
+                    provider: raw.preferences.provider,
+                    targetLanguage: typeof raw.preferences.targetLanguage === 'string' ? raw.preferences.targetLanguage : 'auto',
+                },
+                availableProviders: Array.isArray(raw.availableProviders)
+                    ? raw.availableProviders.filter((item): item is string => typeof item === 'string')
+                    : [raw.preferences.provider],
+            };
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
+     * 翻译一段展开的思考内容（`cotTranslation/translate`）。
+     * 带当前 `sessionId` 以复用宿主按会话保存的译文缓存；失败返回 undefined（页面显示原文 + 重试）。
+     */
+    async cotTranslationTranslate(text: string, targetLanguage: string, provider?: string): Promise<string | undefined> {
+        if (text === '') {
+            return undefined;
+        }
+        try {
+            const result = await this.call<unknown>('cotTranslation/translate', {
+                text,
+                targetLanguage,
+                ...(provider === undefined ? {} : { provider }),
+                ...(this.currentSessionId === undefined ? {} : { sessionId: this.currentSessionId }),
+            }, 60_000);
+            return typeof result === 'string' ? result : undefined;
+        } catch {
+            return undefined;
         }
     }
 

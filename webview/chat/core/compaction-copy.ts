@@ -16,6 +16,9 @@ export const COMPACTION_UNAVAILABLE = '压缩摘要不可用'
 /** 手动压缩卡片的标题（上游 `message.compaction.commandTitle`）—— 命令行那一支用。 */
 export const COMPACTION_COMMAND_TITLE = 'compact'
 
+/** `/compact` 未结算且还没有检查点时的摘要（上游 `message.compaction.running`）。 */
+export const COMPACTION_RUNNING = '正在压缩…'
+
 /**
  * 摘要行文案：**两项计数都有**时用带数字的文案，否则按"摘要能不能展开"给提示。
  *
@@ -24,12 +27,14 @@ export const COMPACTION_COMMAND_TITLE = 'compact'
  */
 export function compactionSummaryText(row: {
     summary?: string
+    fallbackSummary?: string
     shadowedItemCount?: number
     shadowedTokenCount?: number
 }): string {
     if (typeof row.shadowedItemCount === 'number' && typeof row.shadowedTokenCount === 'number') {
         return `已压缩 ${String(row.shadowedItemCount)} 条历史记录（约 ${String(row.shadowedTokenCount)} tokens）`
     }
+    if (row.fallbackSummary !== undefined && row.fallbackSummary.trim() !== '') return row.fallbackSummary
     return row.summary === undefined ? COMPACTION_UNAVAILABLE : COMPACTION_EXPAND
 }
 

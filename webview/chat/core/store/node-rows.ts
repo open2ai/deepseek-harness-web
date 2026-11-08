@@ -54,9 +54,9 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
             // 已回答提问（上游 answered-user-question）：右对齐问答气泡，时间/复制由行自渲染。
             return chatRowOfQuestionReply(r)
         case 'command':
-            return { kind: 'command', key: keyOf(r.key), commandId: '', name: r.name, ...(r.outcome === undefined ? {} : { outcome: r.outcome as { kind: 'success' | 'error'; text?: string } }) }
+            return { kind: 'command', key: keyOf(r.key), commandId: '', name: r.name, ...(r.args === undefined || r.args === null ? {} : { args: r.args }), ...(r.outcome === undefined ? {} : { outcome: r.outcome as { kind: 'success' | 'error'; text?: string } }) }
         case 'compaction':
-            return { kind: 'compaction', key: keyOf(r.key), compactionId: '', seq: 0, ...(typeof r.summary === 'string' ? { summary: r.summary } : {}), ...(typeof r.shadowedItemCount === 'number' ? { shadowedItemCount: r.shadowedItemCount } : {}), ...(typeof r.shadowedTokenCount === 'number' ? { shadowedTokenCount: r.shadowedTokenCount } : {}) }
+            return { kind: 'compaction', key: keyOf(r.key), compactionId: '', seq: 0, ...(typeof r.title === 'string' ? { title: r.title } : {}), ...(typeof r.fallbackSummary === 'string' ? { fallbackSummary: r.fallbackSummary } : {}), ...(typeof r.summary === 'string' ? { summary: r.summary } : {}), ...(typeof r.shadowedItemCount === 'number' ? { shadowedItemCount: r.shadowedItemCount } : {}), ...(typeof r.shadowedTokenCount === 'number' ? { shadowedTokenCount: r.shadowedTokenCount } : {}) }
         case 'retry':
             // 末次尝试的 `mode`/`maxRetries`/`delayMs`/`failure` 必须一路带到行上（`RetryRow` 读它们）：
             // 少搬一项就是「(1/∞)」「重试延迟：0毫秒」那种与网页端不一致
@@ -102,6 +102,7 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
                 ...(r.status === undefined ? {} : { status: r.status }),
                 ...(r.stats === undefined ? {} : { usageRaw: r.stats }),
                 ...(r.presentedFiles === undefined ? {} : { presentedFiles: r.presentedFiles }),
+          ...(r.plans === undefined ? {} : { plans: r.plans }),
                 ...(r.changesSeq === undefined ? {} : { changesSeq: r.changesSeq }),
                 ...(r.changesSeq !== undefined && changesSummary?.[String(r.changesSeq)] != null ? { changesSummary: changesSummary[String(r.changesSeq)] as DshChangesSummary } : {}),
                 ...(scheduleCardsOf(r.scheduleResults) === undefined ? {} : { scheduleCreated: scheduleCardsOf(r.scheduleResults) }),
@@ -176,7 +177,11 @@ function toChainItemFromNode(c: RenderChainItem): DshTurnProcessItem {
     }
     // 命令行 / 手动压缩进链（上游把两者当片的成员）：事实原样搬，渲染与顶层那条共用 `CommandRow`。
     if (c.kind === 'command') {
-        return { kind: 'command', key: keyOf(c.key), name: c.name, ...(c.outcome === undefined ? {} : { outcome: c.outcome as { kind: 'success' | 'error'; text?: string } }) }
+        return { kind: 'command', key: keyOf(c.key), name: c.name, ...(c.args === undefined || c.args === null ? {} : { args: c.args }), ...(c.outcome === undefined ? {} : { outcome: c.outcome as { kind: 'success' | 'error'; text?: string } }) }
+    }
+    // 手动压缩进链（`/compact`）：与自动压缩同一组件 `CompactionRow`。
+    if (c.kind === 'compaction') {
+        return { kind: 'compaction', key: keyOf(c.key), ...(c.title === undefined ? {} : { title: c.title }), ...(c.summary === undefined ? {} : { summary: c.summary }), ...(c.fallbackSummary === undefined ? {} : { fallbackSummary: c.fallbackSummary }), ...(c.shadowedItemCount === undefined ? {} : { shadowedItemCount: c.shadowedItemCount }), ...(c.shadowedTokenCount === undefined ? {} : { shadowedTokenCount: c.shadowedTokenCount }) }
     }
     // 模型重试链进过程链（上游 `groupTree:'process'`）：整份事实原样搬，渲染与顶层那条共用 `RetryRow`。
     if (c.kind === 'retry') {

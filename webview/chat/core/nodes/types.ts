@@ -136,6 +136,8 @@ export interface ChatNodeModel {
     turnStats: Map<number, Record<string, unknown>>
     /** 每回合模型声明的交付文件（deliverables/presented，同路径留最后声明）。 */
     turnPresented: Map<number, Array<{ path: string; description?: string }>>
+    /** 本回合提交的计划（上游 `submitted-plan` hidden 节点 → turn-tail 计划卡）。 */
+    turnPlans: Map<number, Array<{ callId: string; markdown: string; title: string }>>
     /** 每回合的改动序号（workspace/changes 的 seq）。 */
     turnChanges: Map<number, number>
     /**

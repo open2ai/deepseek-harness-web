@@ -27,6 +27,8 @@ import { QueueCard } from './QueueCard'
 import { ContextMeter } from './ContextMeter'
 import { StatsCards } from './StatsCards'
 import { GoalBar } from './goal/GoalBar'
+import { ComposerInput } from '../composer/ui/ComposerInput'
+import type { ComposerInputAccess } from '../composer'
 
 // ---------------- Welcome ----------------
 function Welcome({ store }: { store: ChatStore }) {
@@ -89,7 +91,7 @@ function Popup({ store }: { store: ChatStore }) {
   const modeRef = useRef<HTMLDivElement | null>(null)
   const modeCount = sel.modeOptions.length
   const modeActive = modeCount === 0 ? 0 : Math.min(Math.max(modeIdx, 0), modeCount - 1)
-  // 打开时定位到当前模式，并把 DOM 焦点交给容器——否则按键仍落在 textarea 上，收不到 ↑↓。
+  // 打开时定位到当前模式，并把 DOM 焦点交给容器——否则按键仍落在编辑器上，收不到 ↑↓。
   // 依赖只取 open：模式目录中途刷新(chatInfo)不重置用户已移动的光标
   useEffect(() => {
     if (open !== 'mode') return
@@ -267,53 +269,6 @@ function Popup({ store }: { store: ChatStore }) {
 export function Composer({ store }: { store: ChatStore }) {
   const text = store.text.value
   const processing = store.processing.value
-  /** 选中文本引用（0.2.2 quote）：贴片**列表**挂在输入区上方，发送时才拼成引用块，每条可单独清除。 */
-  const quoteValues = store.quotes.value
-  const quotePreviewOf = (value: string): string => (value.length > 80 ? `${value.slice(0, 80)}…` : value)
-  // 悬停引用贴片时用**自绘 tooltip**（原生 title 在浅/深色主题下都跟 VSCode 不搭）。
-  // 只有鼠标在**贴片文字上**才出；移到行尾「清除引用」按钮上不出（否则挡住点击）。
-  // 位置按贴片在视口里的位置**固定定位 + 上下翻转 + 视口夹取**；内容超过可用高度时纵向滚动。
-  const [quoteTip, setQuoteTip] = useState<
-    { left: number; width: number; maxHeight: number; top?: number; bottom?: number; text: string } | null
-  >(null)
-  /** 贴片→tooltip 之间有一小段空隙，用短延迟兜住；移进 tooltip 就取消，方便滚动。 */
-  const quoteTipTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const cancelQuoteTipTimer = (): void => {
-    if (quoteTipTimer.current !== undefined) {
-      clearTimeout(quoteTipTimer.current)
-      quoteTipTimer.current = undefined
-    }
-  }
-  const scheduleHideQuoteTip = (): void => {
-    cancelQuoteTipTimer()
-    quoteTipTimer.current = setTimeout(() => {
-      quoteTipTimer.current = undefined
-      setQuoteTip(null)
-    }, 200)
-  }
-  useEffect(() => cancelQuoteTipTimer, [])
-  const showQuoteTip = (e: MouseEvent, text: string): void => {
-    cancelQuoteTipTimer()
-    const chip = e.currentTarget as unknown as HTMLElement
-    let rect: DOMRect = { left: 0, top: 0, bottom: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
-    try {
-      rect = chip.getBoundingClientRect()
-    } catch {
-      // 非浏览器环境（脚本级 DOM 守卫）没有布局信息：退回 0 坐标，只验证结构
-    }
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    const width = Math.min(560, Math.max(240, vw - 24))
-    const left = Math.min(Math.max(rect.left, 12), Math.max(12, vw - width - 12))
-    const spaceAbove = rect.top - 12
-    const spaceBelow = vh - rect.bottom - 12
-    // 上方够就向上弹（贴近输入区的引用贴片通常在底部，向上空间更大）；否则向下
-    const above = spaceAbove >= 160 || spaceAbove >= spaceBelow
-    const maxHeight = Math.max(96, Math.min(vh * 0.6, above ? spaceAbove : spaceBelow))
-    setQuoteTip(above
-      ? { left, width, maxHeight, bottom: vh - rect.top + 6, text }
-      : { left, width, maxHeight, top: rect.bottom + 6, text })
-  }
   // 「空」= 草稿 + 附件 + 图片 + 引用**全都空**（与上游同一判据）
   const empty =
     text.trim() === '' &&
@@ -353,54 +308,16 @@ export function Composer({ store }: { store: ChatStore }) {
         : '发送消息'
   const sel = store.sel.value
   const focusTick = store.focusTick.value
-  const taRef = useRef<HTMLTextAreaElement | null>(null)
-  const refRowRef = useRef<HTMLDivElement | null>(null)
+  /** 编辑器的「文本+光标」访问（触发器菜单/退格贴片/参数提示用）。 */
+  const editorAccessRef = useRef<ComposerInputAccess | null>(null)
 
-  // draft 到来 → 聚焦
+  // draft 到来 → 聚焦（编辑器 access 由 ComposerInput 挂载后交回）
   useEffect(() => {
-    if (focusTick > 0) taRef.current?.focus()
+    if (focusTick > 0) editorAccessRef.current?.focus()
   }, [focusTick])
 
-  // 贴片叠在首行行首：按 #refRow 实际宽度只缩进 textarea 的第一行(text-indent)，
-  // 后续行/回车换行自然回到最左；垂直方向按 textarea 实测行高+上内距把贴片中心对准首行文字中心
-  useEffect(() => {
-    const ta = taRef.current
-    if (!ta) return
-    const row = refRowRef.current
-    if (row) {
-      const w = Math.min(row.scrollWidth, Math.max(0, ta.clientWidth * 0.62))
-      ta.style.textIndent = `${w}px`
-      const cs = getComputedStyle(ta)
-      let lh = parseFloat(cs.lineHeight)
-      if (!Number.isFinite(lh) || lh <= 0) lh = Math.round((parseFloat(cs.fontSize) || 13) * 1.4)
-      const pt = parseFloat(cs.paddingTop)
-      const chipH = row.firstElementChild ? (row.firstElementChild as HTMLElement).offsetHeight : 20
-      row.style.top = `${Math.max(4, Math.round(pt + lh / 2 - chipH / 2))}px`
-    } else {
-      ta.style.textIndent = ''
-    }
-  })
-
-  // 点击外部关闭弹窗（触发器菜单由 useTriggerMenu 自管关闭）
-  useEffect(() => {
-    const onClick = (e: MouseEvent): void => {
-      const t = e.target as Node
-      // 事件路径在**派发时**取（composedPath）：只认 `el.contains(target)` 会漏判 ——
-      // 点击弹窗内的入口若触发了重渲染（如模型弹窗从一级换到二级），那个按钮此刻已被卸载，
-      // target 脱离文档 → contains 为假 → 被误判成「点在弹窗外」而立刻关掉弹窗
-      // （真机现象：点一级入口后二级没出现，弹窗直接消失）。
-      const path = typeof e.composedPath === 'function' ? e.composedPath() : []
-      const inSel = (id: string): boolean => {
-        const el = document.getElementById(id)
-        return !!el && (el.contains(t) || path.includes(el))
-      }
-      if (inSel('permPopup') || inSel('modelPopup') || inSel('modePopup') || inSel('permBtn') || inSel('modelBtn') || inSel('modeBtn') || inSel('triggerPopup')) return
-      if (store.openPopup.value) store.closePopups()
-    }
-    document.addEventListener('click', onClick)
-    return () => document.removeEventListener('click', onClick)
-  }, [])
-
+  // 输入触发器菜单："/" 斜杠 与 "@" 引用各自独立成模块(core/trigger/*.ts)；加新触发只需在数组追加一项
+  // 文本+光标访问只走编辑器（Lexical 是输入区唯一实现）。
   const permName = (): string => {
     const s = store.sel.value
     const found = s.permOptions.find((o) => o.value === s.currentPerm)
@@ -444,7 +361,24 @@ export function Composer({ store }: { store: ChatStore }) {
   }
 
   // 输入触发器菜单："/" 斜杠 与 "@" 引用各自独立成模块(core/trigger/*.ts)；加新触发只需在数组追加一项
-  const trigger = useTriggerMenu([slashTrigger(store), atTrigger(store)], store, taRef)
+  const triggerInput: ComposerInputAccess = {
+    getText: () => editorAccessRef.current?.getText() ?? store.text.value,
+    getCaret: () => editorAccessRef.current?.getCaret() ?? store.caret.value,
+    setCaret: (pos) => {
+      editorAccessRef.current?.setCaret(pos)
+      store.setCaret(pos)
+    },
+    replaceRange: (start, end, value) => {
+      if (editorAccessRef.current !== null) editorAccessRef.current.replaceRange(start, end, value)
+      else store.setText(store.text.value.slice(0, start) + value + store.text.value.slice(end))
+      store.setCaret(start + value.length)
+    },
+    focus: () => {
+      editorAccessRef.current?.focus()
+    },
+    contains: (node) => editorAccessRef.current?.contains(node) === true,
+  }
+  const trigger = useTriggerMenu([slashTrigger(store), atTrigger(store)], store, triggerInput)
 
   // 参数阶段占位 hint：输入恰为「/命令 」时，在光标后以灰色显示该命令 input.hint（如 <text>）
   const slashHint = ((): string => {
@@ -458,28 +392,16 @@ export function Composer({ store }: { store: ChatStore }) {
   const [ghostX, setGhostX] = useState(0)
   const [ghostY, setGhostY] = useState(0)
   useEffect(() => {
-    const el = taRef.current
-    if (!slashHint || !el) {
+    const editorRect = editorAccessRef.current?.caretRect?.()
+    if (!slashHint || editorRect === undefined || editorRect === null) {
       setGhostX(0)
       setGhostY(0)
       return
     }
-    const cs = getComputedStyle(el)
-    const probe = document.createElement('span')
-    probe.style.cssText =
-      `position:absolute;visibility:hidden;white-space:pre;pointer-events:none;` +
-      `font-family:${cs.fontFamily};font-size:${cs.fontSize};line-height:${cs.lineHeight};`
-    probe.textContent = el.value
-    document.body.appendChild(probe)
-    const w = probe.getBoundingClientRect().width
-    probe.remove()
-    const box = el.closest('#inputbox')
-    const er = el.getBoundingClientRect()
-    const br = box?.getBoundingClientRect()
-    setGhostX((br ? er.left - br.left : 0) + parseFloat(cs.paddingLeft) + w)
-    setGhostY((br ? er.top - br.top : 0) + parseFloat(cs.paddingTop))
+    const box = document.getElementById('inputbox')?.getBoundingClientRect()
+    setGhostX((box ? editorRect.left - box.left : 0) + 2)
+    setGhostY(box ? editorRect.top - box.top : 0)
   }, [slashHint, text])
-
   // 已 claim 的斜杠命令行（/命令 参数…，首词命中带 hint 的 host 命令）：普通 Enter 直接执行（对齐上游）
   const argCommand = ((): string | null => {
     const v = text
@@ -522,7 +444,7 @@ export function Composer({ store }: { store: ChatStore }) {
     switch (decided.action) {
       case 'none':
       case 'newline':
-        // `newline` 什么都不做 = 交给 textarea 原生换行；`none`（如空草稿下的发送键）也不拦
+        // `newline` 什么都不做 = 交给编辑器换行；`none`（如空草稿下的发送键）也不拦
         return
       case 'menu-pick':
         // 交给触发菜单自己处理（它已经处理过一轮；这里只保证不被当成发送）
@@ -543,12 +465,11 @@ export function Composer({ store }: { store: ChatStore }) {
     }
   }
 
-  /** 退格：贴片在文字之前 —— 光标在最左（前面没有字符）时删除最靠右（离文字最近）的贴片。 */
+  /** 退格：贴片在文字之前 —— 编辑器光标在最左时删除最靠右（离文字最近）的贴片。 */
   const onBackspace = (e: KeyboardEvent): void => {
     if (e.key !== 'Backspace') return
-    const ta = taRef.current
     const refs = store.refs.value
-    if (ta && refs.length > 0 && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+    if (refs.length > 0 && editorAccessRef.current?.getCaret() === 0) {
       e.preventDefault()
       store.removeRef(refs[refs.length - 1].key)
     }
@@ -624,73 +545,17 @@ export function Composer({ store }: { store: ChatStore }) {
       : null}
     <${AttachmentBar} store=${store} />
     <${TodoCard} todos=${store.todos.value} />
-    <${QueueCard} store=${store} />
-    ${/* 目标条必须挂在 `#inputbox` **外面**（对齐上游 `conversation.input.dock`）：它是个带边框的
-         flex 列容器，塞进去会掉到「输入框内底部」并把边框撑高。 */ ''}
+    ${/* 对齐上游 `conversation.input.dock` 的注册顺序：todo(order 0) → goal(10) → queue(20)。
+         目标条仍必须挂在 `#inputbox` **外面**（带边框 flex 列容器，塞进去会掉到输入框内底部并把边框撑高）。 */ ''}
     <${GoalBar} store=${store} />
+    <${QueueCard} store=${store} />
     <div id="inputbox">
-      ${quoteValues.length === 0
-        ? null
-        : html`<div id="quoteRow">
-            ${quoteValues.map((q, index) => html`<span class="quote-chip" key=${index}
-                    onMouseOver=${(e: MouseEvent) => showQuoteTip(e, q.text)} onMouseOut=${scheduleHideQuoteTip}>
-              <button type="button" class="x" aria-label="清除引用" title="清除引用"
-                onClick=${() => { cancelQuoteTipTimer(); store.removeQuote(index); setQuoteTip(null) }}>
-                <span class="ico-quote codicon codicon-quote" aria-hidden="true"></span>
-                <span class="ico-clear codicon codicon-close" aria-hidden="true"></span>
-              </button>
-              <span class="qtext">${quotePreviewOf(q.text)}</span>
-            </span>`)}
-            ${quoteTip === null
-              ? null
-              : html`<div class="quote-tip" role="tooltip"
-                  onMouseOver=${cancelQuoteTipTimer}
-                  onMouseOut=${scheduleHideQuoteTip}
-                  style=${`left:${String(quoteTip.left)}px;width:${String(quoteTip.width)}px;max-height:${String(quoteTip.maxHeight)}px;` +
-                    (quoteTip.top === undefined ? `bottom:${String(quoteTip.bottom ?? 0)}px;` : `top:${String(quoteTip.top)}px;`)}>${quoteTip.text}</div>`}
-          </div>`}
-      ${store.refs.value.length > 0
-        ? html`<div id="refRow" ref=${refRowRef}>${store.refs.value.map(
-            (r) => html`<span class="ref-chip" key=${r.key} title=${r.token || r.detail || ''}>
-              <span class="ficon codicon codicon-${r.kind === 'directory' ? 'folder-opened' : r.kind === 'session' ? 'comment-discussion' : 'file'}"></span>
-              <span class="fname">${r.label}</span>
-              <span class="x" onClick=${() => store.removeRef(r.key)}>✕</span>
-            </span>`
-          )}</div>`
-        : null}
-      <textarea id="input" ref=${taRef} placeholder=${text || store.refs.value.length > 0 ? '' : '向 AI 提问（Enter 发送，Shift+Enter 换行）'} value=${text}
-        onInput=${(e: Event) => {
-          const el = e.target as HTMLTextAreaElement
-          store.setText(el.value)
-          store.setCaret(el.selectionStart ?? el.value.length)
-          trigger.sync()
-        }}
+      <${ComposerInput} store=${store}
+        text=${text}
+        placeholder=${text || store.refs.value.length > 0 ? '' : '向 AI 提问（Enter 发送，Shift+Enter 换行）'}
         onKeyDown=${inputKeyDown}
-        onKeyUp=${(e: KeyboardEvent) => {
-          store.setCaret((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0)
-          trigger.sync()
-        }}
-        onSelect=${(e: Event) => {
-          store.setCaret((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0)
-          trigger.sync()
-        }}
-        onClick=${(e: MouseEvent) => {
-          store.setCaret((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0)
-          trigger.sync()
-        }}
-        onPaste=${(e: ClipboardEvent) => {
-          const items = e.clipboardData?.items
-          if (!items) return
-          for (const item of items) {
-            if (item.type && item.type.startsWith('image/')) {
-              const file = item.getAsFile()
-              if (file) {
-                e.preventDefault()
-                store.readImageFile(file)
-              }
-            }
-          }
-        }}></textarea>
+        onInputAccess=${(access: ComposerInputAccess | null) => { editorAccessRef.current = access }}
+        onDraftChange=${() => trigger.sync()} />
       ${slashHint ? html`<span class="input-ghost" style=${{ left: ghostX + 'px', top: ghostY + 'px' }}>${slashHint}</span>` : null}
       <div id="inputbar">
         <button id="attach" title="添加文件/图片" onClick=${() => store.pickFile()}>＋</button>

@@ -66,8 +66,9 @@ export function hasVisibleAssistantContent(row: { text?: string; chain?: readonl
 /**
  * 这一行是否进聊天区。
  *
- * ⚠️ 上游 `isVisibleChatNode` 还**剔除 `name === 'permission'` 的命令行**：
- * 权限预设切换在界面上由 Access chip 表达，命令行不再重复一行。
+ * ⚠️ 上游 `isVisibleChatNode` **剔除 `name === 'permission'` 的命令行**（由 Access chip 表达）；
+ * 另外 `export` / `feedback` 在网页端是客户端动作（下载 / 反馈），本来就不产生聊天行 ——
+ * 插件由宿主执行这两个命令会落 command 事件，这里按同一「不可见」口径过滤。
  * @param row - 行（用 `kind`；`context` 行看 `content`；`command` 行看 `name`；`assistant` 行看 `text`/`chain`）。
  */
 export function isVisibleChatRow(row: {
@@ -81,7 +82,7 @@ export function isVisibleChatRow(row: {
   chain?: readonly ChainItemLike[]
 }): boolean {
   if (row.kind === 'sysprompt') return false
-  if (row.kind === 'command' && row.name === 'permission') return false
+  if (row.kind === 'command' && (row.name === 'permission' || row.name === 'export' || row.name === 'feedback')) return false
   // assistant 行：一条可见内容都没有的（例如「只有一条不可见注入」）**不占聊天区的一行**
   if (row.kind === 'assistant') return hasVisibleAssistantContent(row)
   return isVisibleContextItem(row)

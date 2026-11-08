@@ -28,7 +28,9 @@ export type RenderChainItem =
      * 与独立行那条路（`RenderRow` 的 `kind:'command'`）共用同一份事实与同一个组件
      * （`CommandRow` / `commandFactsOf`），区别只在"长在片里"还是"长在顶层"。
      */
-    | { kind: 'command'; key: string; name: string | null; outcome?: { kind: string; text?: string } }
+    | { kind: 'command'; key: string; name: string | null; args?: string | null; outcome?: { kind: string; text?: string } }
+    /** 手动压缩（`/compact`）：与自动压缩同组件，标题 `compact`、摘要回退命令文案。 */
+    | { kind: 'compaction'; key: string; title?: string; summary?: string; fallbackSummary?: string; shadowedItemCount?: number; shadowedTokenCount?: number }
     /**
      * **模型重试链**（`model-retry` 节点）：上游把它算在**过程折叠里**（`groupTree:'process'`），
      * 不在消息之间单独占一行。插件的过程折叠长在 assistant 行的链上，所以这里把重试作为**链项**
@@ -118,13 +120,13 @@ export type RenderRow =
      */ questionReply?: QuestionReplyData }
     | { kind: 'sysprompt'; key: string; text: string }
     | RenderQuestionReplyRow
-    | { kind: 'command'; key: string; name: string | null; outcome?: { kind: string; text?: string } }
-    | { kind: 'compaction'; key: string; summary?: string | null; shadowedItemCount?: number | null; shadowedTokenCount?: number | null }
+    | { kind: 'command'; key: string; name: string | null; args?: string | null; outcome?: { kind: string; text?: string } }
+    | { kind: 'compaction'; key: string; title?: string; fallbackSummary?: string; summary?: string | null; shadowedItemCount?: number | null; shadowedTokenCount?: number | null }
     | { kind: 'retry'; key: string; retryId: string; retry: number; turn?: number; step?: number; provider?: string; mode?: string; maxRetries?: number; delayMs?: number; failure?: { message?: string; code?: string }; started?: number; cancelled?: boolean }
     | { kind: 'turnNotice'; key: string; tone: 'error' | 'warning'; turn?: number; step?: number; message?: string; code?: string }
     | { kind: 'context'; key: string; content: unknown; source: unknown }
     | { kind: 'trigger'; key: string; source: unknown; content: unknown; timeMs: number }
-    | { kind: 'assistant'; key: string; turn?: number; text: string; done: boolean; chain: RenderChainItem[]; counts: { toolCallCount: number; messageCount: number; subagentCount: number }; answerAnchorSeq: number | null; answerStep: number | null; controlAnchorSeq: number; processStartSeq: number; inlineReasoning: boolean; hasExternalProcess: boolean; hasInterleavedInput: boolean; turnStarted: boolean; turnClosed: boolean; interrupted?: boolean; messageId?: string; seq?: number; timeMs?: number; turnStartMs?: number; status?: string; stats?: Record<string, unknown>; presentedFiles?: Array<{ path: string; description?: string }>; changesSeq?: number; pos: number; /** 已回答提问：渲染在过程链之后/正文之前（上游节点序） */ questionReplies?: RenderQuestionReplyRow[]; /**
+    | { kind: 'assistant'; key: string; turn?: number; text: string; done: boolean; chain: RenderChainItem[]; counts: { toolCallCount: number; messageCount: number; subagentCount: number }; answerAnchorSeq: number | null; answerStep: number | null; controlAnchorSeq: number; processStartSeq: number; inlineReasoning: boolean; hasExternalProcess: boolean; hasInterleavedInput: boolean; turnStarted: boolean; turnClosed: boolean; interrupted?: boolean; messageId?: string; seq?: number; timeMs?: number; turnStartMs?: number; status?: string; stats?: Record<string, unknown>; presentedFiles?: Array<{ path: string; description?: string }>; plans?: Array<{ callId: string; markdown: string; title: string }>; changesSeq?: number; pos: number; /** 已回答提问：渲染在过程链之后/正文之前（上游节点序） */ questionReplies?: RenderQuestionReplyRow[]; /**
      * **排序三键**（`(anchor, rank, originalAnchor)`）—— 与上游 `orderedVisibleChatNodes()` 的比较器
      * 逐字同口径（：anchor → rank → originalAnchor → key）。
      *
@@ -257,7 +259,12 @@ function turnPositionFacts(model: ChatNodeModel, turn: number): { openingInputAn
      * 两种节点的 data 形状不同：`command` 的 data 就是命令本体；`manual-compaction` 是
      * `{ command, compaction }`（上游 的 `ManualCompactionChatData`），取 command 那半边。
      */
-    if (node.kind === 'command' || node.kind === 'manual-compaction') {
+    if (node.kind === 'manual-compaction') {
+        const compaction = manualCompactionFactsOf(node)
+        if (compaction !== null) return { kind: 'compaction', key: node.key, ...compaction }
+        return { kind: 'command', key: node.key, ...commandFactsOf(node) }
+    }
+    if (node.kind === 'command') {
         return { kind: 'command', key: node.key, ...commandFactsOf(node) }
     }
     // 模型重试链：既是「过程折叠里的成员」，也可以在**没有 assistant 行可挂**时回落成顶层行
@@ -360,8 +367,16 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel, assistan
                 question: node.data as unknown as QuestionReplyData,
             })
             break
-        case 'command':
         case 'manual-compaction': {
+            const compaction = manualCompactionFactsOf(node)
+            if (compaction !== null) {
+                rows.push({ kind: 'compaction', key: node.key, ...compaction })
+                break
+            }
+            rows.push({ kind: 'command', key: node.key, ...commandFactsOf(node) })
+            break
+        }
+        case 'command': {
             // ⚠️ **片外回落支**（2026-10-10）：有过程分组的回合里，命令行是**片的成员** →
             // 它在 `entries` 里被 `nodesToRows` 那行 `consumed.add(member.key)` 吃掉，走链那条路
             // （`toChainItem` 的 `command` 支 + `chainItemNode` → `CommandRow`）。
@@ -683,12 +698,37 @@ function attachQuestionRepliesToAssistant(rows: RenderRow[], model: ChatNodeMode
  * @param node - `command` / `manual-compaction` 节点。
  * @returns 命令名与结算事实（认不出的形状给 `name: null`）。
  */
-function commandFactsOf(node: ChatNode): { name: string | null; outcome?: { kind: string; text?: string } } {
+/**
+ * 手动压缩（`/compact`，上游 `manual-compaction` 的 data = `{ command, compaction }`）：
+ * 有检查点时是压缩卡（标题 `compact`、计数/摘要来自检查点、回退文案取命令结算文本）；
+ * 没有检查点（刚发出/未压缩完）时仍按通用命令行渲染，运行态摘要用「正在压缩…」。
+ * @param node - manual-compaction 节点
+ * @returns 压缩卡事实；没有检查点时 null
+ */
+function manualCompactionFactsOf(node: ChatNode): { title: string; fallbackSummary?: string; summary?: string; shadowedItemCount?: number; shadowedTokenCount?: number } | null {
+    const data = node.data as Record<string, unknown>
+    const command = (data['command'] ?? {}) as Record<string, unknown>
+    const compaction = data['compaction'] as Record<string, unknown> | null | undefined
+    if (compaction === null || compaction === undefined) return null
+    const outcome = command['outcome'] as { text?: string } | null | undefined
+    const summary = typeof compaction['summary'] === 'string' && compaction['summary'].trim() !== '' ? String(compaction['summary']) : undefined
+    return {
+        title: 'compact',
+        ...(typeof outcome?.text === 'string' && outcome.text !== '' ? { fallbackSummary: outcome.text } : {}),
+        ...(summary === undefined ? {} : { summary }),
+        ...(typeof compaction['shadowedItemCount'] === 'number' ? { shadowedItemCount: compaction['shadowedItemCount'] } : {}),
+        ...(typeof compaction['shadowedTokenCount'] === 'number' ? { shadowedTokenCount: compaction['shadowedTokenCount'] } : {}),
+    }
+}
+
+function commandFactsOf(node: ChatNode): { name: string | null; args?: string | null; outcome?: { kind: string; text?: string } } {
     const data = node.kind === 'manual-compaction' ? ((node.data['command'] ?? {}) as Record<string, unknown>) : node.data
     const outcome = data['outcome'] as { kind?: string; text?: string } | null | undefined
     const name = (data['name'] as string | null | undefined) ?? null
+    const args = (data['args'] as string | null | undefined) ?? null
     return {
         name,
+        ...(args === null ? {} : { args }),
         ...(outcome === null || outcome === undefined
             ? {}
             : { outcome: { kind: String(outcome.kind ?? ''), ...(outcome.text === undefined ? {} : { text: outcome.text }) } }),
@@ -990,10 +1030,22 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
     const claimedItems = new Set<string>()
     const claimedGroups = new Set<string>()
     const rows: RenderRow[] = []
-    for (let index = 0; index < segments.length; index += 1) {
-        const segment = segments[index] as Segment
+    /**
+     * **没有可见成员的切段不单独成行**（上游 `process-groups` 只在有可见 pending 或回答时 emit）。
+     *
+     * 真机会话里，注入生命周期（如 goal round 的宿主消息）会先切出边界，随后那一段的节点
+     * 全被前一段收走（claimed）→ 留下一行「无正文、无链、无片」的空行：网页端没有，插件会多出
+     * 2 条空白行（真机 `session-c4fcf1ac` 回合 14）。这里在成行前把这种纯边界段丢掉；
+     * 首段永远保留（回合控制条需要落点）。
+     */
+    const visibleSegments = segments.filter((segment, index) => index === 0
+        || segment.hasReplyStep
+        || segment.groupKeys.length > 0
+        || segment.nodes.some((n) => n.visibility === 'visible' && n.kind !== 'system-prompt'))
+    for (let index = 0; index < visibleSegments.length; index += 1) {
+        const segment = visibleSegments[index] as Segment
         const first = index === 0
-        const last = index === segments.length - 1
+        const last = index === visibleSegments.length - 1
         const chain: RenderChainItem[] = []
         const groups: RenderGroup[] = []
         for (const g of turnGroups.filter((g) => segment.groupKeys.includes(g.key))) {
@@ -1179,6 +1231,7 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
             ...(last
                 ? {
                     ...(model.turnPresented.get(turn) === undefined ? {} : { presentedFiles: model.turnPresented.get(turn) }),
+                    ...(model.turnPlans.get(turn) === undefined ? {} : { plans: model.turnPlans.get(turn) }),
                     ...(model.turnChanges.get(turn) === undefined ? {} : { changesSeq: model.turnChanges.get(turn) }),
                     ...(scheduleResults.length === 0 ? {} : { scheduleResults }),
                 }
@@ -1191,7 +1244,39 @@ function buildAssistantRows(model: ChatNodeModel, turn: number): RenderRow[] {
             groups,
         })
     }
-    return rows
+    /**
+     * 空回答行（无正文、无过程项、无片）不渲染；但**每个回合至少保留第一条**（回合控制条落点）。
+     * 被丢掉的行如果是该回合末行，把尾卡事实（交付/改动/定时任务）嫁接到保留下来的末行。
+     */
+    type AssistantRenderRow = Extract<RenderRow, { kind: 'assistant' }>
+    const hasContent = (row: AssistantRenderRow): boolean => String(row.text ?? '').trim() !== ''
+        || (row.chain ?? []).some((c) => c.kind === 'tool' || c.kind === 'text' || c.kind === 'command')
+        || (row.groups ?? []).length > 0
+    const byTurn = new Map<number, AssistantRenderRow[]>()
+    for (const row of rows) {
+        if (row.kind !== 'assistant') continue
+        const turn = row.turn ?? 0
+        const list = byTurn.get(turn) ?? []
+        list.push(row)
+        byTurn.set(turn, list)
+    }
+    const dropped = new Set<RenderRow>()
+    for (const list of byTurn.values()) {
+        const nonEmpty = list.filter(hasContent)
+        if (nonEmpty.length === 0) continue
+        for (const row of list) if (!hasContent(row)) dropped.add(row)
+        const last = list[list.length - 1]
+        if (last !== undefined && dropped.has(last)) {
+            const target = nonEmpty[nonEmpty.length - 1] as AssistantRenderRow
+            Object.assign(target, {
+                ...(target.presentedFiles === undefined && last.presentedFiles !== undefined ? { presentedFiles: last.presentedFiles } : {}),
+                ...(target.plans === undefined && last.plans !== undefined ? { plans: last.plans } : {}),
+                ...(target.changesSeq === undefined && last.changesSeq !== undefined ? { changesSeq: last.changesSeq } : {}),
+                ...(target.scheduleResults === undefined && last.scheduleResults !== undefined ? { scheduleResults: last.scheduleResults } : {}),
+            })
+        }
+    }
+    return rows.filter((row) => !dropped.has(row))
 }
 
 /**

@@ -16,7 +16,7 @@
 //   · `[chat] 构建失败（产物未更新）`      = 唯一的失败行（problemMatcher 只匹配这句）。
 // 改文案要同步改那边。
 import { build, context } from 'esbuild'
-import { cpSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { woff2Only } from './katex-css-woff2.mjs'
@@ -77,6 +77,27 @@ const options = {
   plugins: [katexWoff2Only],
 }
 
+/**
+ * **编辑器 chunk**：Lexical 由页面动态加载（默认输入区），`chat.js` 主包不带编辑器体积。
+ * 由宿主把它的 asWebviewUri 注入页面；打包前会校验它确实产出（见 vsix.mjs）。
+ */
+const lexicalOptions = {
+  ...options,
+  entryPoints: [path.join(chatDir, 'composer', 'editors', 'lexical', 'index.ts')],
+  outfile: path.join(outDir, 'lexical.js'),
+  format: 'esm',
+  plugins: [],
+}
+
+
+/** chunk 产出校验：缺失或体量异常直接让构建失败（不把坏包交给打包/安装）。 */
+function assertLexicalChunk() {
+  const file = path.join(outDir, 'lexical.js')
+  const size = statSync(file).size
+  if (size < 100_000) throw new Error('[chat] lexical.js 产出异常：' + String(size) + ' bytes（应 >100KB）')
+  return size
+}
+
 if (watch) {
   const ctx = await context({
     ...options,
@@ -96,9 +117,17 @@ if (watch) {
     }],
   })
   await ctx.watch()
+  // 编辑器 chunk 单独 watch（否则开发期 dist/chat 里没有 lexical.js，默认输入区会回退 textarea）
+  const lexicalCtx = await context(lexicalOptions)
+  lexicalCtx.watch().then(() => console.log('[chat] watching composer/editors/lexical/** …')).catch((e) => {
+    console.error(e)
+    process.exitCode = 1
+  })
   console.log('[chat] watching webview/chat/** …')
 } else {
   await build(options)
+  await build(lexicalOptions)
   copyStatics()
+  assertLexicalChunk()
   console.log('[chat] built → dist/chat')
 }

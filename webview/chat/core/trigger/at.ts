@@ -118,7 +118,10 @@ export function atTrigger(store: ChatStore): TriggerDef {
       helpers.clear()
       const kind = row.kind === 'session' ? 'session' : row.kind === 'directory' ? 'directory' : 'file'
       const label = row.name
-      store.addRef(kind, label, row.value ?? '@' + label)
+      const token = row.value ?? '@' + label
+      const chip = store.addRef(kind, label, token)
+      // 编辑器内联 chip（上游 ReferenceChipNode）；编辑器还没挂好时退回 store 列表（发送仍可用）
+      helpers.insertReference({ id: String(chip.key), kind, label, token })
     },
     drill(row, helpers) {
       // 目录钻取（上游）：保留 '@dir/'，让菜单继续列其下一层；不关菜单

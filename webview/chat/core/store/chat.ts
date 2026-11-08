@@ -15,6 +15,7 @@ import { createStatus } from './status'
 import { createPrefs } from './prefs'
 import { createOutbox } from './outbox'
 import { createFeedback } from './feedback'
+import { createCotClient } from '../cot'
 import { createQueue } from './queue'
 import { createVoice } from './voice'
 import { createReducer } from './reducer'
@@ -63,6 +64,8 @@ export function createChatStore(host: ChatHost): ChatStore {
   const voice = createVoice(host, composer.store.insertText)
   // 消息反馈：与其它切片无 import 边，装配层直接持有
   const feedback = createFeedback(host)
+  // 思考过程机器翻译：请求-应答走 ChatHost，不进归约器（组件按需取）
+  const cot = createCotClient(host)
 
   // 4. 全量清空：跨切片唯一入口。各切片只清自己的量，这里按固定顺序串联。
   //    不含 prefs：上游显示形态是全局偏好，换会话不该重置。
@@ -113,6 +116,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     openFile: messages.store.openFile,
     openAttachment: messages.store.openAttachment,
     openAttachmentBytes: messages.store.openAttachmentBytes,
+    openPlanDocument: messages.store.openPlanDocument,
     answerApproval: messages.store.answerApproval,
     // 回合级过程折叠的展开态（同回合多段行共享）
     turnFoldOpen: messages.turnFoldOpen,
@@ -140,6 +144,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     editFeedbackDialog: feedback.store.editFeedbackDialog,
     submitFeedbackDialog: feedback.store.submitFeedbackDialog,
     closeFeedbackDialog: feedback.store.closeFeedbackDialog,
+    // 思考过程机器翻译（宿主 translator remote）
+    cot,
     // 归约器
     onHostMessage: reducer.store.onHostMessage,
     // 输入区切片
@@ -167,6 +173,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     setQuote: composer.setQuote,
     removeQuote: composer.removeQuote,
     clearQuote: composer.clearQuote,
+    setQuotes: composer.store.setQuotes,
+    setReferences: composer.store.setReferences,
     setText: composer.store.setText,
     setCaret: composer.store.setCaret,
     // 语音输入（实验）：宿主侧录音；页面只读四态 + 可用性、发控制帧，结果插入光标处

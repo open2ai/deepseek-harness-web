@@ -418,6 +418,9 @@ export function MessageList({ store }: { store: ChatStore }) {
     if ((row.presentedFiles?.length ?? 0) > 0) {
       return true;
     }
+    if ((row.plans?.length ?? 0) > 0) {
+      return true;
+    }
     // 改动卡的存在性由 Host 的摘要决定（拿不到摘要就不出卡，见 `Deliverables`）—— 只看字段在不在
     if (row.changesSummary !== undefined && (row.changesSummary.files?.length ?? 0) > 0) {
       return true;

@@ -28,7 +28,7 @@ export function CompactionRow({ row }: { row: Extract<ChatRow, { kind: 'compacti
         <span class="compaction-context-icon codicon codicon-symbol-namespace"></span>
         <span class="compaction-chevron codicon ${open ? 'codicon-chevron-down' : 'codicon-chevron-right'}"></span>
       </span>
-      <span class="compaction-title">${COMPACTION_TITLE}</span>
+      <span class="compaction-title">${row.title ?? COMPACTION_TITLE}</span>
       <span class="compaction-sep" aria-hidden="true"></span>
       <span class="compaction-summary">${compactionSummaryText(row)}</span>
     </button>

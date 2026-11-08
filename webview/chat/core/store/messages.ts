@@ -51,6 +51,7 @@ export interface MessagesSlice {
     | 'openFile'
     | 'openAttachment'
     | 'openAttachmentBytes'
+    | 'openPlanDocument'
   >
   /**
    * 追加一条审批行。
@@ -401,6 +402,12 @@ export function createMessages(host: ChatHost): MessagesSlice {
   function openFile(filePath: string, line?: number, cwd?: string): void {
     if (!filePath) return
     host.post({ type: 'openFile', path: filePath, ...(line === undefined ? {} : { line }), ...(cwd ? { cwd } : {}) })
+  }
+
+  /** 计划文档：宿主写临时 .md 并用 VS Code 内置 Markdown 预览打开。 */
+  function openPlanDocument(title: string, markdown: string, callId?: string): void {
+    if (markdown === '') return
+    host.post({ type: 'openPlanDocument', title, markdown, ...(callId === undefined ? {} : { callId }) })
   }
   /**
    * 按**附件 id** 打开附件（用户消息 / 图片卡里的图与文件在会话里只有 id，没有本地路径）：
@@ -808,6 +815,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
       openFile,
       openAttachment,
       openAttachmentBytes,
+    openPlanDocument,
     },
     openFile,
     openAttachment,
