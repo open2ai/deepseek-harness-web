@@ -657,6 +657,8 @@ async function loadChatHtml(
         // 既避免资源 scheme/路径差异，也让失败可被页面识别并在需要时回退。
         const lexicalUri = `${String(webview.asWebviewUri(vscode.Uri.joinPath(chatRoot, 'lexical.js')))}?v=${String(stamp)}`
         html = html.replace('<head>', `<head><meta name="dsh-composer-editor" content="${lexicalUri}">`)
+        // UI 语言注入 <html lang>：COT 的 auto 目标语言跟 UI，而不是 sidex/webview 的 navigator.language。
+        html = html.replace('<html lang="zh-CN">', `<html lang="${vscode.env.language || 'zh-CN'}">`);
         // 原生/自绘 标题栏通道：原生标题栏模式时 index.html 的 CSS 让 #titlebar 首帧即 display:none
         html = html.replace('<body>', `<body ${TITLEBAR_MODE_ATTR}="${titlebarMode}">`);
         const csp =
@@ -755,6 +757,7 @@ async function postChatPrefs(): Promise<void> {
         stepGrouping: prefs.stepGrouping,
         collapseTiming: prefs.collapseTiming,
         foldedReplies: prefs.foldedReplies,
+        locale: prefs.locale,
     });
 }
 
@@ -2087,7 +2090,8 @@ async function runDshTask(prompt: string, ctx: SelectionContext, mode: 'apply' |
 /** QuickPick 行的状态 → 统一的 iconPath/description（图标列由 QuickPick 自己对齐，label 不再塞 codicon）。 */
 function pickSessionState(s: WsSessionRow): { icon: string; desc: string } {
     const parts: string[] = [];
-    if (s.current) parts.push('当前');
+    // 当前会话不再在描述里写「当前」：QuickPick 描述会紧贴会话名，看起来像标题的一部分。
+    // 用 check 图标 + 行选中态表达；工作区行保留「当前」。
     if (s.pendingInteraction === 'approval') parts.push('待审批');
     else if (s.pendingInteraction === 'plan-review') parts.push('计划待审');
     else if (s.pendingInteraction === 'question') parts.push('待回答');
@@ -2594,6 +2598,17 @@ async function showWorkspacePicker(): Promise<void> {
         }
     });
 
+    // 默认展开当前工作区并预取会话：之前只有点一次工作区才出会话，用户会以为“会话都没了”。
+    const initialWorkspace = currentId();
+    if (initialWorkspace !== undefined && !sessionCache.has(initialWorkspace)) {
+        try {
+            sessionCache.set(initialWorkspace, await listWorkspaceSessionsOf(initialWorkspace));
+            expanded.add(initialWorkspace);
+        } catch {
+            sessionCache.set(initialWorkspace, []);
+        }
+    }
+
     // items 先填再 show：sideX 等宿主对「show() 之后再写 items」的 QuickPick 可能不重绘列表
     //（现象：只剩搜索框、下面无行）。上游 createQuickPick 用法即“先 items 后 show”。
     // show() 之后的动态填行只发生在展开/懒加载路径（refresh），那时列表已挂到 DOM，安全。
@@ -2702,6 +2717,21 @@ export function activate(context: vscode.ExtensionContext) {
     // 命令：标题栏"工作区"面板（选/建工作区 + 恢复会话）
     context.subscriptions.push(
         vscode.commands.registerCommand('dsh.workspace', () => showWorkspacePicker())
+    );
+
+    // 手动修复：只把 cwd===workspace.path 的未分组会话补登记回工作区；不做自动写入。
+    context.subscriptions.push(
+        vscode.commands.registerCommand('dsh.repairWorkspaceSessions', async () => {
+            if (!(await dsh.ensureRunning())) return;
+            try {
+                const repaired = await dsh.repairUngroupedWorkspaceSessions();
+                void vscode.window.showInformationMessage(
+                    repaired > 0 ? `已补登记 ${String(repaired)} 条会话到所属工作区` : '没有需要补登记的未分组会话'
+                );
+            } catch (e) {
+                void vscode.window.showErrorMessage('补登记失败：' + (e instanceof Error ? e.message : String(e)));
+            }
+        })
     );
 
     // 命令：开启新会话（需先选工作区）

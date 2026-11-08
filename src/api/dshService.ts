@@ -3005,7 +3005,7 @@ export class DshService {
         const wsList = await this.listWorkspaces();
         const ws = (wsList.items ?? []).find((w) => w.workspaceId === workspaceId);
         const ids = new Set(ws?.sessionIds ?? []);
-        if (ids.size === 0) {
+        if (ids.size === 0 && ws === undefined) {
             return [];
         }
         const sessionList = await this.call<{
@@ -3032,6 +3032,7 @@ export class DshService {
         const rows = mapWorkspaceSessions({
             sessionIds: ws?.sessionIds ?? [],
             items: sessionList.items ?? [],
+            workspacePath: ws?.path,
             currentSessionId: this.currentSessionId,
             titleOf: (s) =>
                 sessionDisplayTitle({
@@ -3085,6 +3086,37 @@ export class DshService {
             if (status.runningSubagentCount !== undefined) row.runningSubagentCount = status.runningSubagentCount
         }
         return rows;
+    }
+
+    /**
+     * 修复「cwd 属于某工作区、但不在成员表」的会话：按宿主自己的判据
+     * （cwd === workspace.path）补登记，恢复“之前好好的会话掉进未分组”。
+     *
+     * 为什么需要：多处宿主共用 ~/.dsh 时，成员表可能被陈旧快照覆盖；插件只读列表时看到
+     * 会话 cwd 明明在 dsh_desktop 下、却不在 sessionIds 里。补登记用幂等 attach，
+     * 只处理 cwd 与工作区路径规范串完全一致的未分组会话，不猜、不动别的工作区。
+     * @returns 成功补登记的条数
+     */
+    async repairUngroupedWorkspaceSessions(): Promise<number> {
+        const { items } = await this.listWorkspaces();
+        const memberIds = new Set<string>();
+        for (const w of items) for (const id of w.sessionIds ?? []) memberIds.add(id);
+        const byPath = new Map<string, string>();
+        for (const w of items) if (w.path !== '') byPath.set(normalizePath(w.path), w.workspaceId);
+        const sessionList = await this.call<{ items?: Array<{ sessionId?: string; origin?: string; cwd?: string }> }>('session.list', {});
+        let repaired = 0;
+        for (const s of sessionList.items ?? []) {
+            if (typeof s.sessionId !== 'string' || s.sessionId === '' || s.origin === 'subagent') continue;
+            if (memberIds.has(s.sessionId) || typeof s.cwd !== 'string' || s.cwd === '') continue;
+            const workspaceId = byPath.get(normalizePath(s.cwd));
+            if (workspaceId === undefined) continue;
+            if (await this.bindSessionToWorkspace(workspaceId, s.sessionId).catch(() => false)) {
+                repaired += 1;
+                memberIds.add(s.sessionId);
+            }
+        }
+        if (repaired > 0) console.warn(`[dsh-ws] 已把 ${String(repaired)} 条 cwd 匹配但未登记的会话补回工作区`);
+        return repaired;
     }
 
     /**
@@ -3143,6 +3175,7 @@ export class DshService {
             }
         }
         const archived = new Set(archivedSessionIds ?? []);
+        const workspacePaths = new Set((wsItems ?? []).filter((w) => w.path !== '').map((w) => normalizePath(w.path)));
         const sessionList = await this.call<{
             items?: Array<{
                 sessionId?: string;
@@ -3163,6 +3196,10 @@ export class DshService {
                 continue;
             }
             if (memberIds.has(s.sessionId)) {
+                continue;
+            }
+            // cwd 已属于某工作区的，即使成员表缺登记也不进未分组（显示回退，不写盘）。
+            if (typeof s.cwd === 'string' && s.cwd !== '' && workspacePaths.has(normalizePath(s.cwd))) {
                 continue;
             }
             const isCurrent = s.sessionId === this.currentSessionId;

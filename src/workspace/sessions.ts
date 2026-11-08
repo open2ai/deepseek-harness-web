@@ -47,6 +47,8 @@ export function mapWorkspaceSessions(input: {
     currentSessionId?: string
     /** 由宿主提供的标题解析（durable title → cwd basename → sessionId）。 */
     titleOf: (item: WorkspaceSessionCandidate) => string
+    /** 工作区根路径；成员表缺登记时，cwd 与之相同的会话也按本工作区展示（只读回退）。 */
+    workspacePath?: string
 }): WorkspaceSessionRow[] {
     const byId = new Map<string, WorkspaceSessionCandidate>()
     for (const item of input.items) {
@@ -55,19 +57,12 @@ export function mapWorkspaceSessions(input: {
         }
     }
     const rows: WorkspaceSessionRow[] = []
-    for (const sessionId of input.sessionIds) {
-        const item = byId.get(sessionId)
-        if (item === undefined) {
-            continue
-        }
-        if (item.origin === 'subagent') {
-            continue
-        }
+    const seen = new Set<string>()
+    const push = (sessionId: string, item: WorkspaceSessionCandidate): void => {
+        if (seen.has(sessionId) || item.origin === 'subagent') return
         const current = sessionId === input.currentSessionId
-        // 纯空「新会话」：除非就是当前会话（显示为选中），否则不列出。
-        if (item.blank === true && item.running !== true && !current) {
-            continue
-        }
+        if (item.blank === true && item.running !== true && !current) return
+        seen.add(sessionId)
         const pendingKind = item.pendingInteraction?.kind
         rows.push({
             sessionId,
@@ -81,6 +76,23 @@ export function mapWorkspaceSessions(input: {
             ...(typeof item.runningSubagentCount === 'number' ? { runningSubagentCount: item.runningSubagentCount } : {}),
             ...(item.completionUnread === true ? { completed: true } : {}),
         })
+    }
+    for (const sessionId of input.sessionIds) {
+        const item = byId.get(sessionId)
+        if (item !== undefined) push(sessionId, item)
+    }
+    // 成员表被陈旧快照覆盖：cwd 等于工作区根的会话仍按本工作区列出（不写盘）。
+    if (input.workspacePath !== undefined && input.workspacePath !== '') {
+        const norm = (p: string): string => {
+            const q = p.replace(/[\\/]+$/, '').replace(/\\/g, '/')
+            return /^[A-Za-z]:/.test(q) ? q.toLowerCase() : q
+        }
+        const root = norm(input.workspacePath)
+        for (const item of input.items) {
+            if (typeof item.sessionId !== 'string' || item.sessionId === '' || seen.has(item.sessionId)) continue
+            if (typeof item.cwd !== 'string' || item.cwd === '' || norm(item.cwd) !== root) continue
+            push(item.sessionId, item)
+        }
     }
     return rows
 }

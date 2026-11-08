@@ -254,6 +254,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     stepGrouping: prefs.store.stepGrouping,
     collapseTiming: prefs.store.collapseTiming,
     foldedReplies: prefs.store.foldedReplies,
+    locale: prefs.store.locale,
     // 渲染源开关（阶段 4：宿主下发，见 docs/design/08 §11）
   }
 }

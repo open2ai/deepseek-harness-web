@@ -18,6 +18,20 @@ import type { ChatStore, DshTurnProcessItem } from '../../core/store/chat'
 
 type Reasoning = Extract<DshTurnProcessItem, { kind: 'reasoning' }>
 
+/** 上游 auto 跟随 UI 语言：优先用宿主注入的 <html lang>，而不是 sidex/webview 的 navigator.language。 */
+function uiLanguage(store?: ChatStore): string {
+  const preferred = store?.locale.value
+  if (typeof preferred === 'string' && preferred.trim() !== '') {
+    const value = preferred.trim()
+    return value.toLowerCase().startsWith('zh') ? 'zh-CN' : value
+  }
+  const raw =
+    (typeof document === 'undefined' ? '' : document.documentElement.lang) ||
+    (typeof navigator === 'undefined' ? '' : navigator.language) ||
+    'zh-CN'
+  return raw.toLowerCase().startsWith('zh') ? 'zh-CN' : raw
+}
+
 /** 收起预览（定稿/历史）= **首行**（上游 `firstLine`：不 trim、不跳过空行）。 */
 const firstLine = (text: string): string => {
   const newline = text.indexOf('\n')
@@ -99,9 +113,7 @@ function ReasoningRowView({ item, store, live, showPreview = true }: ReasoningPr
   useEffect(() => {
     if (!open || cotLimits === undefined || cotLimits === null) return
     const selection = cotLimits.preferences
-    const targetLanguage = selection.targetLanguage === 'auto'
-      ? (typeof navigator === 'undefined' ? 'zh-CN' : (navigator.language || 'zh-CN'))
-      : selection.targetLanguage
+    const targetLanguage = selection.targetLanguage === 'auto' ? uiLanguage(store) : selection.targetLanguage
     const instance = new ReasoningTranslation(
       { provider: selection.provider, targetLanguage },
       cotLimits.maxTextChars,

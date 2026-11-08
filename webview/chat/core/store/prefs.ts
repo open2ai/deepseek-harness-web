@@ -22,6 +22,8 @@ export interface ChatPrefsPatch {
   collapseTiming?: 'completion' | 'next-input'
   /** 收起后显示的回复（上游 `foldedReplies`）：`all` = 全部回复（默认）、`final` = 仅最终回答 */
   foldedReplies?: 'all' | 'final'
+  /** 上游 Web UI 语言（`locale.preference`）；COT 的 auto 目标语言优先用它。 */
+  locale?: string
 }
 
 export interface PrefsSlice {
@@ -36,6 +38,7 @@ export interface PrefsSlice {
     | 'stepGrouping'
     | 'collapseTiming'
     | 'foldedReplies'
+    | 'locale'
   >
   /**
    * 应用宿主推来的偏好（逐字段覆盖，未给的字段保持原值）。
@@ -61,6 +64,7 @@ export function createPrefs(): PrefsSlice {
   const collapseTiming = signal<'completion' | 'next-input'>('completion')
   // 默认 = 上游默认「收起后显示全部回复」。
   const foldedReplies = signal<'all' | 'final'>('all')
+  const locale = signal<string | undefined>(undefined)
 
   function apply(prefs: ChatPrefsPatch): void {
     if (prefs.transcriptView !== undefined) transcriptView.value = prefs.transcriptView
@@ -72,6 +76,7 @@ export function createPrefs(): PrefsSlice {
     if (prefs.stepGrouping !== undefined) stepGrouping.value = prefs.stepGrouping
     if (prefs.collapseTiming !== undefined) collapseTiming.value = prefs.collapseTiming
     if (prefs.foldedReplies !== undefined) foldedReplies.value = prefs.foldedReplies
+    if (prefs.locale !== undefined) locale.value = prefs.locale
   }
 
   return {
@@ -85,6 +90,7 @@ export function createPrefs(): PrefsSlice {
       stepGrouping,
       collapseTiming,
       foldedReplies,
+      locale,
     },
     apply,
   }

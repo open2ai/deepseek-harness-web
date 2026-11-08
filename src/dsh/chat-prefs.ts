@@ -67,6 +67,8 @@ export interface DshChatPrefs {
     readonly collapseTiming: DshCollapseTiming;
     /** 收起后显示的回复（见 `DshFoldedReplies`；读不到时按上游默认 `all`） */
     readonly foldedReplies: DshFoldedReplies;
+    /** 上游设置文档 locale.preference（Web UI 语言；缺省 = 跟随浏览器）。 */
+    readonly locale?: string;
 }
 
 /** 读不到设置时的生效值 = 上游默认（0.2.0：非 Desktop Web 的客户端默认 = `detailed`）。 */
@@ -224,6 +226,11 @@ function policyOf(raw: unknown): { settledReasoningPreview: boolean; liveProcess
  * @param namespaces - `settings.describe` 应答里的 namespaces。
  * @returns 四项生效值 + 三个策略门；缺失/非法字段各自回落到上游默认。
  */
+export function localeOf(namespaces: readonly DshSettingsNamespace[]): string | undefined {
+    const locale = userOf(namespaces, 'locale')?.['preference'];
+    return typeof locale === 'string' && locale.trim() !== '' ? locale.trim() : undefined;
+}
+
 export function chatPrefsOf(namespaces: readonly DshSettingsNamespace[]): DshChatPrefs {
     const chat = userOf(namespaces, 'ui-chat');
     const general = userOf(namespaces, 'ui-settings');
@@ -238,6 +245,7 @@ export function chatPrefsOf(namespaces: readonly DshSettingsNamespace[]): DshCha
         stepGrouping: stepGroupingOf(transcriptRaw),
         collapseTiming: collapseTimingOf(chat === null ? undefined : chat['collapseTiming']),
         foldedReplies: foldedRepliesOf(chat === null ? undefined : chat['foldedReplies']),
+        locale: localeOf(namespaces),
     };
 }
 
@@ -251,5 +259,6 @@ export function sameChatPrefs(a: DshChatPrefs, b: DshChatPrefs): boolean {
         && a.liveProcessDetail === b.liveProcessDetail
         && a.stepGrouping === b.stepGrouping
         && a.collapseTiming === b.collapseTiming
-        && a.foldedReplies === b.foldedReplies;
+        && a.foldedReplies === b.foldedReplies
+        && a.locale === b.locale;
 }

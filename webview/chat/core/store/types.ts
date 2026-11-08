@@ -737,6 +737,8 @@ export interface ChatStore {
    *  消费点是外层折叠（`components/message/MessageList` 的 `rowOuterHidden`）：`all` 时更早世代的
    *  回复行仍可见，只折它们的过程区。 */
   foldedReplies: Signal<'all' | 'final'>
+  /** 上游 Web UI 语言（`locale.preference`）；COT auto 优先用它。 */
+  locale: Signal<string | undefined>
   /** 渲染源开关（宿主下发，见 docs/design/08 §11）：true = 页面只认宿主下发的「行」，
    *  忽略旧的渲染指令（两条通路二选一，不能同时改列表）。 */
   /** 上游 waterfall 提问弹窗（输入框上方）：pending 时让用户选择/提交/取消/关闭；null=无 */

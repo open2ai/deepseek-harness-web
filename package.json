@@ -28,6 +28,11 @@
         "category": "DSH"
       },
       {
+        "command": "dsh.repairWorkspaceSessions",
+        "title": "修复未分组会话的工作区归属（写回成员表）",
+        "category": "DSH"
+      },
+      {
         "command": "dsh.open",
         "title": "DeepSeek Harness"
       },
