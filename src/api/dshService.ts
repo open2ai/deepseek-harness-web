@@ -97,6 +97,8 @@ import {
     DshRpcError,
 } from '../dsh';
 import { sessionDisplayTitle } from '../dsh/official/session-title';
+import { mapWorkspaceSessions } from '../workspace';
+import { sessionStatusRegistry } from '../dsh/session-status';
 import { initialContinuity, judgeAssistantFrame } from '../dsh/stream-continuity';
 import { foldTurnState, openFromTurnBoundary, windowHasOpenTurn } from '../dsh/turn-state';
 import { stopTargetOf, type DshSubagentAddress } from '../dsh/stop-target';
@@ -375,6 +377,15 @@ export interface DshCotTranslationLimits {
     maxTextChars: number;
     preferences: { provider: string; targetLanguage: string };
     availableProviders: string[];
+}
+
+/** 实验 Remote 在部分宿主/客户端上返回 {ok,value} 结果包；这里统一解包。 */
+function unwrapRemoteResult(value: unknown): unknown {
+    if (value !== null && typeof value === 'object' && 'ok' in value) {
+        const result = value as { ok?: unknown; value?: unknown };
+        return result.ok === true ? result.value : undefined;
+    }
+    return value;
 }
 
 export class DshService {
@@ -2835,6 +2846,11 @@ export class DshService {
         return this.currentWorkspaceId;
     }
 
+    /** 当前会话 id（工作区归属判定用）。 */
+    getCurrentSessionId(): string | undefined {
+        return this.currentSessionId;
+    }
+
     /** 手动切换当前工作区（UI 下拉） */
     setCurrentWorkspace(workspaceId?: string): void {
         this.currentWorkspaceId = workspaceId;
@@ -2924,9 +2940,65 @@ export class DshService {
 
     /**
      * 列出某工作区下的已有会话（workspace.list 的 sessionIds + session.list 汇总映射标题）。
-     * 排除 subagent 内部会话；空白会话展示为「新会话」；运行中排前。
+     * 排除 subagent 内部会话；空白会话展示为「新会话」；**顺序严格按上游工作区成员表 sessionIds，不按当前/运行中重排**。
      * 注意：新建会话不做强制改名，问答后沿用 dsh 自动生成的会话标题。
      */
+    /** session/state 短缓存 + 单飞 + 并发上限（工作区大量会话时避免一次性打爆 RPC）。 */
+    private readonly stateCache = new Map<string, { at: number; value: { running: boolean; pending?: 'approval' | 'question' } }>()
+    private readonly stateInflight = new Map<string, Promise<{ running: boolean; pending?: 'approval' | 'question' } | undefined>>()
+
+    private async readSessionStates(
+        ids: readonly string[]
+    ): Promise<Map<string, { running: boolean; pending?: 'approval' | 'question' }>> {
+        const out = new Map<string, { running: boolean; pending?: 'approval' | 'question' }>()
+        const now = Date.now()
+        const queue: string[] = []
+        for (const id of new Set(ids)) {
+            const cached = this.stateCache.get(id)
+            if (cached !== undefined && now - cached.at < 3000) {
+                out.set(id, cached.value)
+                continue
+            }
+            queue.push(id)
+        }
+        const CONCURRENCY = 6
+        let cursor = 0
+        const worker = async (): Promise<void> => {
+            while (cursor < queue.length) {
+                const id = queue[cursor++] as string
+                const pending = this.stateInflight.get(id)
+                const task =
+                    pending ??
+                    (async (): Promise<{ running: boolean; pending?: 'approval' | 'question' } | undefined> => {
+                        try {
+                            const state = await this.call<{ running?: boolean; pendingInput?: string[] }>('session/state', {
+                                sessionId: id,
+                            })
+                            const kind = state.pendingInput?.includes('approval')
+                                ? 'approval'
+                                : state.pendingInput?.includes('question')
+                                  ? 'question'
+                                  : undefined
+                            return {
+                                running: state.running === true,
+                                ...(kind === undefined ? {} : { pending: kind }),
+                            }
+                        } catch {
+                            return undefined
+                        }
+                    })()
+                this.stateInflight.set(id, task)
+                const value = await task.finally(() => this.stateInflight.delete(id))
+                if (value !== undefined) {
+                    this.stateCache.set(id, { at: Date.now(), value })
+                    out.set(id, value)
+                }
+            }
+        }
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()))
+        return out
+    }
+
     async listWorkspaceSessions(
         workspaceId: string
     ): Promise<Array<{ sessionId: string; title: string; running: boolean; blank: boolean; current: boolean }>> {
@@ -2945,51 +3017,74 @@ export class DshService {
                 cwd?: string;
                 /** 上游列表 item：durable title 投影在顶层 title 字段（非空字符串才设置） */
                 title?: string;
+                pendingInteraction?: { kind?: string };
+                runningSubagentCount?: number;
+                completionUnread?: boolean;
+                /** 上游列表 item：子智能体目录投影（若有） */
+                subagentCatalog?: unknown;
                 /** 上游列表 item：当前 host 计算的投影值包（键含 title 等） */
                 projectionValues?: Record<string, unknown>;
                 projections?: { values?: Record<string, unknown> };
             }>;
         }>('session.list', {});
-        const out: Array<{ sessionId: string; title: string; running: boolean; blank: boolean; current: boolean }> = [];
-        for (const s of sessionList.items ?? []) {
-            if (!s.sessionId || s.origin === 'subagent') {
-                continue;
-            }
-            const inWorkspace = ids.has(s.sessionId);
-            if (!inWorkspace) {
-                continue;
-            }
-            const isCurrent = s.sessionId === this.currentSessionId;
-            // 纯空「新会话」：除非它就是当前正在用的会话(显示为选中)，否则不列出
-            //（与 dsh 网页一致：无内容的旧会话不占列表，避免越积越多）。运行中的保留。
-            if (s.blank && !s.running && !isCurrent) {
-                continue;
-            }
-            out.push({
-                sessionId: s.sessionId,
-                // 上游三层 fallback：title → cwd basename → sessionId（blank 由 UI 显示“新会话”）
-                // durable title 读上游列表 item 顶层 title；兼容旧/变体形状回退 projectionValues / projections.values.title。
-                title:
-                    s.blank
-                        ? '新会话'
-                        : sessionDisplayTitle({
-                              title: durableTitleOf(s),
-                              cwd: s.cwd,
-                              sessionId: s.sessionId ?? '',
-                          }),
-                running: !!s.running,
-                blank: !!s.blank,
-                current: isCurrent,
-            });
+        // 纯逻辑在 `src/workspace/sessions.ts`：顺序严格按上游 sessionIds，不重排。
+        sessionStatusRegistry.start()
+        const rows = mapWorkspaceSessions({
+            sessionIds: ws?.sessionIds ?? [],
+            items: sessionList.items ?? [],
+            currentSessionId: this.currentSessionId,
+            titleOf: (s) =>
+                sessionDisplayTitle({
+                    title: durableTitleOf(s),
+                    cwd: s.cwd,
+                    sessionId: s.sessionId ?? '',
+                }),
+        });
+        // 子智能体目录：session.list 若带 subagentCatalog，就逐个子会话读 state 数“运行中”。
+        const catalogByParent = new Map<string, string[]>()
+        for (const item of sessionList.items ?? []) {
+            if (typeof item.sessionId !== 'string') continue
+            const pv = (item.projectionValues ?? item.projections?.values) as Record<string, unknown> | undefined
+            const raw = item.subagentCatalog ?? pv?.['subagentCatalog']
+            if (!Array.isArray(raw)) continue
+            const ids = raw
+                .map((entry) => (entry !== null && typeof entry === 'object' ? (entry as { id?: unknown }).id : undefined))
+                .filter((id): id is string => typeof id === 'string' && id !== '')
+            if (ids.length > 0) catalogByParent.set(item.sessionId, ids)
         }
-        out.sort((a, b) => Number(b.current) - Number(a.current) || Number(b.running) - Number(a.running));
-        // 会话名一致性诊断：打印上游返回的每条 sessionId+title（env DSH_RAWLOG=1/full）
-        if (process.env['DSH_RAWLOG']) {
-            for (const r of out) {
-                console.log(`[dsh-raw] session-list ${r.sessionId} title=${JSON.stringify(r.title)} running=${r.running} blank=${r.blank} current=${r.current}`);
+        // 只读“需要状态”的会话：pending / running / 当前 / 子智能体子会话。
+        // 历史 idle 会话不逐个读；外部客户端应答后的 pending 由 $events 标记为 pending 后进入这里校验/清除。
+        const needsState = (sessionId: string, running: boolean): boolean =>
+            running || sessionId === this.currentSessionId || sessionStatusRegistry.hasPending(sessionId)
+        const catalogIds = [...new Set([...catalogByParent.values()].flat())]
+        const stateIds = [
+            ...new Set([
+                ...rows.filter((r) => needsState(r.sessionId, r.running)).map((r) => r.sessionId),
+                ...catalogIds,
+            ]),
+        ]
+        const states = await this.readSessionStates(stateIds)
+        // 合并全局 $events / 权威 state：pending、completed、running。
+        for (const row of rows) {
+            const children = catalogByParent.get(row.sessionId)
+            if (children !== undefined) {
+                row.runningSubagentCount = children.filter((id) => states.get(id)?.running === true).length
             }
+            const authoritative = states.get(row.sessionId)
+            if (authoritative !== undefined) {
+                sessionStatusRegistry.applyState(row.sessionId, authoritative)
+            } else {
+                sessionStatusRegistry.observeRunning(row.sessionId, row.running)
+            }
+            // 当前会话已打开：完成提醒不算未读；仅非当前会话保留“已完成”。
+            if (row.current) sessionStatusRegistry.clearCompleted(row.sessionId)
+            const status = sessionStatusRegistry.statusOf(row.sessionId, row.running, row.runningSubagentCount)
+            row.running = status.running === true
+            if (status.pendingInteraction !== undefined) row.pendingInteraction = status.pendingInteraction
+            if (status.completed === true) row.completed = true
+            if (status.runningSubagentCount !== undefined) row.runningSubagentCount = status.runningSubagentCount
         }
-        return out;
+        return rows;
     }
 
     /**
@@ -3448,8 +3543,8 @@ export class DshService {
      */
     async cotTranslationLimits(): Promise<DshCotTranslationLimits | undefined> {
         try {
-            const raw = await this.call<DshCotTranslationLimits>('cotTranslation/limits', {}, 10_000);
-            if (typeof raw.maxTextChars !== 'number' || raw.maxTextChars <= 0) {
+            const raw = unwrapRemoteResult(await this.call<unknown>('cotTranslation/limits', {}, 10_000)) as DshCotTranslationLimits | undefined;
+            if (raw === undefined || typeof raw.maxTextChars !== 'number' || raw.maxTextChars <= 0) {
                 return undefined;
             }
             if (raw.preferences === null || typeof raw.preferences !== 'object') {
@@ -3481,16 +3576,29 @@ export class DshService {
         if (text === '') {
             return undefined;
         }
+        const request = {
+            text,
+            targetLanguage,
+            ...(provider === undefined ? {} : { provider }),
+        };
         try {
-            const result = await this.call<unknown>('cotTranslation/translate', {
-                text,
-                targetLanguage,
-                ...(provider === undefined ? {} : { provider }),
+            const result = unwrapRemoteResult(await this.call<unknown>('cotTranslation/translate', {
+                ...request,
                 ...(this.currentSessionId === undefined ? {} : { sessionId: this.currentSessionId }),
-            }, 60_000);
-            return typeof result === 'string' ? result : undefined;
-        } catch {
-            return undefined;
+            }, 60_000));
+            if (typeof result === 'string') return result;
+            throw new Error('translate returned non-string');
+        } catch (first) {
+            // 带 sessionId 的缓存路径失败（会话不 active / 会话 id 过期）时，按上游“省略 sessionId
+            // 即无状态翻译”的语义重试一次；仍失败才交给页面显示原文 + 重试。
+            console.warn('[dsh-cot] translate with sessionId failed:', first instanceof Error ? first.message : String(first));
+            try {
+                const result = unwrapRemoteResult(await this.call<unknown>('cotTranslation/translate', request, 60_000));
+                return typeof result === 'string' ? result : undefined;
+            } catch (second) {
+                console.warn('[dsh-cot] translate failed:', second instanceof Error ? second.message : String(second));
+                return undefined;
+            }
         }
     }
 

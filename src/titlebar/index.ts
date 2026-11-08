@@ -74,5 +74,5 @@ export function installChatTitlebar(
     if (mode === 'selfDrawn') {
         void installSelfDrawnTitlebarMessages(webview, host);
     }
-    // nativeTitle:原生头由宿主渲染,webview 内不挂消息处理
+    // nativeTitle：原生头由宿主渲染，webview 内不挂消息处理
 }

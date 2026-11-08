@@ -32,18 +32,23 @@ interface ReplyFrame {
   text?: unknown
 }
 
-function cotLimitsOf(raw: unknown): CotLimits | undefined {
+const COT_PROVIDERS = ['google', 'bing', 'deepseek-account', 'deepseek-official'] as const
+function isCotProvider(value: unknown): value is string {
+  return typeof value === 'string' && (COT_PROVIDERS as readonly string[]).includes(value)
+}
+
+export function cotLimitsOf(raw: unknown): CotLimits | undefined {
   if (raw === null || typeof raw !== 'object') return undefined
   const value = raw as { maxTextChars?: unknown; preferences?: unknown; availableProviders?: unknown }
   if (typeof value.maxTextChars !== 'number' || !Number.isFinite(value.maxTextChars) || value.maxTextChars <= 0) return undefined
   const prefs = value.preferences as { provider?: unknown; targetLanguage?: unknown } | null | undefined
   if (prefs === null || typeof prefs !== 'object') return undefined
-  const provider = typeof prefs.provider === 'string' ? prefs.provider : ''
-  const targetLanguage = typeof prefs.targetLanguage === 'string' ? prefs.targetLanguage : 'auto'
-  if (provider === '') return undefined
-  const availableProviders = Array.isArray(value.availableProviders)
-    ? value.availableProviders.filter((p): p is string => typeof p === 'string')
-    : [provider]
+  const provider = prefs.provider
+  const targetLanguage = prefs.targetLanguage
+  if (!isCotProvider(provider)) return undefined
+  if (typeof targetLanguage !== 'string') return undefined
+  if (!Array.isArray(value.availableProviders) || !value.availableProviders.every(isCotProvider)) return undefined
+  const availableProviders = [...value.availableProviders]
   return { maxTextChars: value.maxTextChars, preferences: { provider, targetLanguage }, availableProviders }
 }
 

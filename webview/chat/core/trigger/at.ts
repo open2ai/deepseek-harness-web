@@ -115,7 +115,7 @@ export function atTrigger(store: ChatStore): TriggerDef {
     pick(row, helpers) {
       // 引用不进正文：清掉刚输入的 @ token，改成输入框内一条蓝色引用贴片；
       // 发送时由 store 把各贴片 token 转成 @path / @[label](dsh-session:…) 引用行注入 prompt。
-      helpers.clear()
+      // 只调 insertReference：它内部已经清掉 @ token；再 clear 会拿旧 start/caret 二次删除，可能把刚插入的 chip 抹掉。
       const kind = row.kind === 'session' ? 'session' : row.kind === 'directory' ? 'directory' : 'file'
       const label = row.name
       const token = row.value ?? '@' + label

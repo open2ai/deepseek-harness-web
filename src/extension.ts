@@ -13,6 +13,8 @@ import { ChatInputService } from './chatInputService';
 import { type DshContentPart, FEEDBACK_CATEGORIES, type FeedbackCategory, type DshPromptMode, type DshQueueAction, DshRpcError, lateAnswerVerdict, subscribeAccountNotices, toQueueViews } from './dsh';
 import { dshEvents } from './dsh/events';
 import { DshPanel } from './dshPanel';
+import { UNGROUPED_ID, UNGROUPED_NAME, createWorkspaceService, type WorkspaceService } from './workspace/service';
+import type { WorkspaceSessionRow as WsSessionRow } from './workspace/sessions';
 import { openUsageReport, recordUsage } from './usage/report';
 import { createSubmitLedger, placementOf } from './dsh/submissions';
 import type { DshPendingAttachment } from './dsh/submissions';
@@ -2082,6 +2084,31 @@ async function runDshTask(prompt: string, ctx: SelectionContext, mode: 'apply' |
 
 // ---------- 标题栏"工作区"面板 ----------
 
+/** QuickPick 行的状态 → 统一的 iconPath/description（图标列由 QuickPick 自己对齐，label 不再塞 codicon）。 */
+function pickSessionState(s: WsSessionRow): { icon: string; desc: string } {
+    const parts: string[] = [];
+    if (s.current) parts.push('当前');
+    if (s.pendingInteraction === 'approval') parts.push('待审批');
+    else if (s.pendingInteraction === 'plan-review') parts.push('计划待审');
+    else if (s.pendingInteraction === 'question') parts.push('待回答');
+    if (s.running) parts.push('运行中');
+    if ((s.runningSubagentCount ?? 0) > 0) parts.push(`${String(s.runningSubagentCount)} 子代理`);
+    if (s.completed === true) parts.push('已完成');
+    const icon =
+        s.pendingInteraction !== undefined
+            ? 'warning'
+            : s.running
+              ? 'sync~spin'
+              : (s.runningSubagentCount ?? 0) > 0
+                ? 'organization'
+                : s.completed === true
+                  ? 'pass-filled'
+                  : s.current
+                    ? 'check'
+                    : 'history';
+    return { icon, desc: parts.join(' · ') };
+}
+
 type WsPick = vscode.QuickPickItem & {
     action?: 'info' | 'ws' | 'wsnew' | 'session' | 'session-ungrouped' | 'wssessions-more' | 'new';
     workspaceId?: string;
@@ -2089,29 +2116,41 @@ type WsPick = vscode.QuickPickItem & {
     blank?: boolean;
 };
 
-/** 会话行（webview dropdown 展开用） */
-interface WsSessionRow {
-    sessionId: string;
-    title: string;
-    running: boolean;
-    blank: boolean;
-    /** 是否为当前正在使用的会话（用于 QuickPick / dropdown 标“当前”） */
-    current?: boolean;
+
+/** 工作区服务（懒建；依赖全部注入，逻辑在 src/workspace/service.ts）。 */
+let workspaceService: WorkspaceService | undefined;
+function workspaceSvc(): WorkspaceService {
+    workspaceService ??= createWorkspaceService({
+        dsh,
+        ensureChat: () => ensureChatWebview(),
+        waitChatReady: (target) => waitChatReady(target as vscode.Webview),
+        postBusy: (kind) => postToChats({ type: 'busy', kind }),
+        postClear: () => postToChats({ type: 'clear' }),
+        postChatInfoAll: () => {
+            for (const w of new Set([chatTarget, chatPanel?.webview].filter((x): x is vscode.Webview => !!x))) {
+                void postChatInfo(w);
+            }
+        },
+        showInfo: (message) => void vscode.window.showInformationMessage(message),
+        showError: (message) => void vscode.window.showErrorMessage(message),
+        pickFolder: async () => {
+            const picked = await vscode.window.showOpenDialog({ canSelectFolders: true, openLabel: '作为 dsh 工作区' });
+            return picked?.[0]?.fsPath;
+        },
+        warn: (message) => console.warn(message),
+        rawLog: () => !!process.env['DSH_RAWLOG'],
+    });
+    return workspaceService;
 }
 
-/** UI 展示用工作区名：title 优先，缺省用路径末级 */
+/** UI 展示用工作区名：title 优先，缺省用路径末级。 */
 function wsDisplayName(w: { path: string; title: string }): string {
-    return w.title || path.basename(w.path);
+    return workspaceSvc().displayName(w);
 }
 
-/** 列出全部工作区（供 QuickPick / webview dropdown 共用） */
+/** 列出全部工作区（供 QuickPick / webview dropdown 共用）。 */
 async function listAllWorkspaces(): Promise<Array<{ workspaceId: string; path: string; title: string; sessionIds: string[] }>> {
-    return ((await dsh.listWorkspaces()).items ?? []) as Array<{
-        workspaceId: string;
-        path: string;
-        title: string;
-        sessionIds: string[];
-    }>;
+    return workspaceSvc().listAll();
 }
 
 /**
@@ -2264,125 +2303,24 @@ async function openFileInEditor(p: string, line?: number, cwd?: string): Promise
 /** VS Code 内置图片预览支持的扩展名（这些必须走 `vscode.open`，不能被读成文本）。 */
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico']);
 
-/**
- * 「未分组」这一组的伪工作区标识（会话不属于任何工作区时归到这里）。
- *
- * 为什么需要：网页端本来就有这一组；侧栏若没有，那些会话在侧栏里**彻底够不着**（只能去网页端找）。
- * 它没有工作区实体，所以从它打开会话时**不设当前工作区、也不做补登记**（就是"不属于任何工作区"）。
- */
-const UNGROUPED_ID = '__ungrouped__';
-const UNGROUPED_NAME = '未分组';
-
-/** 拉取某工作区的会话（供 QuickPick / webview dropdown 共用）；未分组走另一条判据 */
+/** 拉取某工作区的会话（供 QuickPick / webview dropdown 共用）；未分组走另一条判据。 */
 async function listWorkspaceSessionsOf(wsId: string): Promise<WsSessionRow[]> {
-    if (wsId === UNGROUPED_ID) {
-        return dsh.listUngroupedSessions() as Promise<WsSessionRow[]>;
-    }
-    return dsh.listWorkspaceSessions(wsId) as Promise<WsSessionRow[]>;
+    return workspaceSvc().listSessionsOf(wsId);
 }
 
-/**
- * 切到工作区并开新会话（供 QuickPick / webview dropdown 共用；调用方负责关 UI）。
- *
- * **自己兜错、返回成败**（不往外抛）：新建会话这一步失败时宿主可能已经**建好了会话但没挂上工作区**
- * （`session/workspace-attach-failed`）—— 那种会话会以「未分组」留在列表里，必须让用户看见这条错误，
- * 而不是"点了没反应"。报错只在这里做一次，调用方按返回值决定要不要关 UI / 报失败，避免重复弹。
- * @returns 真的建好并切过去了才 true
- */
+/** 切到工作区并开新会话（自己兜错、返回成败）。 */
 async function wsSwitchNew(wsId: string): Promise<boolean> {
-    try {
-        if (!(await ensureChatWebview())) {
-            throw new Error('聊天视图未就绪，请先打开侧边栏 DSH 面板');
-        }
-        dsh.setCurrentWorkspace(wsId);
-        await dsh.newSession(wsId);
-        postToChats({ type: 'clear' });
-        for (const w of new Set([chatTarget, chatPanel?.webview].filter((x): x is vscode.Webview => !!x))) {
-            void postChatInfo(w);
-        }
-        vscode.window.showInformationMessage('已切换工作区');
-        return true;
-    } catch (e) {
-        // 失败可能已经留下一条"建好但没归属"的会话，把原始错误一起写进控制台便于对账
-        console.warn(`[dsh-ws] 新建会话失败 ws=${wsId}：${e instanceof Error ? e.message : String(e)}`);
-        vscode.window.showErrorMessage(`新建会话失败：${e instanceof Error ? e.message : String(e)}`);
-        return false;
-    }
+    return workspaceSvc().switchNew(wsId);
 }
 
-/** 把会话恢复到当前聊天（供 QuickPick / webview dropdown 共用；调用方负责关 UI）。
- *  `wsId` 传 `undefined` = 这一组是「未分组」：**不设当前工作区、也不补登记**（它本来就不属于任何工作区）。 */
+/** 把会话恢复到当前聊天；`wsId` 传 `undefined` = 未分组。 */
 async function wsRestore(wsId: string | undefined, sessionId: string): Promise<void> {
-    const target = await ensureChatWebview();
-    if (!target) {
-        throw new Error('聊天视图未就绪，请先打开侧边栏 DSH 面板');
-    }
-    if (!(await waitChatReady(target))) {
-        throw new Error('聊天页面尚未就绪，请稍后重试');
-    }
-    if (wsId === undefined) {
-        dsh.setCurrentWorkspace(undefined);
-    } else {
-        dsh.setCurrentWorkspace(wsId);
-        // 侧栏里这个会话是「工作区成员 或 cwd 与该工作区一致」才出现的；后一种并没有登记进成员表，
-        // 网页端就仍显示「未分组」。用户既然从这个工作区点开了它，就把它补登记进该工作区，两边从此一致。
-        void dsh
-            .bindSessionToWorkspace(wsId, sessionId)
-            .then((bound) => {
-                if (bound) {
-                    console.log(`[dsh-ws] 会话已补登记进工作区 session=${sessionId} ws=${wsId}`);
-                }
-            })
-            .catch((e: unknown) => {
-                console.warn(`[dsh-ws] 会话补登记失败 session=${sessionId} ws=${wsId} error=${e instanceof Error ? e.message : String(e)}`);
-            });
-    }
-    postToChats({ type: 'busy', kind: 'loading' }); // 恢复历史期间：composer 禁用 + 轻量占位
-    // 抛错也要解除 loading：本函数**没有** catch，直接抛出去会让界面永远停在「深度求索中」
-    const messages = await dsh.restoreSession(sessionId).catch((e: unknown) => {
-        postToChats({ type: 'busy', kind: null });
-        throw e;
-    });
-    console.warn(`[dsh-restore] session=${sessionId} messages=${messages.length}`);
-    if (process.env['DSH_RAWLOG']) {
-        // 历史用量/计时一致性诊断：打印每条 assistant 消息当前拿到的上游字段
-        for (const m of messages) {
-            if (m.role !== 'assistant') {
-                continue;
-            }
-            console.log(
-                `[dsh-raw] history-assistant len=${m.text.length} provider=${m.provider ?? '-'} model=${m.model ?? '-'} ` +
-                    `in=${m.inputTokens ?? '-'} out=${m.outputTokens ?? '-'} cache=${m.cacheReadTokens ?? '-'} ` +
-                    `wall=${m.wallSec ?? '-'} ttft=${m.ttftSec ?? '-'} tps=${m.tps ?? '-'}`
-            );
-        }
-    }
-    // 历史**不再走页面重建**：行由宿主下发（上面的 restoreSession 已触发），页面整表替换即可。
-    for (const w of new Set([chatTarget, chatPanel?.webview].filter((x): x is vscode.Webview => !!x))) {
-        void postChatInfo(w);
-    }
-    postToChats({ type: 'busy', kind: null });
+    return workspaceSvc().restore(wsId, sessionId);
 }
 
-/** 新建工作区（弹目录选择；供 QuickPick / webview dropdown 共用） */
+/** 新建工作区（弹目录选择）。 */
 async function wsCreateNew(): Promise<boolean> {
-    const picked = await vscode.window.showOpenDialog({
-        canSelectFolders: true,
-        openLabel: '作为 dsh 工作区',
-    });
-    if (!picked || picked.length === 0) {
-        return false;
-    }
-    const dir = picked[0].fsPath;
-    const created = await dsh.createWorkspace(dir);
-    dsh.setCurrentWorkspace(created.workspace.workspaceId);
-    await dsh.newSession(created.workspace.workspaceId);
-    postToChats({ type: 'clear' });
-    for (const w of new Set([chatTarget, chatPanel?.webview].filter((x): x is vscode.Webview => !!x))) {
-        void postChatInfo(w);
-    }
-    vscode.window.showInformationMessage(`已新建并切换到工作区：${created.workspace.title || path.basename(dir)}`);
-    return true;
+    return workspaceSvc().createNew();
 }
 
 /**
@@ -2408,6 +2346,14 @@ async function showWorkspacePicker(): Promise<void> {
     } catch (e) {
         vscode.window.showErrorMessage((e as Error).message);
         return;
+    }
+
+    // 当前工作区以**当前会话的成员表归属**为准：插件本地 currentWorkspaceId 可能落后于
+    // 当前打开的会话（例如从网页/其他入口恢复过 dsh_desktop 的会话），否则弹窗顶部会显示错工作区。
+    const currentSessionId = dsh.getCurrentSessionId();
+    if (currentSessionId !== undefined) {
+        const owner = workspaces.find((w) => (w.sessionIds ?? []).includes(currentSessionId));
+        if (owner !== undefined) dsh.setCurrentWorkspace(owner.workspaceId);
     }
 
     const expanded = new Set<string>();
@@ -2466,7 +2412,7 @@ async function showWorkspacePicker(): Promise<void> {
             return undefined;
         }
         return {
-            label: `    $(ellipsis) ${sessionsExpanded.has(workspaceId) ? '收起' : `展开其余 ${hidden} 个会话`}`,
+            label: `      $(ellipsis) ${sessionsExpanded.has(workspaceId) ? '收起' : `展开其余 ${hidden} 个会话`}`,
             action: 'wssessions-more',
             workspaceId,
             alwaysShow: true,
@@ -2478,7 +2424,8 @@ async function showWorkspacePicker(): Promise<void> {
         const curWs = workspaces.find((w) => w.workspaceId === curId);
         const rows: WsPick[] = [
             {
-                label: `$(folder-opened) 工作区：${curWs ? wsDisplayName(curWs) : '未分组'}`,
+                label: `工作区：${curWs ? wsDisplayName(curWs) : '未分组'}`,
+                iconPath: new vscode.ThemeIcon('folder-opened'),
                 description: curId ? '当前' : '未选择',
                 action: 'info',
                 alwaysShow: true,
@@ -2493,8 +2440,9 @@ async function showWorkspacePicker(): Promise<void> {
             const isCurrent = w.workspaceId === curId;
             const open = expanded.has(w.workspaceId);
             rows.push({
-                label: `${open ? '$(chevron-down)' : '$(chevron-right)'} ${isCurrent ? '$(check) ' : ''}${wsDisplayName(w)}`,
-                description: isCurrent ? '当前' : undefined,
+                label: wsDisplayName(w),
+                iconPath: new vscode.ThemeIcon(isCurrent ? 'check' : 'folder'),
+                description: [isCurrent ? '当前' : '', open ? '收起' : '展开'].filter(Boolean).join(' · '),
                 action: 'ws',
                 workspaceId: w.workspaceId,
                 alwaysShow: true,
@@ -2503,7 +2451,7 @@ async function showWorkspacePicker(): Promise<void> {
                 continue;
             }
             rows.push({
-                label: '    $(add) 在此工作区新开会话',
+                label: '      $(add) 在此工作区新开会话',
                 description: isCurrent ? '' : '切换到此工作区',
                 action: 'wsnew',
                 workspaceId: w.workspaceId,
@@ -2514,8 +2462,8 @@ async function showWorkspacePicker(): Promise<void> {
                 for (const s of shownPickSessions(w.workspaceId, sessions)) {
                     rows.push({
                         // 当前会话标选中 + 描述「当前」，与自绘 dropdown 一致
-                        label: `        ${s.current ? '$(check) ' : s.running ? '$(sync~spin) ' : '$(history) '}${s.title}`,
-                        description: s.current ? '当前' : s.running ? '运行中' : '恢复',
+                        label: `      $(${pickSessionState(s).icon}) ${s.title}`,
+                        description: pickSessionState(s).desc,
                         action: 'session',
                         workspaceId: w.workspaceId,
                         sessionId: s.sessionId,
@@ -2535,10 +2483,9 @@ async function showWorkspacePicker(): Promise<void> {
         if (ungrouped !== undefined && ungrouped.length > 0) {
             const ungroupedOpen = expanded.has(UNGROUPED_ID);
             rows.push({
-                label: `${ungroupedOpen ? '$(chevron-down)' : '$(chevron-right)'} ${
-                    curId === undefined ? '$(check) ' : ''
-                }${UNGROUPED_NAME}`,
-                description: curId === undefined ? '当前' : undefined,
+                label: UNGROUPED_NAME,
+                iconPath: new vscode.ThemeIcon(curId === undefined ? 'check' : 'folder'),
+                description: [curId === undefined ? '当前' : '', ungroupedOpen ? '收起' : '展开'].filter(Boolean).join(' · '),
                 action: 'ws',
                 workspaceId: UNGROUPED_ID,
                 alwaysShow: true,
@@ -2546,8 +2493,8 @@ async function showWorkspacePicker(): Promise<void> {
             if (ungroupedOpen) {
                 for (const s of shownPickSessions(UNGROUPED_ID, ungrouped)) {
                     rows.push({
-                        label: `        ${s.current ? '$(check) ' : s.running ? '$(sync~spin) ' : '$(history) '}${s.title}`,
-                        description: s.current ? '当前' : s.running ? '运行中' : '恢复',
+                        label: `      $(${pickSessionState(s).icon}) ${s.title}`,
+                        description: pickSessionState(s).desc,
                         action: 'session-ungrouped',
                         sessionId: s.sessionId,
                         blank: s.blank,
@@ -2560,7 +2507,7 @@ async function showWorkspacePicker(): Promise<void> {
                 }
             }
         }
-        rows.push({ label: '$(new-folder) ＋ 新建工作区…', action: 'new', alwaysShow: true });
+        rows.push({ label: '新建工作区…', iconPath: new vscode.ThemeIcon('new-folder'), action: 'new', alwaysShow: true });
         return rows;
     }
 
@@ -2609,12 +2556,14 @@ async function showWorkspacePicker(): Promise<void> {
                 const id = row.workspaceId;
                 if (expanded.has(id)) {
                     expanded.delete(id);
+                    refresh();
                 } else {
                     expanded.add(id);
-                    refresh();
+                    // 只重画一次：先 load（busy 状态），数据到齐后再整体替换 items。
+                    // 以前先 refresh 再 load 再 refresh，QuickPick 会闪两下并把活动行弹回第一行。
                     await loadSessions(id);
+                    refresh();
                 }
-                refresh();
             } else if (row.action === 'wsnew' && row.workspaceId) {
                 // 成败由 wsSwitchNew 自己报（含"会话已建但没挂上工作区"那种失败）→ 成功才关面板
                 if (await wsSwitchNew(row.workspaceId)) {

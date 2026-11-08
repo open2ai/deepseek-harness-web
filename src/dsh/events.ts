@@ -51,6 +51,14 @@ export interface DshRemoteQuestionRequest {
 }
 
 /** 某个会话等待期间感兴趣的 $events 回调。 */
+export interface DshAnyWaterfall {
+    kind: 'pending' | 'cleared'
+    eventId: string
+    agentId: string
+    event?: string
+    request?: Record<string, unknown>
+}
+
 export interface DshSessionEventHandlers {
     onApproval?: (request: DshRemoteApprovalRequest) => void;
     onQuestion?: (request: DshRemoteQuestionRequest) => void;
@@ -106,6 +114,7 @@ class RemoteEventHub {
     private clientId: string | undefined;
     private readonly handlers = new Map<string, Set<DshSessionEventHandlers>>();
     private readonly streamHandlers = new Set<DshStreamEventHandlers>();
+    private readonly allHandlers = new Set<(event: DshAnyWaterfall) => void>();
     private readonly pending = new Map<string, RemoteInvocation>();
 
     /** 订阅某个 agent/session 在等待期间的审批/提问事件。 */
@@ -129,6 +138,17 @@ class RemoteEventHub {
         };
     }
 
+    /** 订阅所有 waterfall（不区分会话；工作区状态表用）。 */
+    subscribeAll(handler: (event: DshAnyWaterfall) => void): () => void {
+        void this.ensureStarted();
+        this.allHandlers.add(handler);
+        return () => { this.allHandlers.delete(handler); };
+    }
+
+    private notifyAll(event: DshAnyWaterfall): void {
+        for (const handler of this.allHandlers) handler(event);
+    }
+
     /** 订阅非会话作用域的 emit 事件（订阅即确保流已拉起）。 */
     subscribeStream(handlers: DshStreamEventHandlers): () => void {
         void this.ensureStarted();
@@ -149,6 +169,7 @@ class RemoteEventHub {
             value: outcome,
         });
         this.pending.delete(eventId);
+        this.notifyAll({ kind: 'cleared', eventId, agentId: pending.agentId });
         return true;
     }
 
@@ -166,6 +187,7 @@ class RemoteEventHub {
             value: { answers },
         });
         this.pending.delete(eventId);
+        this.notifyAll({ kind: 'cleared', eventId, agentId: pending.agentId });
         return true;
     }
 
@@ -184,6 +206,7 @@ class RemoteEventHub {
             },
         });
         this.pending.delete(eventId);
+        this.notifyAll({ kind: 'cleared', eventId, agentId: pending.agentId });
         return true;
     }
 
@@ -348,6 +371,13 @@ class RemoteEventHub {
             agentId: frame.agentId,
             event: frame.event ?? '',
         };
+        this.notifyAll({
+            kind: 'pending',
+            eventId: frame.eventId,
+            agentId: frame.agentId,
+            event: frame.event,
+            request: frame.request ?? {},
+        });
         const set = this.handlers.get(frame.agentId);
         // 诊断（DSH_RAWLOG）：这一层最容易**静默失效** —— 没有 handler 的 waterfall 帧被直接丢弃，
         // 上游那个工具调用就一直等审批，界面什么都不显示（表现为「卡住不动，不自己判断」）。

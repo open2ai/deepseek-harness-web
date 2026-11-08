@@ -171,6 +171,9 @@ const NO_ARGS_METHODS = new Set<string>([
     // 会被网关拒：`gateway/arguments-invalid: args fields do not match the descriptor:
     // unexpected "request"` —— 真机点麦克风报的就是这条。
     'speech/catalog',
+    // 思考过程机器翻译：`cotTranslation.limits()` 是无参 remote（descriptor parameters: []）。
+    // 多包一层 request 会被网关拒：unexpected "request"，页面拿不到 limits 就不显示翻译入口。
+    'cotTranslation/limits',
 ]);
 /** 平铺 args 的方法（payload 对象直接作为 args 的字段集）。
  *

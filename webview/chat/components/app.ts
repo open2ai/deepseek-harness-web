@@ -377,6 +377,14 @@ export function Composer({ store }: { store: ChatStore }) {
       editorAccessRef.current?.focus()
     },
     contains: (node) => editorAccessRef.current?.contains(node) === true,
+    // 触发器菜单的原子插入必须接到编辑器 access 上；否则 at.pick 只落了 store.addRef，
+    // 随后 ComposerInput 的同步 effect 会用“编辑器里没有引用”的草稿把 store.refs 清空。
+    insertCommand: (name) => {
+      editorAccessRef.current?.insertCommand?.(name)
+    },
+    insertReference: (ref) => {
+      editorAccessRef.current?.insertReference?.(ref)
+    },
   }
   const trigger = useTriggerMenu([slashTrigger(store), atTrigger(store)], store, triggerInput)
 
@@ -670,7 +678,7 @@ function TitlebarShell() {
     <div class="title-spacer"></div>
     <div id="titleWorkWrap">
       <button class="title-btn" id="titleWorkBtn" title="工作区"><span class="codicon codicon-folder"></span></button>
-      <div id="titleWsDropdown" class="hidden"><input id="wsSearch" type="text" placeholder="搜索工作区/会话" autocomplete="off" spellcheck="false" /><div id="wsRows"></div></div>
+      <div id="titleWsDropdown" class="hidden"></div>
     </div>
     <button class="title-btn" data-cmd="newSession" title="开启新会话"><span class="codicon codicon-add"></span></button>
     <button class="title-btn hidden" data-cmd="openInBrowser" title="在浏览器中打开"><span class="codicon codicon-globe"></span></button>

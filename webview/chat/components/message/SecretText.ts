@@ -28,7 +28,7 @@ export function SecretText({ text, refs }: { text: string; refs?: RefSnap[] }) {
     const revealed = revealedRaw === text
     const shown = revealed ? text : masked
     return html`<span class="secret-text" data-secret=${masked === text ? undefined : ''}>
-    ${refs === undefined ? shown : refText(shown, refs)}${masked === text
+    ${refText(shown, refs)}${masked === text
       ? null
       : html`<button type="button" class="secret-toggle" aria-pressed=${revealed}
           aria-label=${revealed ? '重新遮挡凭据原文' : '显示凭据原文'}
