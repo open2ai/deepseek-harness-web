@@ -7,6 +7,13 @@
 // 本模块负责维护一条可重连的 $events 流，并按会话把请求投递给聊天层。
 // 另有 emit 帧（上游广播，无 agentId、无需应答）走 subscribeStream，给非会话作用域的订阅者
 // （如设置文档变更）——两条通道各自分发，互不影响。
+//
+// **本层不维护转发白名单**：emit 一律 (event, args) 原样交给订阅方，未知事件天然被忽略，
+// 过滤在各订阅者（settings.ts / control.ts / goal-activation.ts / account-notices.ts）。
+// dsh 0.2.2-rc.2 的转发清单只**新增**了一条 emit `web/providers-changed`（无 payload），
+// 零删除、零改名 ⇒ 本层零改动。
+// 本插件不消费它：网页搜索提供方设置页属于「面不在范围」的 A 类（见偏离登记文档），
+// 会话区没有对应的呈现。这条留痕是为了下次升级复核时不必再查一遍。
 import { openMuxStream, sendRemoteEventResult } from './api';
 import { jsonPreview } from './trace';
 

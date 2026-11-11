@@ -1,5 +1,6 @@
 // 展示层纯函数(无状态/DOM):工具名中文化、消息统计与底部统计条文案。
 // 与旧 chat.ts 逻辑一致,供组件与 store 复用。
+import { isOfficeTool, officeRowModelOf, parsePatchTargets, patchInputOf, patchSummaryOf } from './tool-row-models'
 
 /** turn/end 终止状态角标：直接回显上游 reason.kind 原值（completed 或无值返回空）。与 src/dsh/session.ts 一致。 */
 export function turnStatusBadge(kind: string | undefined): string {
@@ -44,6 +45,9 @@ const TOOL_TITLES: Record<string, string> = {
   pwsh: '运行命令',
   read_image: '读取图片',
   apply_patch: '应用补丁',
+  office_render: '渲染文档',
+  office_convert: '转换文档',
+  office_recalculate: '重算工作簿',
   grep: '搜索文件内容',
   glob: '查找文件',
   web_search: '网页搜索',
@@ -111,6 +115,9 @@ const TOOL_VARIANTS: Record<string, string> = {
   write: 'write',
   edit: 'edit',
   run_code: 'code',
+  office_render: 'read',
+  office_convert: 'read',
+  office_recalculate: 'read',
   cordis_package_inspect: 'read',
   cordis_runtime_inspect: 'read',
   cordis_run: 'others',
@@ -230,6 +237,10 @@ export function toolIconOfTool(name: string): string {
     edit: 'edit',
     str_replace_editor: 'edit',
     apply_patch: 'diff-added',
+    // Office 三件套：上游用自绘的 browse 图标，这里取语义最近的 codicon（近似，不追像素）
+    office_render: 'file-media',
+    office_convert: 'file-media',
+    office_recalculate: 'file-media',
     // `glob` 与 `grep` 同属上游的 `search` 变体 → **同一个放大镜**（不是文件夹图标）
     glob: 'search',
     grep: 'search',
@@ -326,6 +337,14 @@ export function codeBodyOf(argsRaw: string | undefined): string | null {
  *  bash 类取 description/command；read/web_fetch 类取 path/file_path/url；search 类取 query/pattern。
  *  取首个命中字符串的首行，超长截断）。无/解析失败返回 ''。 */
 export function deriveToolSummary(argsRaw: string | undefined, name?: string): string {
+  // Office / 补丁两类不走通用摘要键：前者取输入路径（可带目标格式），后者按文件头列文件。
+  // 页面渲染层还会用带 cwd 的同名模型覆盖一次（这里兜底给其他消费方用）。
+  if (isOfficeTool((name ?? '').toLowerCase())) {
+    return clipLine(officeRowModelOf((name ?? '').toLowerCase(), argsRaw, undefined).summary)
+  }
+  if ((name ?? '').toLowerCase() === 'apply_patch') {
+    return clipLine(patchSummaryOf(parsePatchTargets(patchInputOf(argsRaw))))
+  }
   if (!argsRaw) return ''
   const lower = (name ?? '').toLowerCase()
   let obj: unknown

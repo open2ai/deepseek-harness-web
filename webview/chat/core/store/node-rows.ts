@@ -66,7 +66,14 @@ function toChatRowFromNode(r: RenderRow, changesSummary?: Record<string, unknown
         case 'context':
             return { kind: 'context', key: keyOf(r.key), content: asBlockArray(r.content), source: r.source, provenance: contextProducer(r.source), form: contextForm(r.source) }
         case 'trigger':
-            return { kind: 'trigger', key: keyOf(r.key), source: r.source, content: asBlockArray(r.content), time: formatMsgClock(r.timeMs) }
+            return {
+                kind: 'trigger',
+                key: keyOf(r.key),
+                source: r.source,
+                content: asBlockArray(r.content),
+                time: formatMsgClock(r.timeMs),
+                ...(r.continuation === true ? { continuation: true } : {}),
+            }
         case 'assistant': {
             const process: DshTurnProcess = {
                 answerAnchorSeq: r.answerAnchorSeq,

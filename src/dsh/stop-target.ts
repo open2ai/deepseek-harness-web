@@ -1,12 +1,13 @@
-// **停止这一轮的走法**：普通会话发 `session.cancel`，**子会话**改走父级中断。
+// **停止这一轮的走法**：普通会话发 `session.cancel`，**子会话**改走子会话中断。
 //
 // 为什么不能一律 `session.cancel`：分叉/子智能体会话在服务端挂在一个
 // **直接父**名下，`session.cancel` 会被拒（`session/agent-busy`）—— 界面表现为「停止按钮永远无效」，
-// 只能去网页端停或干等。上游同一个 `Session.cancel()` 里就是按"有没有父地址"分流的（版本与行号见
-// 上游同款）；这里的判据与它逐条同口径：
+// 只能去网页端停或干等。上游同一个 `Session.cancel()` 里就是按"有没有父地址"分流的；
+// 这里的判据与它逐条同口径：
 //
-//   · 有地址 → `subagents.interruptByParent(childSessionId, parentSessionId, 'continuable')`
-//     —— 走的是**持久化的父地址权威**，父 Agent 不在线也照样能中断；
+//   · 有地址 → 子会话中断。dsh 0.2.2-rc.2 把这个远端**改名并收窄**成了
+//     `subagents.interruptByUser(childSessionId)`：只收目标会话一个形参，授权改按目标会话校验；
+//     0.2.2-rc.1 及更早是带父地址与可继续语义的三形参版本，本插件基线已抬到 0.2.2-rc.2，只发新名。
 //   · 没有地址 → `session.cancel({ sessionId })`（与上游的退化情形一致：拿不到地址就只能试这一条，
 //     失败会被上层报出来）。
 //
@@ -27,13 +28,18 @@ export interface DshSubagentAddress {
 
 /** 一次停止要走的方法与参数（宿主只负责拼，RPC 由调用方发）。 */
 export interface DshStopTarget {
-    method: 'subagents.interruptByParent' | 'session.cancel';
+    method: 'subagents.interruptByUser' | 'session.cancel';
     params: Record<string, string>;
 }
 
 /**
  * 停止这一轮该发哪个 remote。
  *
+ * **dsh 0.2.2-rc.2 改名**：旧名 `subagents/interruptByParent(childSessionId, parentSessionId, 'continuable')`
+ * 已不存在，0.2.2-rc.2 是 `subagents/interruptByUser(childSessionId)` —— 只剩目标会话**一个**形参，
+ * 授权口径也从「持久父地址权威」改成「按目标 Session 校验」。
+ * 父地址仍然要判：它决定走子会话中断还是普通 `session/cancel`（与上游 `Session.cancel()` 同口径），
+ * 只是不再作为参数上送。
  * @param sessionId - 当前会话。
  * @param address - 它的直接父地址（没有 = 普通会话）。
  * @returns 方法与参数（参数名与上游远端签名逐字一致）。
@@ -42,13 +48,6 @@ export function stopTargetOf(sessionId: string, address: DshSubagentAddress | un
     if (address === undefined || address.parentSessionId === '') {
         return { method: 'session.cancel', params: { sessionId } };
     }
-    return {
-        method: 'subagents.interruptByParent',
-        params: {
-            childSessionId: address.childSessionId,
-            parentSessionId: address.parentSessionId,
-            // 上游 `cancel()` 传的就是这一个字面量：可继续子会话的中断走持久父地址权威
-            mode: 'continuable',
-        },
-    };
+    // 参数名逐字对齐 0.2.2-rc.2 的 `interruptByUser(childSessionId: SessionId)`
+    return { method: 'subagents.interruptByUser', params: { childSessionId: address.childSessionId } };
 }

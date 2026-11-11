@@ -59,7 +59,7 @@ export function createChatStore(host: ChatHost): ChatStore {
   const prefs = createPrefs()
 
   // 3. 发送动作（跨输入区 + 目录 + 消息域 + 队列卡，依赖注入）
-  const outbox = createOutbox({ host, composer, catalogs, messages })
+  const outbox = createOutbox({ host, composer, catalogs, messages, continuation: status.store.conversationContinuation })
   // 语音输入（实验）：录音在宿主；这里只维护状态 + 把转写文字插到光标处（借用 composer.insertText）
   const voice = createVoice(host, composer.store.insertText)
   // 消息反馈：与其它切片无 import 边，装配层直接持有
@@ -96,6 +96,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     promptError: messages.store.promptError,
     sendingRpcId: messages.store.sendingRpcId,
     markSending: messages.store.markSending,
+    // 继续生成已点、等宿主回帧（防双击 + 主钮忙碌态）
+    continuationPending: messages.store.continuationPending,
     sessionObserved: messages.store.sessionObserved,
     turnRunning: messages.store.turnRunning,
     subagentFacts: messages.store.subagentFacts,
@@ -132,6 +134,7 @@ export function createChatStore(host: ChatHost): ChatStore {
     foldOuter: messages.foldOuter,
     // 发送动作
     send: outbox.store.send,
+    continueGeneration: outbox.store.continueGeneration,
     suggestion: outbox.store.suggestion,
     forkAt: outbox.store.forkAt,
     // 消息反馈（👍/👎）
@@ -215,6 +218,8 @@ export function createChatStore(host: ChatHost): ChatStore {
     cancelQuestion: question.store.cancelQuestion,
     // 会话状态切片
     busy: status.store.busy,
+    // 可续跑的失败回合 seq（null = 不可续）；输入区「继续生成」入口的唯一资格来源
+    conversationContinuation: status.store.conversationContinuation,
     sessionCwd: status.store.sessionCwd,
     sessionStats: status.store.sessionStats,
     tokenUsage: status.store.tokenUsage,

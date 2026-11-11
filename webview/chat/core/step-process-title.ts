@@ -27,6 +27,7 @@ export type ProcessActivity =
   | 'subagents'
   | 'plan'
   | 'questions'
+  | 'context'
   | 'tools'
 
 /**
@@ -82,6 +83,7 @@ const DONE_LABELS: Readonly<Record<ProcessActivity, string>> = {
   subagents: '已协调子智能体',
   plan: '更新了计划',
   questions: '向用户提出了问题',
+  context: '已注入上下文',
   tools: '已调用工具',
 }
 
@@ -99,6 +101,7 @@ const LIVE_LABELS: Readonly<Record<ProcessActivity, string>> = {
   subagents: '正在协调子智能体',
   plan: '正在更新计划',
   questions: '等待你的操作',
+  context: '正在注入上下文',
   tools: '正在调用工具',
 }
 
@@ -118,6 +121,8 @@ export function rankActivities(chain: readonly ActivityItemLike[]): ProcessActiv
     const kind = activityOfToolName(item.name)
     counts.set(kind, (counts.get(kind) ?? 0) + 1)
   }
+  // 全上下文注入的链按一个「上下文」类别计（与分组口径同源）
+  if (counts.size === 0 && chain.length > 0 && chain.every((item) => item.kind === 'context')) return ['context']
   return [...counts.entries()]
     .map(([kind, count], index) => ({ kind, count, index }))
     .sort((left, right) => (right.count - left.count) || (left.index - right.index))
@@ -195,6 +200,7 @@ const PREPARE_LABELS: Readonly<Record<Exclude<ProcessActivity, 'thinking'>, stri
   subagents: '准备协调子智能体',
   plan: '准备更新计划',
   questions: '准备提问',
+  context: '准备注入上下文',
   tools: '准备调用工具',
 }
 
@@ -429,6 +435,11 @@ export function processActivityOfNodes(nodes: readonly ActivityNodeLike[]): Acti
         if (Array.isArray(subCalls)) for (const child of subCalls) visit(child)
     }
     for (const node of nodes) if (node.kind === 'tool-call') visit(node.data['root'])
+    // 分组里**全是上下文注入**时按一个「上下文」类别计（成员数即计数，混排不计）——
+    // 上游 0.2.2-rc.2 新增的口径：这类片不推进度文案，只说明这里注入了上下文。
+    if (counts.size === 0 && nodes.length > 0 && nodes.every((node) => node.kind === 'context')) {
+        counts.set('context', nodes.length)
+    }
     if (running === undefined) runningDetail = liveReasoningDetailOfNodes(nodes)
     return {
         // 调用数降序、同数按首次出现（上游 `sort` 的口径）

@@ -245,6 +245,15 @@ export type HostToViewMessage =
       agentPresets?: { presets?: ChatAgentPreset[] }
       agentPreset?: string
       agentPresetLocked?: boolean
+      /**
+       * **可续跑的失败回合 seq**（上游 0.2.2-rc.2 投影的 `conversationContinuation`，取值为可空序号）。
+       *
+       * 为什么由宿主下发而不是页面自己从事件推：这是**服务端准入**的资格（失败符合条件、
+       * 持有真正的空闲、没有待消费的用户输入），页面看得到日志但看不到服务端收件箱，
+       * 自己推必然与准入口径分叉。
+       * `null`/缺省 = 不可续：输入区的「继续生成」入口只在这个值非空且会话空闲时出现。
+       */
+      conversationContinuation?: number | null
     }
   // 显示偏好（全局，与会话无关）：单独一条轻消息，实时跟随只推它，不重拉 chatInfo 那串 RPC。
   // 四项都来自上游「设置 → 通用设置」（宿主 `dsh/settings.ts` 读 + `settings/document-updated` 跟随）；
@@ -363,6 +372,15 @@ export type ViewToHostMessage =
   // edit 只带**文本**：含图/文件的条目在卡片上已被禁用编辑。
   | { type: 'queueUpdate'; itemId: string; action: { kind: 'edit'; text: string } | { kind: 'remove' } | { kind: 'steer' } }
   | { type: 'cancel' }
+  /**
+   * **继续生成**（手动续跑失败的回合）。
+   *
+   * 契约来自上游 0.2.2-rc.2：空的 prompt 内容 + queue 投递方式，且服务端满足「失败符合条件 /
+   * 真正空闲 / 没有待消费的用户输入」才准入 —— 页面**不自己判准入**，只把动作发出去，
+   * 由宿主用空内容提交表达。成功后服务端落一条 `source.kind === 'retry'` 的空用户消息
+   * （呈现成触发卡回执），失败由宿主回错误帧（如服务端忙且原因不可续）。
+   */
+  | { type: 'chatContinue' }
   // 从某条回答分叉出新会话（上游 `session/fork`）：atSeq 是该回答的事件序号，
   // 省略 = 从最后一条已完成回合分叉。宿主负责建子会话、升号并切过去。
   | { type: 'chatFork'; atSeq?: number }

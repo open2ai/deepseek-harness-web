@@ -33,6 +33,8 @@ export interface MessagesSlice {
     /** 已发出、等 Host 接受的提交标识（有值时状态行显示「正在发送消息」） */
     | 'sendingRpcId'
     | 'markSending'
+    /** 继续生成已点、还在等宿主回帧（按钮忙碌态 + 防双击） */
+    | 'continuationPending'
     /** 当前能否观察会话（false = 订阅断线/重连中；运行状态据此冻结计时） */
     | 'sessionObserved'
     | 'runAnchorMs'
@@ -73,6 +75,11 @@ export interface MessagesSlice {
   ): void
   /** 开启（或复用）当前进行中的 assistant 行。 */
   beginAssistant(prompt?: string): void
+  /**
+   * 标记「继续生成已点、等宿主回帧」（按钮忙碌态 + 防双击）。
+   * 清除是自动的：回合开跑、提交失败、换会话/清空，另有 10 秒兜底。
+   */
+  markContinuationPending(): void
   /** 取一个列表内唯一行 key。 */
   nextKey(): number
   /** 在编辑器区打开文件（相对路径按 cwd——会话工作区根——解析）。 */
@@ -190,6 +197,13 @@ export function createMessages(host: ChatHost): MessagesSlice {
    * 「正在发送消息」。接受（台账帧出现同 rpcId）或失败即清除；10 秒兜底防残留。
    */
   const sendingRpcId = signal<string | undefined>(undefined)
+  /**
+   * **继续生成已点、还在等宿主回帧**（按钮忙碌态）。
+   *
+   * 它不是一条提交（没有提交标识、不进台账），但输入区要它挡重复点击；
+   * 置真/清除的时机见 `markContinuationPending`。
+   */
+  const continuationPending = signal(false)
   /** 当前能否观察会话（上游 `RunningStatus.paused` 的事实来源）：默认 true，断线时宿主推 false。 */
   const sessionObserved = signal<boolean>(true)
   /**
@@ -541,6 +555,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
         // "这是子会话"去判新会话的主钮）
         subagentFacts.value = undefined
         turnRunning.value = false
+        // 继续生成的忙碌态属于上一个会话的失败回合：换会话不能带过去
+        clearContinuationPending()
         // 回合号是**会话内**编号：换会话后同一个号会指到别的回合，折叠展开态必须一起清
         turnFoldOpen.value = new Map<number, boolean>()
         // 片级键里也含回合号（`${turn}:${key}`），同样必须清
@@ -625,6 +641,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
         : undefined
     // 停止/插话只认宿主权威：processing 会在回答中被推导成 false
     turnRunning.value = turnActive === true
+    /** 回合真正开跑了 = 继续生成已被接受：按钮忙碌态到这里结束（主钮随即变成「停止」）。 */
+    if (turnActive === true) clearContinuationPending()
     // 子会话事实：与行同帧下发（普通会话不带这个键 → 清成 undefined，别留着上一个会话的）
     subagentFacts.value = subagent
   }
@@ -670,6 +688,8 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
    */
   function failSubmission(rpcId: string | undefined, msgText: string, code?: string): void {
     sendingRpcId.value = undefined
+    // 继续生成失败也走这一格：忙碌态必须一起收掉，否则按钮会卡在「正在发送消息」
+    clearContinuationPending()
     messages.value = messages.value.map((r): ChatRow => {
       if (r.kind !== 'user' || r.failed === true) return r
       // **只标还没被服务端回显认领的行**：已经认领的说明消息确实送到了，它不该被标成「未提交成功」
@@ -749,6 +769,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     // 换会话/重连：上一条提交失败的错误条不属于这个会话，必须清（否则一直挂在输入区上方）
     promptError.value = undefined
     sendingRpcId.value = undefined
+    clearContinuationPending()
     sessionObserved.value = true
     runAnchorMs.value = undefined
     // 「已提交」闩随会话走：换会话 / 重连又该回到欢迎页
@@ -787,6 +808,33 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     }
   }
 
+  /**
+   * **继续生成已点**（按钮忙碌态）：点完立刻置真，挡住第二次点击。
+   *
+   * 清除有三条来路：回合真正开跑（宿主说在跑的那一帧）、提交失败、换会话/清空；
+   * 另有一个 10 秒兜底 —— 宿主没回任何帧时不能把按钮永久卡在忙碌态
+   * （与「等 Host 接受」那条同一量级、同一理由）。
+   */
+  let continuationTimer: ReturnType<typeof setTimeout> | undefined
+  function markContinuationPending(): void {
+    if (continuationTimer !== undefined) {
+      clearTimeout(continuationTimer)
+    }
+    continuationPending.value = true
+    continuationTimer = setTimeout(() => {
+      continuationTimer = undefined
+      continuationPending.value = false
+    }, 10_000)
+  }
+
+  function clearContinuationPending(): void {
+    if (continuationTimer !== undefined) {
+      clearTimeout(continuationTimer)
+      continuationTimer = undefined
+    }
+    continuationPending.value = false
+  }
+
   return {
     store: {      messages,
       view,
@@ -794,6 +842,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
       promptError,
       sendingRpcId,
       markSending,
+      continuationPending,
       sessionObserved,
       runAnchorMs,
       turnRunning,
@@ -823,6 +872,7 @@ function installMappedRows(host: ChatRow[], sessionId?: string, turnActive?: boo
     applyNodeRows,
     failSubmission,
     markSending,
+    markContinuationPending,
     applySubmissions,
     applyHistory,
     loadOlder,

@@ -312,6 +312,8 @@ export function createReducer(deps: ReducerDeps): ReducerSlice {
         break
       case 'chatInfo': {
         status.store.sessionCwd.value = m.cwd ?? ''
+        // 可续跑回合资格的**首帧兜底**（运行期以投影整表为准，轻帧会实时刷新；见 status 切片）
+        status.applyContinuation(m.conversationContinuation)
         const proj = m.projections
         if (proj) {
           // 权限是选择器的域，cast 极短，留在归约器；统计行/plan/goal 的形状解析下沉到 status

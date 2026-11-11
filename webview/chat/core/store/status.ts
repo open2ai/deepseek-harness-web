@@ -8,15 +8,20 @@ import type { ChatStore, GoalActivationView, GoalView, SessionStatsView, TokenUs
 export interface StatusSlice {
   store: Pick<
     ChatStore,
-    'busy' | 'sessionCwd' | 'sessionStats' | 'tokenUsage' | 'planState' | 'goalState' | 'goalActivation' | 'todos' | 'contextFacts' | 'goalAction'
+    'busy' | 'sessionCwd' | 'sessionStats' | 'tokenUsage' | 'planState' | 'goalState' | 'goalActivation' | 'todos' | 'contextFacts' | 'goalAction' | 'conversationContinuation'
   >
   /**
    * 由投影快照刷新会话统计、token 用量、plan 与 goal（形状见各派生函数）。
-   * @param proj - 投影整表
+   * @param proj - 投影整表；里面同名的可续跑回合键也在这里一并消费（见 `applyProjections` 内的说明）
    * @param goalActivation - 目标条的 process-local activation（**不是投影**，跟同一帧来）；
    *   `undefined` = 这一帧没带（如 `chatInfo` 基线）→ **保持原值**，不要误清
    */
   applyProjections(proj: Record<string, unknown>, goalActivation?: GoalActivationView): void
+  /**
+   * 可续跑失败回合 seq 的**首帧兜底**：由宿主随会话基线下发（`null` = 不可续）。
+   * 运行期的变化走投影整表（轻帧实时刷新），不走这里。
+   */
+  applyContinuation(value: number | null | undefined): void
   /** 任务清单整表替换（宿主折叠好下发）；`null` = 没有清单。 */
   applyTodos(todos: readonly TodoItem[] | null | undefined): void
   /** 上下文占用两条投影（发送按钮左侧的环）：两条都没有 → null（整个环不渲染）。 */
@@ -42,6 +47,14 @@ export function createStatus(host: ChatHost): StatusSlice {
   const todos = signal<TodoItem[]>([])
   /** 上下文占用（发送按钮左侧的环）：两条投影都可能缺，都缺就整块不渲染 */
   const contextFacts = signal<{ pressure?: ContextPressure; breakdown?: ContextBreakdown } | null>(null)
+  /**
+   * **可续跑的失败回合 seq**（`null` = 不可续）。
+   *
+   * 主来路是投影整表（运行中那条投影轻帧会实时刷新它，回合失败结算后立刻变），
+   * 首帧兜底由会话基线里的同名字段给。页面的「继续生成」入口只认这个值 + 空闲事实，
+   * 不自己从事件流推资格。
+   */
+  const conversationContinuation = signal<number | null>(null)
   /** plan 投影：能力未组合则键缺失 → 保持 null。 */
   function derivePlanState(proj: Record<string, unknown>): { active: boolean; pending: boolean } | null {
     const p = proj['plan'] as { active?: boolean; pending?: boolean } | undefined
@@ -130,10 +143,28 @@ export function createStatus(host: ChatHost): StatusSlice {
     tokenUsage.value = deriveTokenUsage(projectionValues)
     planState.value = derivePlanState(projectionValues)
     goalState.value = deriveGoalState(projectionValues)
+    /**
+     * 可续跑回合资格也在投影整表里：运行中的投影轻帧会实时刷新它（回合失败结算后立刻变），
+     * 所以**主来路必须是这里**；只在会话基线里读过一次会让按钮延迟出现。
+     * 键缺失 = 这一帧没带这项能力（保持原值），键存在（含 null）= 明确读数。
+     */
+    if ('conversationContinuation' in projectionValues) {
+      conversationContinuation.value = asContinuationSeq(projectionValues['conversationContinuation'])
+    }
     // 激活照**整表语义**替换（新值 `{}` 也是有效值 = "没有当前目标"）；只有"这一帧没带"才保持原值
     if (activation !== undefined) {
       goalActivation.value = { ...activation }
     }
+  }
+
+  /** 可续跑回合 seq 的归一：合法序号（非负安全整数）之外一律当作不可续。 */
+  function asContinuationSeq(raw: unknown): number | null {
+    return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : null
+  }
+
+  function applyContinuation(value: number | null | undefined): void {
+    if (value === undefined) return
+    conversationContinuation.value = asContinuationSeq(value)
   }
 
   function applyTodos(next: readonly TodoItem[] | null | undefined): void {
@@ -170,6 +201,8 @@ export function createStatus(host: ChatHost): StatusSlice {
     tokenUsage.value = null
     planState.value = null
     goalState.value = null
+    // 可续跑资格属于**会话**：换会话必须清，否则会把上一个会话的失败回合当成可续
+    conversationContinuation.value = null
     // 激活随会话一起换：上一个会话的档绝不能留给新会话（宿主也会在基线帧里重发一份）
     goalActivation.value = {}
     todos.value = []
@@ -179,8 +212,9 @@ export function createStatus(host: ChatHost): StatusSlice {
   }
 
   return {
-    store: { busy, sessionCwd, sessionStats, tokenUsage, planState, goalState, goalActivation, todos, contextFacts, goalAction },
+    store: { busy, sessionCwd, sessionStats, tokenUsage, planState, goalState, goalActivation, todos, contextFacts, goalAction, conversationContinuation },
     applyProjections,
+    applyContinuation,
     applyTodos,
     applyContext,
     reset,

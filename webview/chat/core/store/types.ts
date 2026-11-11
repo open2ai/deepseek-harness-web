@@ -418,7 +418,12 @@ export type ChatRow =
       toolName?: string
     }
   | { kind: 'question'; key: number; rpcId: string; sessionId?: string; questions: QuestionSpec[]; disabled: boolean }
-  | { kind: 'trigger'; key: number; source: unknown; content: unknown[]; time: string }
+  | { kind: 'trigger'; key: number; source: unknown; content: unknown[]; time: string;
+      /**
+       * **手动续跑回执**（上游 0.2.2-rc.2 的紧凑继续生成回执）：`source.kind === 'retry'` 且内容为空的
+       * 用户消息对应用户点过一次「继续生成」。这一态**不可展开**、不显示时刻，只有一行回执文案。
+       */
+      continuation?: boolean }
   | { kind: 'notice'; key: number; text: string; command?: string; tone?: 'error' | 'ok' }
 
 /** 本地提交回显的附件（上游 `PendingSubmissionAttachment` 同构：图片带预览、文件带名字/字节）。 */
@@ -638,6 +643,13 @@ export interface ChatStore {
   sendingRpcId: Signal<string | undefined>
   /** 标记/清除"等 Host 接受"的那条（10 秒兜底）。 */
   markSending(rpcId: string | undefined): void
+  /**
+   * **继续生成已点、还在等宿主回帧**（按钮的忙碌态；点完立刻置真，回合开跑或失败即清）。
+   *
+   * 为什么单独一个信号：它不是一条提交（没有 rpcId、不进台账），但输入区需要它在回帧前
+   * 挡住第二次点击，并且主按钮要显示忙碌图标。
+   */
+  continuationPending: Signal<boolean>
   /** 当前能否观察会话（false = 订阅断线/重连中；运行状态据此冻结计时）。 */
   sessionObserved: Signal<boolean>
   /**
@@ -658,6 +670,11 @@ export interface ChatStore {
   subagentFacts: Signal<import('../stop-control').SubagentFacts | undefined>
   /** 过渡态：恢复历史/切工作区等无明确进度等待（驱动 composer 禁用 + 占位/骨架）。null=空闲 */
   busy: Signal<'loading' | 'switching' | null>
+  /**
+   * **可续跑的失败回合 seq**（`null` = 不可续）。主来路是投影整表，首帧兜底来自会话基线。
+   * 输入区的「继续生成」入口只认它 + 空闲事实（判据在 `core/continue-control.ts`）。
+   */
+  conversationContinuation: Signal<number | null>
   /** 当前会话工作区根路径；'' = 未知。终端卡的 cwd 标签在工具调用未带 workdir 时用它兜底（上游同口径） */
   sessionCwd: Signal<string>
   text: Signal<string>
@@ -850,6 +867,13 @@ export interface ChatStore {
   // 动作
   /** 发送。忙时 mode 决定去向：queue = 排队（默认）、steer = 插话；空闲恒排队 */
   send(mode?: 'queue' | 'steer'): void
+  /**
+   * 继续生成（手动续跑失败的回合）：空内容提交，成功后服务端落一条空的重试用户消息。
+   *
+   * 带失败回合 seq 是上游同款的**陈旧性校验**：资格在渲染到点击之间变了（另一个视图先续了、
+   * 或新一轮已开跑）就什么都不发。
+   */
+  continueGeneration(failureSeq: number): void
   cancel(): void
   /** 打开某条排队消息的行内编辑（含非文本附件的条目不该调它） */
   editQueueItem(id: string, text: string): void

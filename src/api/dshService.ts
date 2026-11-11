@@ -3404,20 +3404,38 @@ export class DshService {
     }
 
     /**
-     * 停止当前这一轮：**普通会话走 `session.cancel`，子会话走父级中断**（分流判据见 `stop-target.ts`）。
+     * 停止当前这一轮：**普通会话走 `session.cancel`，子会话走 `subagents/interruptByUser`**
+     * （分流判据见 `stop-target.ts`）。
      *
-     * 与上游同一个 `Session.cancel()`：有父地址就走 `subagents.interruptByParent(child, parent,
-     * 'continuable')`（持久父地址权威，父不在线也能中断），否则退回 `session.cancel`。
+     * 与上游 `Session.cancel()` 同口径：有父地址就走子会话中断（0.2.2-rc.2 起叫
+     * `subagents/interruptByUser(childSessionId)`，按目标会话授权），否则退回 `session.cancel`。
+     * 失败原样上抛（不吞）：`session/agent-busy`（会话由子代理路由持有）、
+     * `remote-access/denied`（非 owner 的调用方）都要让用户看见。
      * @param sessionId - 要停的会话（缺省 = 当前会话）。
      */
     async cancelTurn(sessionId?: string): Promise<void> {
         const sid = sessionId ?? (await this.getSession());
         const target = stopTargetOf(sid, this.subagentAddresses.get(sid));
-        if (target.method === 'subagents.interruptByParent') {
-            await interruptSubagent(target.params['childSessionId'] as string, target.params['parentSessionId'] as string);
+        if (target.method === 'subagents.interruptByUser') {
+            await interruptSubagent(target.params['childSessionId'] as string);
             return;
         }
         await cancelSession(sid);
+    }
+
+    /**
+     * **继续生成**（上游 dsh 0.2.2-rc.2 的「手动续跑」）：`session/prompt` 传**空 content**。
+     *
+     * 服务端准入（上游 0.2.2-rc.2 的空 prompt 准入与续跑状态投影）：mode 必须是 `queue`，
+     * 会话存在**可续的失败回合**
+     * （投影 `conversationContinuation` 非空 —— 只有 RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT /
+     * EMPTY_RESPONSE / STREAM_CLOSED 这几类失败算），且收件箱没有待处理输入；
+     * 否则报 `session/agent-busy`，details.reason = `NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT`。
+     * 成功后本插件按普通提交一样立刻 `beginTurn()`（由调用方做），后续事件走常驻订阅。
+     */
+    async continueGeneration(): Promise<void> {
+        const sid = await this.getSession();
+        await sendPrompt(sid, [], undefined, 'queue');
     }
 
     /**

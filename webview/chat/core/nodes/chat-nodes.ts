@@ -390,24 +390,22 @@ function processSpecOf(ps: ProcessState, turn: TurnTimeline, states: Map<string,
 export function isVisibleChatNode(node: ChatNode): boolean {
     if (node.visibility !== 'visible') return false
     if (node.kind === 'system-prompt') return false
-    if (node.kind === 'context') {
-        /**
-         * ⚠️ **`content` 有两种形状，两种都要认**（2026-10-10 真机）：
-         *   · 数组 —— 常见形态（`[{type:'text',…}]`）；
-         *   · **单个块对象** —— 真窗口里就有这种注入（`{type:'tool-addition',…}`）。
-         * 原先这里 `!Array.isArray(content) → false` 把后一种**整条判成不可见**：工具变更通知行不显示，
-         * 更糟的是它会让下面 `turnNodeKeys` 的分组号错位（不可见节点仍占一个 `brand()`）。
-         * 上游 `isVisibleChatNode` 读的是 `node.data.content`（类型上是块数组），插件这条路上两种都要容。
-         */
-        const content = node.data['content']
-        const blocks = Array.isArray(content) ? content : content === null || content === undefined ? [] : [content]
-        return blocks.some((block) => (block as { type?: unknown })?.type === 'tool-addition' || (block as { type?: unknown })?.type === 'tool-removal')
-    }
+    // 普通上下文注入在 0.2.2-rc.2 起**按新判据呈现**（不再「只留含工具增删块的那一类」）：
+    // 上游本代删掉了对上下文的排除，只保留系统提示词、权限命令与成功的团队开关回执三类不可见。
+    if (node.kind === 'context') return true
     if (node.kind === 'command') {
         const name = node.data['name']
         // permission 上游显式剔除；export/feedback 在网页端是客户端动作（下载/反馈），不产生聊天行；
         // 插件由宿主执行命令会落 command 事件，这里按同一「不可见」口径过滤。
         if (name === 'permission' || name === 'export' || name === 'feedback') return false
+        // 团队开关回执：只有**成功**的 on/off 不占行，失败回执要留下（上游同口径）
+        if (name === 'team') {
+            const args = node.data['args']
+            const outcome = node.data['outcome']
+            const selection = typeof args === 'string' ? args.trim() : ''
+            const failed = outcome !== null && typeof outcome === 'object' && (outcome as { kind?: unknown }).kind === 'error'
+            if (!failed && (selection === 'on' || selection === 'off')) return false
+        }
     }
     return true
 }
@@ -1285,12 +1283,19 @@ export function buildChatNodes(events: readonly SessionEvent[], inboxState?: Inb
                 mkNode(key, steering ? 'steering' : 'user', String(event.seq), event.seq, loc as ChatLocation, 'visible', { text, content: event.data['content'], source })
             } else {
                 // 非 human 的 user/message：context 态 + waking（next-turn 认领）→ turn-trigger 节点（触发卡）。
+                // **空的 retry 消息**（手动继续失败回合留下的那条）与唤醒同支：它没有正文，
+                // 落成「上下文注入」既无从展开、也与上游不一致 —— 0.2.2-rc.2 起按触发卡回执呈现。
                 const waking = messageId !== '' && inboxClaims.waking.has(messageId)
+                const blocks = event.data['content']
+                const continuation = src['kind'] === 'retry' && (Array.isArray(blocks) ? blocks.length === 0 : blocks === undefined)
+                const trigger = waking || continuation
                 mkNode(
-                    waking ? `trigger:${event.seq}` : `context:${event.seq}`,
-                    waking ? 'turn-trigger' : 'context',
+                    trigger ? `trigger:${event.seq}` : `context:${event.seq}`,
+                    trigger ? 'turn-trigger' : 'context',
                     String(event.seq), event.seq, loc as ChatLocation, 'visible',
-                    { text, content: event.data['content'], source }
+                    continuation
+                        ? { text, content: event.data['content'], source, continuation: true }
+                        : { text, content: event.data['content'], source }
                 )
             }
         } else if (event.type === 'system/message') {

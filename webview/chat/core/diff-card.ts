@@ -139,7 +139,13 @@ export function diffCardModel(item: {
   const args = parseArgs(item.argsRaw)
   if (args === null) return null
   const intended = intendedDiff(item.name, args)
-  if (intended === null) return null
+  if (intended === null) {
+    // 补丁类（apply_patch）没有「单文件意图差异」：定稿后只用结果元数据记录的 `meta.diffs`（可多文件）。
+    // 与上游同一支：settled && !error 时按记录差异出卡，缺/空则回退通用卡。
+    if (item.status !== 'ok') return null
+    const appliedPatch = appliedDiffs(item.meta)
+    return appliedPatch === null || appliedPatch === 'empty' ? null : { diffs: appliedPatch }
+  }
   if (item.status === 'running') return { diffs: [intended.diff] }
   if (intended.tool === 'str_replace_editor') return null
   const applied = appliedDiffs(item.meta)

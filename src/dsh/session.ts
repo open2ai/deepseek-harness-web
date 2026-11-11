@@ -913,19 +913,15 @@ export async function cancelSession(sessionId: string): Promise<void> {
     await rpcCall<{ accepted: boolean }>('session.cancel', { sessionId });
 }
 /**
- * **中断子会话**（上游 `subagents/interruptByParent`，签名 = 三个命名形参 + `'continuable'`）。
+ * **中断子会话**（上游 dsh 0.2.2-rc.2：`subagents/interruptByUser(childSessionId)`，**单个**命名形参）。
  *
- * 与 `cancelSession` 的分工见 `stop-target.ts`：子会话走这条（`session/cancel` 会被服务端拒），
- * 而且它按**持久化的父地址权威**工作 —— 父 Agent 不在线也能中断。
+ * 与 `cancelSession` 的分工见 `stop-target.ts`：子会话走这条（`session/cancel` 会被服务端拒）。
+ * 0.2.2-rc.1 → 0.2.2-rc.2 的契约变化：旧名已删，父地址与可继续语义两个形参一并删除，服务端改为
+ * **按目标会话授权**；网关会按描述符校验形参集合，多传一个字段就是 `gateway/arguments-invalid`。
  * @param childSessionId - 子会话。
- * @param parentSessionId - 它的直接父会话。
  */
-export async function interruptSubagent(childSessionId: string, parentSessionId: string): Promise<void> {
-    await rpcCall<unknown>('subagents.interruptByParent', {
-        childSessionId,
-        parentSessionId,
-        mode: 'continuable',
-    });
+export async function interruptSubagent(childSessionId: string): Promise<void> {
+    await rpcCall<unknown>('subagents.interruptByUser', { childSessionId });
 }
 /** 切换模型 / 推理等级（上游 `session/selectModel`，SessionSelectModelRequest = ModelSelection + sessionId）。 */
 export async function selectModel(sessionId: string, provider: string, model: string, reasoningEffort?: string): Promise<void> {

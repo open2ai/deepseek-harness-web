@@ -43,6 +43,14 @@ function contentText(content: readonly unknown[]): string {
 
 export function TriggerRow({ row }: { row: Extract<ChatRow, { kind: 'trigger' }> }) {
     const [open, setOpen] = useState(false)
+    // **手动继续回执**（空 retry 消息）：紧凑单行、无时刻、不可展开 —— 与上游同款。
+    // 它只说明"这里点过一次继续生成"，没有正文可展开，所以不套卡片头/展开体。
+    if (row.continuation === true) {
+        return html`<section class="trigger trigger-continuation" data-generation-continuation>
+    <span class="codicon codicon-play trigger-icon" aria-hidden="true"></span>
+    <span class="trigger-title">已请求继续生成</span>
+  </section>`
+    }
     const details = triggerDetails(row.source)
     const body = contentText(row.content)
     return html`<section class="trigger" data-turn-trigger>

@@ -125,7 +125,7 @@ export type RenderRow =
     | { kind: 'retry'; key: string; retryId: string; retry: number; turn?: number; step?: number; provider?: string; mode?: string; maxRetries?: number; delayMs?: number; failure?: { message?: string; code?: string }; started?: number; cancelled?: boolean }
     | { kind: 'turnNotice'; key: string; tone: 'error' | 'warning'; turn?: number; step?: number; message?: string; code?: string }
     | { kind: 'context'; key: string; content: unknown; source: unknown }
-    | { kind: 'trigger'; key: string; source: unknown; content: unknown; timeMs: number }
+    | { kind: 'trigger'; key: string; source: unknown; content: unknown; timeMs: number; continuation?: boolean }
     | { kind: 'assistant'; key: string; turn?: number; text: string; done: boolean; chain: RenderChainItem[]; counts: { toolCallCount: number; messageCount: number; subagentCount: number }; answerAnchorSeq: number | null; answerStep: number | null; controlAnchorSeq: number; processStartSeq: number; inlineReasoning: boolean; hasExternalProcess: boolean; hasInterleavedInput: boolean; turnStarted: boolean; turnClosed: boolean; interrupted?: boolean; messageId?: string; seq?: number; timeMs?: number; turnStartMs?: number; status?: string; stats?: Record<string, unknown>; presentedFiles?: Array<{ path: string; description?: string }>; plans?: Array<{ callId: string; markdown: string; title: string }>; changesSeq?: number; pos: number; /** 已回答提问：渲染在过程链之后/正文之前（上游节点序） */ questionReplies?: RenderQuestionReplyRow[]; /**
      * **排序三键**（`(anchor, rank, originalAnchor)`）—— 与上游 `orderedVisibleChatNodes()` 的比较器
      * 逐字同口径（：anchor → rank → originalAnchor → key）。
@@ -412,7 +412,15 @@ function rowsOfNode(node: ChatNode, turn: number, model: ChatNodeModel, assistan
             rows.push({ kind: 'context', key: node.key, content: node.data['content'], source: node.data['source'] })
             break
         case 'turn-trigger':
-            rows.push({ kind: 'trigger', key: node.key, source: node.data['source'], content: node.data['content'], timeMs: node.time })
+            rows.push({
+                kind: 'trigger',
+                key: node.key,
+                source: node.data['source'],
+                content: node.data['content'],
+                timeMs: node.time,
+                // 手动继续（空 retry 消息）的回执要保留这个标记：渲染层据此出紧凑单行
+                ...(node.data['continuation'] === true ? { continuation: true } : {}),
+            })
             break
         case 'turn-process':
             // 控制条的位置 = 首片的 assistant 行位置：在这里把该回合折成 assistant 行，

@@ -2,6 +2,13 @@
 
 All notable changes to the "deepseek-harness-web" extension will be documented in this file.
 
+## [0.1.23-rc.1] — 2026-11-11
+
+### 破坏性变更
+
+- **适配 dsh 0.2.2-rc.2**：dsh子会话停止接口名称与参数变更，旧版本失效。
+- 新增继续生成与续跑回执，补Office行与补丁行，上下文注入改为按工具行呈现
+
 ## [0.1.22-rc.3] — 2026-11-08
 
 ### 变更

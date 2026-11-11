@@ -16,6 +16,7 @@ import { useTriggerMenu } from '../core/trigger/useTrigger'
 import { decideInputKey, resolveSubmitMode } from '../core/inputKeys'
 import { promptErrorTextOf } from '../core/prompt-error'
 import { primaryStops, standaloneStop, parentOffline } from '../core/stop-control'
+import { continueEntry } from '../core/continue-control'
 import { slashTrigger } from '../core/trigger/slash'
 import { atTrigger } from '../core/trigger/at'
 import { MessageList } from './message/MessageList'
@@ -286,6 +287,25 @@ export function Composer({ store }: { store: ChatStore }) {
   const lockedByParent = parentOffline(subagent)
   const busy = store.busy.value || lockedByParent // 过渡态 + 父离线锁：都禁用输入
   /**
+   * **「继续生成」入口**（主钮的第三态）：判据集中在纯函数里，组件只消费结果。
+   * 它只在「服务端给了可续失败回合 + 输入区真空闲」时出现；点击后必须把当时读到的
+   * 失败回合序号带回去（动作侧还要再做一次陈旧性校验）。
+   */
+  const continuationEntry = continueEntry({
+    continuation: store.conversationContinuation.value,
+    running,
+    empty,
+    subagent: subagent !== undefined,
+    busy: store.busy.value !== null,
+    sending: store.sendingRpcId.value !== undefined,
+    continuationPending: store.continuationPending.value,
+    pendingSubmissions: store.pendingSubmissions.value.length,
+    queue: store.queueItems.value.length,
+    pendingSteering: store.pendingSteering.value.length,
+    sessionOpen: store.sessionOpenError.value === undefined,
+  })
+  const canContinue = continuationEntry.show
+  /**
    * **主钮与 `Enter` 必须是同一条策略**（`resolveSubmitMode` 只此一处实现）：
    * 按钮投递的正是 `Enter` 会投递的那种方式，文案再按投递方式取。
    *
@@ -299,13 +319,17 @@ export function Composer({ store }: { store: ChatStore }) {
     { running, busyEnter: store.busyEnter.value, steeringAvailable: true },
     'enter',
   )
-  const sendLabel = stops
-    ? '停止生成'
-    : busy
-      ? '加载中…'
-      : running && plainDraft && !uploadsPending
-        ? (submitMode === 'steer' ? '插话发送' : '排队发送')
-        : '发送消息'
+  const sendLabel = canContinue
+    ? '继续生成'
+    : stops
+      ? '停止生成'
+      : busy
+        ? '加载中…'
+        : running && plainDraft && !uploadsPending
+          ? (submitMode === 'steer' ? '插话发送' : '排队发送')
+          : '发送消息'
+  /** 继续生成要带回点击时读到的失败回合序号（`null` 时入口不出现，这里只做类型收窄） */
+  const continueFailureSeq = continuationEntry.failureSeq
   const sel = store.sel.value
   const focusTick = store.focusTick.value
   /** 编辑器的「文本+光标」访问（触发器菜单/退格贴片/参数提示用）。 */
@@ -635,8 +659,19 @@ export function Composer({ store }: { store: ChatStore }) {
                 <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="3"/></svg>
               </button>`
             : null}
-          <button id="send" title=${sendLabel} class=${stops ? 'stop' : ''} disabled=${stops ? false : (!canSend || !!busy)}
-            onClick=${() => (stops ? store.cancel() : store.send(submitMode))}>
+          <button id="send" title=${sendLabel} class=${stops ? 'stop' : canContinue ? 'continue' : ''}
+            disabled=${stops ? false : canContinue ? false : (!canSend || !!busy)}
+            onClick=${() => {
+              if (stops) {
+                store.cancel()
+                return
+              }
+              if (continueFailureSeq !== null) {
+                store.continueGeneration(continueFailureSeq)
+                return
+              }
+              store.send(submitMode)
+            }}>
             <svg class="send-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14V3"/><path d="M3.5 6.5 8 2l4.5 4.5"/></svg>
             <svg class="stop-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="3"/></svg>
           </button>

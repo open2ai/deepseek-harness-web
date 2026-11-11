@@ -4,6 +4,8 @@
 // host 侧另有等价解析( src/dsh/official/exit-status.ts )，二者正则保持一致。
 
 /** 工具变体（决定行图标与卡体） */
+import { isOfficeTool, officeRowModelOf, parsePatchTargets, patchInputOf, singlePatchPathOf } from './tool-row-models'
+
 export type ToolVariant = 'bash' | 'read' | 'search' | 'write' | 'edit' | 'code' | 'others'
 
 const TOOL_VARIANTS: Record<string, ToolVariant> = {
@@ -12,6 +14,7 @@ const TOOL_VARIANTS: Record<string, ToolVariant> = {
   web_search: 'search', search: 'search', grep: 'search', glob: 'search',
   write: 'write', edit: 'edit', str_replace_editor: 'edit', apply_patch: 'edit',
   run_code: 'code', code: 'code',
+  office_render: 'read', office_convert: 'read', office_recalculate: 'read',
 }
 
 /** 参数里可打开的路径键与适用变体（哪些工具的参数里带可打开路径）。 */
@@ -27,7 +30,11 @@ const FILE_PATH_VARIANTS = new Set<ToolVariant>(['read', 'write', 'edit'])
  * @returns 原样路径（不解析、不拼绝对路径——那由宿主按会话工作区根做）。
  */
 export function filePathOf(name: string, argsRaw?: string): string | undefined {
-  if (!FILE_PATH_VARIANTS.has(classifyTool(name)) || !argsRaw) return undefined
+  if (!argsRaw) return undefined
+  // Office 行可点的是输入路径；补丁行只有单文件（新增/更新且未移动）才有单一目标。
+  if (isOfficeTool(name)) return officeRowModelOf(name, argsRaw, undefined).filePath
+  if (name === 'apply_patch') return singlePatchPathOf(parsePatchTargets(patchInputOf(argsRaw)))
+  if (!FILE_PATH_VARIANTS.has(classifyTool(name))) return undefined
   let parsed: unknown
   try {
     parsed = JSON.parse(argsRaw)

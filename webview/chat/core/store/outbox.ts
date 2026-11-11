@@ -7,22 +7,25 @@ import type { ComposerSlice } from './composer'
 import type { QuoteDraft } from './types'
 import type { CatalogsSlice } from './catalogs'
 import type { MessagesSlice } from './messages'
+import type { Signal } from '@preact/signals'
 
 export interface OutboxDeps {
   host: ChatHost
   composer: ComposerSlice
   catalogs: CatalogsSlice
   messages: MessagesSlice
+  /** 可续跑的失败回合 seq（主来路是投影整表）：继续生成动作要拿它做**陈旧性校验**。 */
+  continuation: Signal<number | null>
 }
 
 export interface OutboxSlice {
-  store: Pick<ChatStore, 'send' | 'suggestion' | 'forkAt'>
+  store: Pick<ChatStore, 'send' | 'suggestion' | 'forkAt' | 'continueGeneration'>
   /** 目录到达后裁决被挂起的「/」行（由归约器在 slashCatalog 分支调用）。 */
   resolvePendingSlash(): void
 }
 
 export function createOutbox(deps: OutboxDeps): OutboxSlice {
-  const { host, composer, catalogs, messages } = deps
+  const { host, composer, catalogs, messages, continuation } = deps
   const { text, attachments, images, refs, quotes, setText, runSlash } = composer.store
   const { slashCatalog, requestSlashList } = catalogs.store
   const { processing } = messages.store
@@ -185,5 +188,26 @@ export function createOutbox(deps: OutboxDeps): OutboxSlice {
     host.post({ type: 'chatFork', atSeq: seq })
   }
 
-  return { store: { send, suggestion, forkAt }, resolvePendingSlash }
+  /**
+   * **继续生成**（手动续跑失败的回合）：把动作交给宿主，由宿主以**空内容**提交。
+   *
+   * 三条纪律：
+   * - **陈旧性校验**：资格在「渲染到点击」之间可能已变（另一个视图先续了、新一轮已开跑）。
+   *   投影里的可续回合 seq 不再等于点击时读到的那个，就什么都不发 —— 与上游同一道校验；
+   * - **不本地插行**：服务端会落一条空的重试用户消息，会话区由「触发卡回执」承接；
+   *   本地不造行，避免与回执重复；
+   * - **清错误条 + 置等回帧**：成功时主钮转停止态，失败由宿主回错误帧（错误条同一格显示）。
+   * @param failureSeq - 点击时读到的可续失败回合 seq。
+   */
+  function continueGeneration(failureSeq: number): void {
+    // 主钮这一态只在「输入区真空」时出现；这里再判一次，防误触与竞态
+    if (text.value.trim() !== '') return
+    if (attachments.value.length > 0 || images.value.length > 0 || refs.value.length > 0) return
+    if (continuation.value !== failureSeq) return
+    messages.store.promptError.value = undefined
+    messages.markContinuationPending()
+    host.post({ type: 'chatContinue' })
+  }
+
+  return { store: { send, suggestion, forkAt, continueGeneration }, resolvePendingSlash }
 }

@@ -12,6 +12,7 @@ import { toolTitle, toolIconOfTool, resultFirstLine, autoReviewDenialOf } from '
 import { toolGlyphOf } from './ToolIcons'
 import { toolStateLabel, ToolState } from '../../core/states'
 import { exitBadgeLabel, filePathOf, recordedPathOf, relativizeToCwd, terminalCardModel } from '../../core/terminal'
+import { isOfficeTool, officeRowModelOf, parsePatchTargets, patchInputOf } from '../../core/tool-row-models'
 import { askCardModel } from '../../core/ask-card'
 import { skillCardModel } from '../../core/skill-card'
 import { detailsCardModel } from '../../core/details-card'
@@ -86,7 +87,22 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
   //   非路径摘要经 relativizeToCwd 原样返回，不受影响。
   //   **不做 basename**：工作区外的文件仍显示全路径（与上游一致）；卡片内部路径同样按上游
   //   （读卡相对化 / 差异卡 verbatim / 搜索卡原样）。
-  const genericSummary = relativizeToCwd(item.summary ?? terminal?.description ?? '', cwd)
+  // Office 行：摘要 = 输入路径（转换/重算带目标格式），路径可点（上游 OfficeRow 同口径）。
+  const office = isOfficeTool(item.name)
+    ? officeRowModelOf(item.name, item.argsRaw, cwd, recordedPathOf(item.meta))
+    : null
+  // 补丁行：文件清单逐个可点（上游 FileMutationRow 的 fileTargets）；单文件仍走下面那条 openPath。
+  const patchLinks = item.name === 'apply_patch'
+    ? parsePatchTargets(patchInputOf(item.argsRaw)).map((target) => ({
+        label: target.from === undefined ? target.label : `${target.from} → ${target.label}`,
+        filePath: target.filePath,
+      }))
+    : []
+  const genericSummary = office !== null
+    ? office.summary
+    : patchLinks.length > 0
+      ? relativizeToCwd(patchLinks.map((link) => link.label).join(', '), cwd)
+      : relativizeToCwd(item.summary ?? terminal?.description ?? '', cwd)
   // 提问行摘要照上游 `presentation?.summary ?? answeredSummary() ?? model.summary`：前两级在 ask-card 算出
   // （等待回答 / n 分之 m 已回答 / 已取消 / 已中断），算不出来时（结果坏形、未知错误码）**回落到通用摘要**
   // （`工具名 · 参数首行`）—— 上游此处即取 model.summary，不把摘要位留空。
@@ -142,7 +158,18 @@ export function ToolRow({ item, store }: { item: Tool; store: ChatStore }) {
          而 `DisclosureRow.tsx:112` 是 `(keepContentWhenOpen || !open) && collapsedContent` → 展开即隐藏）。
          2026-10-11 一度改成常显（误以为上游传了 true），已回退。 */ ''}
     ${!open && headSummary
-      ? html`<span class="chain-sep" aria-hidden></span>${openPath !== undefined
+      ? html`<span class="chain-sep" aria-hidden></span>${patchLinks.length > 0
+          ? html`<span class="chain-row-preview chain-file-links">${patchLinks.map((link, index) => [
+              index > 0 ? ', ' : '',
+              link.filePath === undefined
+                ? html`<span class="chain-file-target" title=${link.label}>${relativizeToCwd(link.label, cwd)}</span>`
+                : html`<button type="button" class="chain-row-preview chain-file-link" title=${link.filePath}
+                    onClick=${(e: Event) => {
+                      e.stopPropagation()
+                      if (link.filePath !== undefined) store.openFile(link.filePath, undefined, cwd)
+                    }}>${relativizeToCwd(link.label, cwd)}</button>`,
+            ])}</span>`
+          : openPath !== undefined
           ? html`<button type="button" class="chain-row-preview chain-file-link" title=${openPath}
               onClick=${(e: Event) => {
                 e.stopPropagation()

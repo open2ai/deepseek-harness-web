@@ -200,9 +200,11 @@ const FLAT_ARGS_METHODS = new Set<string>([
     // 【dsh 0.2.0 · 迟到回答】补答「限时提问」的调用：远端签名是**多个命名形参**
     //（agent / callId / answer），必须平铺；包一层 request 会被网关拒（同 goals/* 的教训）。
     'userQuestions/answer',
-    // 【停止子会话】父级中断的远端签名是**三个命名形参**（childSessionId / parentSessionId / mode），
-    // 必须平铺（同上：包一层 request 会被网关拒）。
-    'subagents/interruptByParent',
+    // 【停止子会话】子会话中断的远端签名在 dsh 0.2.2-rc.2 变成**单个命名形参**
+    // `subagents/interruptByUser(childSessionId)`（旧名 `interruptByParent` 三个形参已删）。
+    // 仍是平铺 args（包一层 request 会被网关拒）；多传 `parentSessionId`/`mode` 会因为
+    // 描述符校验报 `gateway/arguments-invalid`。
+    'subagents/interruptByUser',
     // 【语音输入 v1】`speech/prepare(providerId, options?)`：两个命名形参，必须平铺
     //（参数名见 dsh 生成物 `typert.host.js`；包一层 request 会被网关拒）。
     'speech/prepare',

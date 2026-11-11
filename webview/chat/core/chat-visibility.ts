@@ -1,12 +1,13 @@
 // **聊天区可见性**：一行到底显不显示（独立纯函数；判据只写这一处，渲染处不再各写一遍）。
 //
-// 规则：系统提示词行不显示；普通上下文注入不显示，只有**含**工具增删块的那一类保留
-//（就是工具变更通知行）；其余行照常。
+// 规则（dsh 0.2.2-rc.2 口径）：系统提示词行不显示；权限命令不显示；成功的团队开关回执不显示（失败回执保留）；
+// **普通上下文注入照常显示**。
 //
-// 两个容易踩的点：
-//   1. 可见性 != 形态：这里只要求内容里**有**工具增删块；改成工具变更**形态**还要求每一块都是
-//      （见 `context-body.ts` 的 `toolChange()`）—— 混合内容会留下，并按普通注入行渲染。
-//   2. 只在**渲染层**过滤：数据层不动（被隐藏的行仍在会话日志里，宿主照旧下发）。
+// ⚠️ **本代相对前代是反向调整**：前代「普通上下文注入不显示，只有含工具增删块的那一类保留」，
+// 本代上游删掉了对上下文的排除 —— 工作区指令、技能目录、召回等注入现在都要出现在会话区，
+// 并按工具行呈现、可展开。别再把旧规则抄回来。
+//
+// 只在**渲染层**过滤：数据层不动（被隐藏的行仍在会话日志里，宿主照旧下发）。
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
@@ -28,11 +29,15 @@ export function hasToolChangeBlock(content: readonly unknown[] | unknown): boole
 }
 
 /**
- * 一条 `context` **链项**是否进聊天区（与行的规则同源，见 `isVisibleChatRow`）。
- * @param entry - 链项（只用 `kind` 与 `context` 的 `content`）。
+ * 一条 `context` **链项**是否进聊天区：**恒可见**。
+ *
+ * 0.2.2-rc.2 上游删掉了「普通上下文不显示、只留工具增删通知」的排除规则，工作区指令与技能目录等注入
+ * 都要按工具行呈现且可展开。保留这个函数是为了让调用点语义不变（判据仍只有这一处），
+ * 也便于将来若再收紧时只改这里。
+ * @param _entry - 链项（当前不参与判定）。
  */
-export function isVisibleContextItem(entry: { kind: string; content?: readonly unknown[] }): boolean {
-  return entry.kind !== 'context' || hasToolChangeBlock(entry.content ?? [])
+export function isVisibleContextItem(_entry: { kind: string; content?: readonly unknown[] }): boolean {
+  return true
 }
 
 /** 链上的一项（可见性判定只用这两件事）。 */

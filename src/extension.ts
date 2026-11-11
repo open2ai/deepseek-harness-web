@@ -707,6 +707,12 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
                 : agentPresets?.presets.find((p) => p.isDefault)?.id;
         const sessionMeta = projections?.['sessionListMetadata'] as { blank?: boolean } | undefined;
         const agentPresetLocked = sessionMeta?.blank === false;
+        // 继续生成资格（dsh 0.2.2-rc.2 新增投影键）：wire view 是失败回合的 `seq` 或 `null`，
+        // 由上游客户端的续跑状态投影给出。
+        // 旧宿主没有这个键 → 一律 null，页面因此不会出这个入口。
+        const continuationRaw = projections?.['conversationContinuation'];
+        const conversationContinuation =
+            typeof continuationRaw === 'number' && Number.isFinite(continuationRaw) ? continuationRaw : null;
         // 会话工作区根路径：终端卡 cwd 标签在工具调用未带 workdir 时用它兜底（上游同口径）
         const cwd = await dsh.currentWorkspacePath();
         void webview.postMessage({
@@ -717,6 +723,7 @@ async function postChatInfo(webview: vscode.Webview): Promise<void> {
             agentPresets,
             agentPreset,
             agentPresetLocked,
+            conversationContinuation,
         });
         // 设置偏好兜底对齐：emit 万一收不到，会话/工作区切换时也重读一次（值变了才广播）
         void dsh.readChatPrefs();
@@ -1190,6 +1197,36 @@ function setupChatWebview(
                     }
                 })();
             }
+            return;
+        }
+        if (msg.type === 'chatContinue') {
+            const g = gen.n;
+            void (async () => {
+                try {
+                    // 空 content 的 `session/prompt` = 手动续跑（dsh 0.2.2-rc.2 的「继续生成」）。
+                    // 资格以服务端判定为准：页面给的 conversationContinuation 只是「此刻看起来可续」，
+                    // 可能已被别处消耗掉（另一页面续过、或新输入进了收件箱）。
+                    await dsh.continueGeneration();
+                    // 与普通提交同款：提交这一刻就立起「进行中」，否则按钮会闪回发送态
+                    dsh.beginTurn();
+                    await postChatInfo(webview);
+                } catch (e) {
+                    if (g !== gen.n) {
+                        return;
+                    }
+                    // 失败几乎都是「资格已消失」（session/agent-busy，详见 dshService.continueGeneration），
+                    // 原始英文不该出现在界面上；其余错误照常透传。
+                    const code = e instanceof DshRpcError ? e.code : undefined;
+                    const message = code === 'session/agent-busy'
+                        ? '继续生成不可用：这个回合已不再可续，或还有待处理输入'
+                        : e instanceof Error ? e.message : String(e);
+                    post({
+                        type: 'chatError',
+                        message,
+                        ...(code === undefined ? {} : { code }),
+                    });
+                }
+            })();
             return;
         }
         if (msg.type === 'chatSend') {
